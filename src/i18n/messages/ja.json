@@ -822,6 +822,7 @@
       "expandAllGroups": "すべてのグループを展開",
       "collapseAllGroups": "すべてのグループを折りたたむ",
       "newConversation": "新しい会話",
+      "newConversationShort": "新規",
       "noConversationsFound": "会話が見つかりません。",
       "importLocalSessions": "ローカルセッションをインポート",
       "importing": "インポート中...",

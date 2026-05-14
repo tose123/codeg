@@ -5,10 +5,13 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   Crosshair,
-  EllipsisVertical,
+  Funnel,
+  Plus,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
+import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useSidebarContext } from "@/contexts/sidebar-context"
+import { useTabContext } from "@/contexts/tab-context"
 import {
   SidebarConversationList,
   type SidebarConversationListHandle,
@@ -36,12 +39,19 @@ import {
 export function Sidebar() {
   const t = useTranslations("Folder.sidebar")
   const { isOpen, toggle } = useSidebarContext()
+  const { activeFolder } = useActiveFolder()
+  const { openNewConversationTab } = useTabContext()
   const isMobile = useIsMobile()
   const listRef = useRef<SidebarConversationListHandle>(null)
 
   const [showCompleted, setShowCompleted] = useState(false)
   const [sortMode, setSortMode] = useState<SidebarSortMode>("created")
   const [allExpanded, setAllExpanded] = useState(true)
+  const newConversationButtonLabel = t("newConversationShort")
+  const filterOptionsLabel = `${t("showCompleted")} / ${t("sortBy")}`
+  const toggleExpandLabel = allExpanded
+    ? t("collapseAllGroups")
+    : t("expandAllGroups")
 
   useEffect(() => {
     // Hydrate from localStorage after mount to keep SSR/CSR markup consistent.
@@ -71,15 +81,34 @@ export function Sidebar() {
     }
   }, [allExpanded])
 
+  const handleNewConversation = useCallback(() => {
+    if (!activeFolder) return
+    openNewConversationTab(activeFolder.id, activeFolder.path)
+  }, [activeFolder, openNewConversationTab])
+
   if (!isOpen) return null
 
   return (
-    <aside className="flex h-full min-h-0 flex-col overflow-hidden bg-sidebar text-sidebar-foreground select-none">
+    <aside className="@container/sidebar flex h-full min-h-0 flex-col overflow-hidden bg-sidebar text-sidebar-foreground select-none">
       <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border pl-4 pr-2">
-        <div className="flex min-w-0 items-baseline gap-[0.375rem]">
+        <div className="flex min-w-0 items-center gap-4">
           <h2 className="truncate text-[0.875rem] font-bold tracking-[-0.00625rem] text-sidebar-foreground">
             {t("title")}
           </h2>
+          <Button
+            variant="secondary"
+            size="xs"
+            className="h-6 shrink-0 px-2 text-xs hover:bg-primary hover:text-primary-foreground focus-visible:bg-primary focus-visible:text-primary-foreground"
+            onClick={handleNewConversation}
+            disabled={!activeFolder}
+            title={newConversationButtonLabel}
+            aria-label={newConversationButtonLabel}
+          >
+            <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+            <span className="hidden max-w-24 truncate @[18rem]/sidebar:inline-block">
+              {newConversationButtonLabel}
+            </span>
+          </Button>
         </div>
         <div className="flex items-center gap-0.5">
           <Button
@@ -88,20 +117,22 @@ export function Sidebar() {
             className="h-6 w-6 shrink-0 text-muted-foreground"
             onClick={() => listRef.current?.scrollToActive()}
             title={t("locateActiveConversation")}
+            aria-label={t("locateActiveConversation")}
           >
-            <Crosshair className="h-3.5 w-3.5" />
+            <Crosshair aria-hidden="true" className="h-3.5 w-3.5" />
           </Button>
           <Button
             variant="ghost"
             size="icon"
             className="h-6 w-6 shrink-0 text-muted-foreground"
             onClick={handleToggleExpandAll}
-            title={allExpanded ? t("collapseAllGroups") : t("expandAllGroups")}
+            title={toggleExpandLabel}
+            aria-label={toggleExpandLabel}
           >
             {allExpanded ? (
-              <ChevronsDownUp className="h-3.5 w-3.5" />
+              <ChevronsDownUp aria-hidden="true" className="h-3.5 w-3.5" />
             ) : (
-              <ChevronsUpDown className="h-3.5 w-3.5" />
+              <ChevronsUpDown aria-hidden="true" className="h-3.5 w-3.5" />
             )}
           </Button>
           <DropdownMenu>
@@ -110,9 +141,10 @@ export function Sidebar() {
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 shrink-0 text-muted-foreground"
-                title={t("moreOptions")}
+                title={filterOptionsLabel}
+                aria-label={filterOptionsLabel}
               >
-                <EllipsisVertical className="h-3.5 w-3.5" />
+                <Funnel aria-hidden="true" className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">

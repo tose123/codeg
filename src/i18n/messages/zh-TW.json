@@ -822,6 +822,7 @@
       "expandAllGroups": "展開全部分組",
       "collapseAllGroups": "折疊全部分組",
       "newConversation": "新增會話",
+      "newConversationShort": "新增",
       "noConversationsFound": "找不到會話。",
       "importLocalSessions": "匯入本地會話",
       "importing": "匯入中...",

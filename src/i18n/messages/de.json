@@ -822,6 +822,7 @@
       "expandAllGroups": "Alle Gruppen erweitern",
       "collapseAllGroups": "Alle Gruppen einklappen",
       "newConversation": "Neue Konversation",
+      "newConversationShort": "Neu",
       "noConversationsFound": "Keine Konversationen gefunden.",
       "importLocalSessions": "Lokale Sitzungen importieren",
       "importing": "Importiere...",
