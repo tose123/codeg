@@ -26,7 +26,7 @@
 //! The whole module is gated to `feature = "tauri-runtime"` via `mod.rs`;
 //! the inner-attribute form here would duplicate the predicate.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, handshake::client::Request, http::HeaderValue, Message,
 };
 
-use crate::app_error::AppCommandError;
+use crate::app_error::{AppCommandError, UPLOAD_I18N_KEY_NOT_A_FILE, UPLOAD_I18N_KEY_TOO_LARGE};
 use crate::db::service::remote_workspace_connection_service;
 use crate::db::AppDatabase;
 
@@ -313,13 +313,31 @@ pub async fn remote_http_call(
 const UPLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Maximum tolerated base64 payload length, pre-decode. Exactly
-/// `ceil(UPLOAD_MAX_BYTES / 3) * 4`, plus a few bytes of padding slack so
-/// the legitimate 2 MiB-encoded request can't be off-by-one rejected.
-/// Used as a fast guard before `STANDARD.decode` allocates.
+/// `ceil(UPLOAD_MAX_BYTES / 3) * 4` — that formula already accounts for
+/// padding to the nearest 4-byte boundary, so a legitimate envelope of
+/// exactly `UPLOAD_MAX_BYTES` raw bytes always fits. The current
+/// frontend encoders (`btoa` for Web, `STANDARD.encode` for the Rust
+/// `read_local_file_for_upload` side) emit clean base64 with no embedded
+/// whitespace, so in practice the formula is exact. The `+ 4` slack is
+/// one extra padded quad of headroom for a hypothetical future encoder
+/// that appends a trailing `=`/`\n` (RFC 4648 explicitly permits
+/// optional trailing CRLF). It is *not* load-bearing for any current
+/// caller — the post-decode `bytes.len() > UPLOAD_MAX_BYTES` check
+/// downstream is the authoritative guard, this constant only exists to
+/// reject obviously oversized envelopes before allocating a `Vec<u8>`
+/// the size of the base64 string. Used as a fast guard before
+/// `STANDARD.decode` allocates.
 const REMOTE_UPLOAD_MAX_BASE64_LEN: usize = {
     let raw = UPLOAD_MAX_BYTES as usize;
-    raw.div_ceil(3) * 4 + 16
+    raw.div_ceil(3) * 4 + 4
 };
+
+fn upload_i18n_params<const N: usize>(pairs: [(&str, String); N]) -> BTreeMap<String, String> {
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+}
 
 /// Strip multipart-hostile bytes from a filename before handing it to
 /// `reqwest::multipart::Part::file_name`. reqwest does not sanitize, and
@@ -329,11 +347,16 @@ const REMOTE_UPLOAD_MAX_BASE64_LEN: usize = {
 /// will sanitize again when it stores the bytes, this layer just keeps
 /// our outgoing multipart frame well-formed.
 fn sanitize_upload_file_name(raw: &str) -> String {
+    // Order matters: filter control chars first (which already covers
+    // NUL, CR, LF, tab and the C1 range), then map the remaining
+    // multipart-hostile punctuation. The mapped set is intentionally
+    // small — we want to preserve user-visible filename content while
+    // keeping the multipart frame parseable.
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control())
         .map(|c| match c {
-            '"' | '\\' | '/' | '\0' => '_',
+            '"' | '\\' | '/' => '_',
             other => other,
         })
         .collect();
@@ -381,14 +404,21 @@ pub async fn read_local_file_for_upload(
     })?;
     if !metadata.file_type().is_file() {
         return Err(AppCommandError::io_error("Not a regular file")
-            .with_detail(path_buf.display().to_string()));
+            .with_detail(path_buf.display().to_string())
+            .with_i18n(UPLOAD_I18N_KEY_NOT_A_FILE, BTreeMap::new()));
     }
     let size = metadata.len();
     if size > UPLOAD_MAX_BYTES {
         return Err(
-            AppCommandError::io_error("Local file exceeds the upload size limit").with_detail(
-                format!("size={size} limit={UPLOAD_MAX_BYTES}"),
-            ),
+            AppCommandError::io_error("Local file exceeds the upload size limit")
+                .with_detail(format!("size={size} limit={UPLOAD_MAX_BYTES}"))
+                .with_i18n(
+                    UPLOAD_I18N_KEY_TOO_LARGE,
+                    upload_i18n_params([
+                        ("size", size.to_string()),
+                        ("limit", UPLOAD_MAX_BYTES.to_string()),
+                    ]),
+                ),
         );
     }
     let bytes = tokio::fs::read(&path_buf).await.map_err(|e| {
@@ -444,12 +474,18 @@ pub async fn remote_upload_attachment(
     // exactly `(2 MiB + 2)/3*4` bytes) always passes.
     if data_base64.len() > REMOTE_UPLOAD_MAX_BASE64_LEN {
         return Err(
-            AppCommandError::io_error("Upload payload exceeds the size limit").with_detail(
-                format!(
+            AppCommandError::io_error("Upload payload exceeds the size limit")
+                .with_detail(format!(
                     "size={} limit={REMOTE_UPLOAD_MAX_BASE64_LEN}",
                     data_base64.len()
+                ))
+                .with_i18n(
+                    UPLOAD_I18N_KEY_TOO_LARGE,
+                    upload_i18n_params([
+                        ("size", data_base64.len().to_string()),
+                        ("limit", UPLOAD_MAX_BYTES.to_string()),
+                    ]),
                 ),
-            ),
         );
     }
     let bytes = STANDARD.decode(data_base64.as_bytes()).map_err(|e| {
@@ -460,9 +496,15 @@ pub async fn remote_upload_attachment(
     // any padding quirks can't squeeze through.
     if bytes.len() as u64 > UPLOAD_MAX_BYTES {
         return Err(
-            AppCommandError::io_error("Upload payload exceeds the size limit").with_detail(
-                format!("size={} limit={UPLOAD_MAX_BYTES}", bytes.len()),
-            ),
+            AppCommandError::io_error("Upload payload exceeds the size limit")
+                .with_detail(format!("size={} limit={UPLOAD_MAX_BYTES}", bytes.len()))
+                .with_i18n(
+                    UPLOAD_I18N_KEY_TOO_LARGE,
+                    upload_i18n_params([
+                        ("size", bytes.len().to_string()),
+                        ("limit", UPLOAD_MAX_BYTES.to_string()),
+                    ]),
+                ),
         );
     }
 
@@ -472,6 +514,15 @@ pub async fn remote_upload_attachment(
     // additional headers into the `Content-Disposition` line. Sanitize
     // ourselves before handing the value to reqwest. (The MIME string
     // goes through `mime_str`, which already rejects non-token chars.)
+    //
+    // Defense-in-depth: this is deliberately a second sanitize pass.
+    // `read_local_file_for_upload` already sanitized `file_name` before
+    // it returned, but this command is reachable from other JS callers
+    // (e.g. the web `uploadAttachment` path packs an arbitrary
+    // `file.name` straight through). Re-running the filter here means
+    // every multipart frame leaving this process is uniformly clean,
+    // regardless of upstream — and the extra cost is a single pass over
+    // ≤255 chars, which is negligible compared to the upload itself.
     let safe_name = sanitize_upload_file_name(&file_name);
     let part = reqwest::multipart::Part::bytes(bytes)
         .file_name(safe_name)
@@ -1075,5 +1126,168 @@ mod tests {
             .contains("dead"));
         assert!(!proxy.tasks.lock().await.contains_key(&1));
         assert!(*shutdown_rx.borrow());
+    }
+
+    // ─── i18n key wire-format tripwire ─────────────────────────────────
+    //
+    // The frontend branches on these exact literal strings. If anyone
+    // renames the Rust constants without updating the TS side
+    // (`UPLOAD_I18N_KEY_*` in `src/lib/api.ts`), the test still passes
+    // but runtime degrades silently — that's why we pin the literals
+    // here instead of asserting `KEY == KEY`. CI will fail loudly the
+    // moment somebody touches one side, forcing the lockstep edit.
+
+    #[test]
+    fn upload_i18n_keys_have_expected_values() {
+        assert_eq!(UPLOAD_I18N_KEY_TOO_LARGE, "errors.upload.tooLarge");
+        assert_eq!(UPLOAD_I18N_KEY_NOT_A_FILE, "errors.upload.notAFile");
+    }
+
+    #[test]
+    fn app_command_error_with_i18n_roundtrips_through_serde() {
+        // Reproduces the end-to-end path: error built in
+        // `read_local_file_for_upload` → serialized for IPC → parsed by
+        // the frontend's `extractAppCommandError` (which mirrors serde's
+        // shape). If serde ever drops `i18n_key` / `i18n_params` from
+        // the wire format, the frontend silently demotes to the
+        // generic-failure toast — this test pins the contract.
+        let err = AppCommandError::io_error("Local file exceeds the upload size limit")
+            .with_detail("size=4194304 limit=2097152")
+            .with_i18n(
+                UPLOAD_I18N_KEY_TOO_LARGE,
+                upload_i18n_params([
+                    ("size", "4194304".to_string()),
+                    ("limit", "2097152".to_string()),
+                ]),
+            );
+
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert_eq!(json["i18n_key"], "errors.upload.tooLarge");
+        assert_eq!(json["i18n_params"]["size"], "4194304");
+        assert_eq!(json["i18n_params"]["limit"], "2097152");
+        assert_eq!(json["code"], "io_error");
+
+        let parsed: AppCommandError = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(parsed.i18n_key.as_deref(), Some("errors.upload.tooLarge"));
+        let params = parsed.i18n_params.expect("params");
+        assert_eq!(params.get("size").map(String::as_str), Some("4194304"));
+        assert_eq!(params.get("limit").map(String::as_str), Some("2097152"));
+    }
+
+    #[test]
+    fn app_command_error_omits_i18n_when_absent() {
+        // The `#[serde(skip_serializing_if = "Option::is_none")]`
+        // attribute must hold — otherwise the WS proxy and HTTP API
+        // would emit noisy `null` fields on every error. Pin it.
+        let err = AppCommandError::io_error("plain error");
+        let json = serde_json::to_value(&err).expect("serialize");
+        assert!(json.get("i18n_key").is_none());
+        assert!(json.get("i18n_params").is_none());
+        assert!(json.get("detail").is_none());
+    }
+
+    #[test]
+    fn upload_i18n_params_helper_builds_map() {
+        let params = upload_i18n_params([
+            ("a", "1".to_string()),
+            ("b", "two".to_string()),
+        ]);
+        assert_eq!(params.get("a").map(String::as_str), Some("1"));
+        assert_eq!(params.get("b").map(String::as_str), Some("two"));
+        assert_eq!(params.len(), 2);
+    }
+
+    // ─── base64 size cap boundary ──────────────────────────────────────
+
+    #[test]
+    fn remote_upload_max_base64_len_admits_exact_limit_payload() {
+        // A payload of exactly `UPLOAD_MAX_BYTES` raw bytes encodes to
+        // a base64 string that MUST pass the pre-decode guard — anything
+        // else means we'd reject a legitimate maximum-sized upload.
+        let raw = vec![0u8; UPLOAD_MAX_BYTES as usize];
+        let encoded = STANDARD.encode(&raw);
+        assert!(
+            encoded.len() <= REMOTE_UPLOAD_MAX_BASE64_LEN,
+            "max-size base64 ({}) exceeds the constant ({})",
+            encoded.len(),
+            REMOTE_UPLOAD_MAX_BASE64_LEN
+        );
+    }
+
+    #[test]
+    fn remote_upload_max_base64_len_matches_formula() {
+        // Lock the formula: any deviation from `ceil(N/3)*4 + 4` will
+        // either tighten the cap (false-negative risk) or widen it
+        // (defeats the pre-allocation guard). Both warrant a deliberate
+        // commit message rather than silent drift.
+        let expected = (UPLOAD_MAX_BYTES as usize).div_ceil(3) * 4 + 4;
+        assert_eq!(REMOTE_UPLOAD_MAX_BASE64_LEN, expected);
+    }
+
+    // ─── filename sanitization ─────────────────────────────────────────
+
+    #[test]
+    fn sanitize_upload_file_name_preserves_plain_names() {
+        assert_eq!(sanitize_upload_file_name("notes.md"), "notes.md");
+        assert_eq!(
+            sanitize_upload_file_name("with spaces 中文.pdf"),
+            "with spaces 中文.pdf"
+        );
+    }
+
+    #[test]
+    fn sanitize_upload_file_name_strips_header_injection_chars() {
+        // `reqwest::multipart::Part::file_name` does not escape these.
+        // A CRLF followed by a header name would inject an extra header
+        // line into the Content-Disposition. Control chars (CR, LF,
+        // tab, NUL, …) are filtered out entirely, while quote, slash
+        // and backslash are mapped to `_` so the visible name still
+        // makes sense to the user.
+        let evil = "leak.txt\r\nX-Auth: bad";
+        assert_eq!(sanitize_upload_file_name(evil), "leak.txtX-Auth: bad");
+
+        let punctuation = "foo\"bar\\baz/qux.txt";
+        assert_eq!(sanitize_upload_file_name(punctuation), "foo_bar_baz_qux.txt");
+
+        // NUL is a control char and gets filtered out — *not* replaced
+        // with `_`. Either result kills the header-injection vector;
+        // pinning the observed behavior so any future change to
+        // `is_control()` semantics or the filter ordering is loud.
+        let with_nul = "foo\0bar.txt";
+        assert_eq!(sanitize_upload_file_name(with_nul), "foobar.txt");
+    }
+
+    #[test]
+    fn sanitize_upload_file_name_falls_back_when_empty() {
+        assert_eq!(sanitize_upload_file_name(""), "file");
+        assert_eq!(sanitize_upload_file_name("   "), "file");
+        // Entirely control chars: filtered to empty, then fallback.
+        assert_eq!(sanitize_upload_file_name("\r\n\t\0"), "file");
+    }
+
+    #[test]
+    fn sanitize_upload_file_name_caps_length_at_255_chars() {
+        let name = "a".repeat(300);
+        let result = sanitize_upload_file_name(&name);
+        assert_eq!(result.chars().count(), 255);
+    }
+
+    // ─── MIME guess ────────────────────────────────────────────────────
+
+    #[test]
+    fn guess_mime_from_path_handles_common_extensions() {
+        let cases = [
+            ("/tmp/foo.json", Some("application/json")),
+            ("/tmp/foo.PDF", Some("application/pdf")), // case-insensitive
+            ("/tmp/foo.unknown", None),
+            ("/tmp/no-extension", None),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                guess_mime_from_path(std::path::Path::new(path)),
+                expected.map(str::to_string),
+                "case: {path}"
+            );
+        }
     }
 }

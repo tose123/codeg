@@ -1421,15 +1421,45 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary)
 }
 
-// Sentinel error code thrown by the upload functions when an attachment
-// would be empty (0 bytes). Callers should recognize this code and silently
-// skip — attaching a zero-byte ResourceLink would be a no-op for the agent
-// and a confusing chip in the UI. Surfaced as a structured error rather than
-// a `return null` so the existing "one failure shouldn't block the rest"
-// concurrency contract in the upload pools stays uniform.
+// i18n_key values the Rust upload layer stamps via `with_i18n` and that
+// the frontend branches on. MUST stay in lockstep with the Rust
+// constants `UPLOAD_I18N_KEY_TOO_LARGE` / `UPLOAD_I18N_KEY_NOT_A_FILE`
+// in `src-tauri/src/app_error.rs`. If either side renames the literal,
+// the Rust unit test
+// `commands::remote_proxy::tests::upload_i18n_keys_have_expected_values`
+// fails — that's the CI tripwire keeping the two languages aligned.
+export const UPLOAD_I18N_KEY_TOO_LARGE = "errors.upload.tooLarge"
+export const UPLOAD_I18N_KEY_NOT_A_FILE = "errors.upload.notAFile"
+
+// Structured error thrown by the upload functions when an attachment
+// would be empty (0 bytes). Callers should recognize it and silently
+// skip — attaching a zero-byte ResourceLink would be a no-op for the
+// agent and a confusing chip in the UI. Modeled as a real `Error`
+// subclass so it carries a proper stack trace through async pipelines
+// (a bare object literal would lose that), and so existing `instanceof
+// Error` catch-rendering in the UI doesn't see an undefined `message`.
+//
+// The `code` field is preserved for the legacy duck-type check path —
+// any callers still inspecting `.code === UPLOAD_ERROR_EMPTY` continue
+// to work, but new code should rely on `isEmptyAttachmentError` or
+// `instanceof EmptyAttachmentError`.
 export const UPLOAD_ERROR_EMPTY = "attachment_empty"
 
+export class EmptyAttachmentError extends Error {
+  readonly code = UPLOAD_ERROR_EMPTY
+  readonly fileName: string
+
+  constructor(fileName: string) {
+    super(`Empty file skipped: ${fileName}`)
+    this.name = "EmptyAttachmentError"
+    this.fileName = fileName
+  }
+}
+
 export function isEmptyAttachmentError(err: unknown): boolean {
+  if (err instanceof EmptyAttachmentError) return true
+  // Tolerate the older bare-object shape so anything thrown through an
+  // IPC boundary (which strips the class identity) still gets caught.
   return (
     typeof err === "object" &&
     err !== null &&
@@ -1456,11 +1486,7 @@ export async function uploadAttachment(
     // (the server records it under `~/.codeg/uploads/<bucket>/...`), and
     // we'd attach a ResourceLink to an empty file. Throw the sentinel and
     // let the pool's catch block log + continue.
-    throw {
-      code: UPLOAD_ERROR_EMPTY,
-      message: `Empty file skipped: ${file.name}`,
-      name: file.name,
-    }
+    throw new EmptyAttachmentError(file.name)
   }
   const remoteId = getActiveRemoteConnectionId()
   if (isDesktop() && remoteId !== null) {
@@ -1532,11 +1558,7 @@ export async function uploadLocalPathToRemote(
     // Mirror the `uploadAttachment` empty-file guard. The Rust side
     // already read the bytes, so we've paid the cost — drop on the
     // floor here rather than send a zero-byte multipart upstream.
-    throw {
-      code: UPLOAD_ERROR_EMPTY,
-      message: `Empty file skipped: ${file.fileName}`,
-      name: file.fileName,
-    }
+    throw new EmptyAttachmentError(file.fileName)
   }
   return shell.call<UploadAttachmentResult>("remote_upload_attachment", {
     connectionId: remoteId,

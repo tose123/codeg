@@ -3,7 +3,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use crate::app_error::AppCommandError;
+use std::collections::BTreeMap;
+
+use crate::app_error::{AppCommandError, UPLOAD_I18N_KEY_TOO_LARGE};
 use crate::commands::folders as folder_commands;
 use crate::paths::codeg_uploads_root;
 
@@ -352,10 +354,23 @@ async fn stream_and_finalize(
                 })? {
                     let new_total = written.saturating_add(chunk.len() as u64);
                     if new_total > UPLOAD_MAX_BYTES {
+                        // Symmetric with the proxy's pre/post-decode caps
+                        // in `commands/remote_proxy.rs`: any of the three
+                        // layers can fire first depending on how the
+                        // request reached us (web direct, Tauri-proxied,
+                        // or local path read), and they all surface as
+                        // the same i18n key so the toast text in the UI
+                        // is uniform.
+                        let mut params = BTreeMap::new();
+                        params.insert("size".to_string(), new_total.to_string());
+                        params.insert("limit".to_string(), UPLOAD_MAX_BYTES.to_string());
                         return Err(AppCommandError::io_error(
                             "Upload exceeds the maximum allowed size",
                         )
-                        .with_detail(format!("limit={} bytes", UPLOAD_MAX_BYTES)));
+                        .with_detail(format!(
+                            "size={new_total} limit={UPLOAD_MAX_BYTES}"
+                        ))
+                        .with_i18n(UPLOAD_I18N_KEY_TOO_LARGE, params));
                     }
                     out.write_all(&chunk).await.map_err(|e| {
                         AppCommandError::io_error("Failed to write chunk")

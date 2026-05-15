@@ -48,7 +48,10 @@ import {
   uploadLocalPathToRemote,
   isEmptyAttachmentError,
   UPLOAD_MAX_BYTES,
+  UPLOAD_I18N_KEY_TOO_LARGE,
+  UPLOAD_I18N_KEY_NOT_A_FILE,
 } from "@/lib/api"
+import { extractAppCommandError } from "@/lib/app-error"
 import { openFileDialog } from "@/lib/platform"
 import { getActiveRemoteConnectionId } from "@/lib/transport"
 import { ServerFileBrowserDialog } from "@/components/shared/server-file-browser-dialog"
@@ -1175,20 +1178,17 @@ export function MessageInput({
                 )
                 continue
               }
-              // The Rust side reports structured errors as IoError with
-              // a `message` describing the failure and (sometimes) a
-              // `detail`. Branch on both so each user-visible category
-              // gets its own toast instead of falling into the generic
-              // "upload failed" bucket.
-              const errObj =
-                typeof error === "object" && error !== null
-                  ? (error as { message?: string; detail?: string })
-                  : null
-              const detail = errObj?.detail ?? null
-              const message = errObj?.message ?? ""
-              if (detail && /size=\d+\s+limit=\d+/.test(detail)) {
+              // The Rust side tags structured upload errors with an
+              // `i18n_key` (see `app_error::UPLOAD_I18N_KEY_*`); branch
+              // on the key so each user-visible category lands in its own
+              // toast instead of the generic "upload failed" bucket.
+              // Falling back to the bare message would couple us to the
+              // exact English phrasing in `remote_proxy.rs`.
+              const appError = extractAppCommandError(error)
+              const i18nKey = appError?.i18n_key ?? null
+              if (i18nKey === UPLOAD_I18N_KEY_TOO_LARGE) {
                 oversize.push(name)
-              } else if (message === "Not a regular file") {
+              } else if (i18nKey === UPLOAD_I18N_KEY_NOT_A_FILE) {
                 // Dragging a directory or a special file (FIFO, device
                 // node) lands here. The Rust guard short-circuits before
                 // we even read bytes; surface a dedicated toast so the
