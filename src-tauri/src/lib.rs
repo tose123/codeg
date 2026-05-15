@@ -175,19 +175,18 @@ mod tauri_app {
             .setup(|app| {
                 let app_data_dir = app.path().app_data_dir()?;
 
-                // Pin `CODEG_DATA_DIR` to the Tauri-resolved data root so
-                // every downstream resolver — `paths::codeg_uploads_root`,
-                // `paths::codeg_pets_root`, and the credential helper
-                // subprocess — sees the same path the database is written
-                // to. Without this, a default desktop install puts the DB
-                // under `app_data_dir()` (Tauri's identifier-derived path)
-                // but uploads under `~/.codeg/uploads` (the legacy
-                // `paths::codeg_uploads_root` fallback), splitting the
-                // persistent surface across two filesystem roots.
+                // Unify the data root across every consumer:
+                //   * SQLite database (initialised below)
+                //   * `paths::codeg_uploads_root` / `codeg_pets_root`
+                //   * git credential helper subprocess
                 //
-                // If the operator already set `CODEG_DATA_DIR` (rare on
-                // desktop but supported), respect that choice and don't
-                // overwrite it.
+                // The contract is "one effective root, end of story." If
+                // the operator pre-set `CODEG_DATA_DIR`, the database
+                // moves to that root too — respecting the env wins over
+                // Tauri's identifier-derived default. Otherwise we
+                // resolve to `app_data_dir`, absolutize it, and write
+                // the env back so the resolvers see the same path the
+                // DB writes to.
                 //
                 // `set_var` is `unsafe` in edition 2024. We are still
                 // single-threaded at this point: `setup` runs on the main
@@ -196,23 +195,52 @@ mod tauri_app {
                 // state, opener, dialog, updater, process, notification)
                 // do not read `CODEG_DATA_DIR`, and the value is never
                 // mutated again for the lifetime of the process.
-                if std::env::var_os("CODEG_DATA_DIR").is_none() {
-                    let absolute = git_credential::absolutize(&app_data_dir);
-                    // SAFETY: see the rationale on this block — the
-                    // process is still effectively single-threaded for
-                    // reads of this var. Edition 2024 will require the
-                    // unsafe block; we already write it that way for
-                    // forward compatibility, mirroring the WebView2
-                    // rendering override above.
-                    unsafe {
-                        std::env::set_var("CODEG_DATA_DIR", &absolute);
+                let effective_data_dir = match std::env::var_os("CODEG_DATA_DIR")
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(custom) => git_credential::absolutize(std::path::Path::new(&custom)),
+                    None => {
+                        let absolute = git_credential::absolutize(&app_data_dir);
+                        // SAFETY: still single-threaded at setup; see
+                        // the rationale block above. Edition 2024 will
+                        // require the unsafe block; we already write it
+                        // that way for forward compatibility, mirroring
+                        // the WebView2 rendering override.
+                        unsafe {
+                            std::env::set_var("CODEG_DATA_DIR", &absolute);
+                        }
+                        absolute
+                    }
+                };
+
+                // `CODEG_HOME` overrides `CODEG_DATA_DIR` inside
+                // `paths::codeg_uploads_root` / `codeg_pets_root` for
+                // backwards-compatibility with the legacy `~/.codeg/`
+                // layout. If both are set and point at different roots,
+                // uploads/pets land on `CODEG_HOME` while the database
+                // lands on `CODEG_DATA_DIR` — a silent split. The
+                // backup story here is "loud warning, no automatic
+                // override": the operator likely meant one of them, but
+                // we don't know which.
+                if let Some(home) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
+                    let home_path = git_credential::absolutize(std::path::Path::new(&home));
+                    if home_path != effective_data_dir {
+                        eprintln!(
+                            "[paths][WARN] CODEG_HOME ({}) and CODEG_DATA_DIR ({}) point at different roots. \
+                             Uploads/pets follow CODEG_HOME; the database follows CODEG_DATA_DIR. \
+                             Unset one or align them to avoid split state.",
+                            home_path.display(),
+                            effective_data_dir.display()
+                        );
                     }
                 }
 
                 let app_version = env!("CARGO_PKG_VERSION");
-                let database =
-                    tauri::async_runtime::block_on(db::init_database(&app_data_dir, app_version))
-                        .map_err(|e| e.to_string())?;
+                let database = tauri::async_runtime::block_on(db::init_database(
+                    &effective_data_dir,
+                    app_version,
+                ))
+                .map_err(|e| e.to_string())?;
                 app.manage(database);
 
                 // Restore and apply saved system proxy settings before any network operation.

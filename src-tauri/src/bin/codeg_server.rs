@@ -63,6 +63,25 @@ fn main() {
     let resolved_data_dir = codeg_lib::git_credential::absolutize(&resolved_data_dir);
     std::env::set_var("CODEG_DATA_DIR", &resolved_data_dir);
 
+    // `CODEG_HOME` overrides `CODEG_DATA_DIR` for uploads/pets inside
+    // `paths::codeg_*_root` (legacy `~/.codeg/` layout). If both are set
+    // and resolve to different roots, the database and uploads land on
+    // different filesystems — a silent split. Warn loudly so the
+    // operator notices before relying on a backup or volume mount that
+    // only covers one of them.
+    if let Some(home) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
+        let home_path = codeg_lib::git_credential::absolutize(std::path::Path::new(&home));
+        if home_path != resolved_data_dir {
+            eprintln!(
+                "[paths][WARN] CODEG_HOME ({}) and CODEG_DATA_DIR ({}) point at different roots. \
+                 Uploads/pets follow CODEG_HOME; the database follows CODEG_DATA_DIR. \
+                 Unset one or align them to avoid split state.",
+                home_path.display(),
+                resolved_data_dir.display()
+            );
+        }
+    }
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

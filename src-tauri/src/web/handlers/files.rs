@@ -185,6 +185,14 @@ pub const UPLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// by the next.
 const UPLOAD_TOTAL_BYTES_ENV: &str = "CODEG_UPLOAD_MAX_TOTAL_BYTES";
 
+/// Opt-in fail-closed mode for the quota config. When truthy and
+/// `CODEG_UPLOAD_MAX_TOTAL_BYTES` parses as `Invalid`, startup aborts
+/// with a `FATAL` line instead of falling through to fail-open. Default
+/// (unset / "0" / "false") preserves the prior fail-open posture so a
+/// typo doesn't take down a production process unless the operator
+/// explicitly asks for that behavior.
+const UPLOAD_STRICT_ENV: &str = "CODEG_UPLOAD_QUOTA_STRICT";
+
 /// Outcome of parsing `CODEG_UPLOAD_MAX_TOTAL_BYTES`. Carries enough
 /// context that the startup banner can distinguish "operator turned it
 /// off" from "operator typo silently disabled the cap".
@@ -241,16 +249,40 @@ fn upload_quota_config_from_env() -> UploadQuotaConfig {
     parse_upload_quota_config(std::env::var(UPLOAD_TOTAL_BYTES_ENV).ok().as_deref())
 }
 
+/// Truthy boolean parse for env-var flags. Accepts `1 / true / yes /
+/// on` (case-insensitive, trim-tolerant). Everything else — including
+/// `0`, `false`, empty, unset — returns `false`. Lives next to the
+/// quota parser so the two share the same testability story.
+fn parse_strict_mode(raw: Option<&str>) -> bool {
+    let Some(s) = raw else { return false };
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn upload_quota_strict_from_env() -> bool {
+    parse_strict_mode(std::env::var(UPLOAD_STRICT_ENV).ok().as_deref())
+}
+
 /// Emit a startup banner describing the current upload-quota
 /// configuration. Operators expect either a clear "cap = N" line or a
 /// loud WARN — silent fallthrough on a typo is exactly the failure
 /// mode we want to eliminate.
 ///
+/// When `CODEG_UPLOAD_QUOTA_STRICT` is truthy and the quota value
+/// parses as `Invalid`, the process exits with code 2 instead of
+/// falling through to fail-open. Strict mode is opt-in because the
+/// default posture must keep an unrelated typo from taking down a
+/// production process.
+///
 /// Called once from each binary entry point right after the data
-/// directory and listener are resolved. Cheap: a single env read + one
-/// `eprintln!`.
+/// directory and listener are resolved. Cheap: two env reads + one
+/// `eprintln!` (plus `process::exit` on the strict+invalid path).
 pub fn log_upload_quota_config_at_startup() {
-    match upload_quota_config_from_env() {
+    let config = upload_quota_config_from_env();
+    let strict = upload_quota_strict_from_env();
+    match &config {
         UploadQuotaConfig::Unset => {
             eprintln!(
                 "[uploads] {UPLOAD_TOTAL_BYTES_ENV} unset → total-size cap disabled (set to a byte count to enable)"
@@ -263,9 +295,18 @@ pub fn log_upload_quota_config_at_startup() {
             eprintln!("[uploads] total-size cap: {cap} bytes ({UPLOAD_TOTAL_BYTES_ENV})");
         }
         UploadQuotaConfig::Invalid(raw) => {
+            if strict {
+                eprintln!(
+                    "[uploads][FATAL] {UPLOAD_TOTAL_BYTES_ENV}={raw:?} is not a positive integer \
+                     and {UPLOAD_STRICT_ENV} is on; aborting startup. Use a plain decimal byte count \
+                     (e.g. 10737418240 for 10 GiB)."
+                );
+                std::process::exit(2);
+            }
             eprintln!(
                 "[uploads][WARN] {UPLOAD_TOTAL_BYTES_ENV}={raw:?} is not a positive integer; \
-                 total-size cap is DISABLED. Use a plain decimal byte count (e.g. 10737418240 for 10 GiB)."
+                 total-size cap is DISABLED. Use a plain decimal byte count (e.g. 10737418240 for 10 GiB), \
+                 or set {UPLOAD_STRICT_ENV}=1 to abort startup on this condition."
             );
         }
     }
@@ -282,6 +323,16 @@ pub fn log_upload_quota_config_at_startup() {
 /// Over-reservation is acceptable — the operator-facing budget is the
 /// disk, not the counter — and a uniform reservation size keeps the
 /// CAS loop and the cleanup path symmetric.
+///
+/// **Scope:** this counter is process-local. Multiple `codeg-server`
+/// processes sharing the same `uploads_root` (horizontally-scaled
+/// deployments mounted on the same volume) will each maintain their
+/// own counter and can collectively exceed the cap. codeg is designed
+/// for single-process deployments; multi-process coordination would
+/// require an external mechanism (file lock, Redis, reverse-proxy
+/// quota) that this codebase does not provide. See the doc on
+/// `paths::codeg_uploads_root` for the operator-facing version of
+/// this contract.
 static UPLOAD_IN_FLIGHT_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// RAII guard returned by `try_reserve_in_flight`. Releases the
@@ -821,6 +872,25 @@ mod tests {
         assert_eq!(
             parse_upload_quota_config(Some("-1")),
             UploadQuotaConfig::Invalid("-1".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_strict_mode_recognises_truthy_values() {
+        assert!(!parse_strict_mode(None), "unset → false");
+        assert!(!parse_strict_mode(Some("")), "empty → false");
+        assert!(!parse_strict_mode(Some("0")), "zero → false");
+        assert!(!parse_strict_mode(Some("false")), "false → false");
+        assert!(!parse_strict_mode(Some("no")), "no → false");
+        assert!(!parse_strict_mode(Some("off")), "off → false");
+        assert!(parse_strict_mode(Some("1")), "1 → true");
+        assert!(parse_strict_mode(Some("true")), "true → true");
+        assert!(parse_strict_mode(Some("TRUE")), "TRUE → true (case-insensitive)");
+        assert!(parse_strict_mode(Some(" Yes ")), "trim + case → true");
+        assert!(parse_strict_mode(Some("on")), "on → true");
+        assert!(
+            !parse_strict_mode(Some("strict")),
+            "unknown values → false; we don't guess intent"
         );
     }
 

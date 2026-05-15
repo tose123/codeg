@@ -57,6 +57,16 @@ pub fn codeg_pets_root() -> PathBuf {
 /// `CODEG_UPLOAD_MAX_TOTAL_BYTES` (see `web::handlers::files`): new
 /// uploads beyond the cap are rejected at the API boundary while
 /// existing files stay readable.
+///
+/// **Concurrency contract:** the quota check uses a process-local
+/// in-flight reservation counter to make `CODEG_UPLOAD_MAX_TOTAL_BYTES`
+/// a hard ceiling within one `codeg-server` process. Multiple
+/// `codeg-server` processes sharing the same uploads root (e.g.
+/// horizontally-scaled containers mounted on the same volume) will
+/// each enforce the cap independently and can collectively exceed it.
+/// codeg is designed for single-process deployments; horizontal
+/// scaling would require external coordination (file lock, Redis,
+/// reverse-proxy quota) that this codebase does not provide.
 pub fn codeg_uploads_root() -> PathBuf {
     if let Some(custom) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
         return PathBuf::from(custom).join(UPLOADS_DIR_NAME);
