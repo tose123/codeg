@@ -59,10 +59,16 @@ jobs:
         mode: [desktop, server]
         include:
           - mode: desktop
-            cargo_args: ""
+            # `test-utils` exposes test scaffolding (AppState::new_for_test,
+            # EventEmitter::test_web_only, ConnectionManager::insert_test_connection,
+            # parser `with_base_dir`, `db::test_helpers`) for integration tests
+            # under `tests/`. Without the flag those items are physically
+            # uncompiled, so integration tests would fail to link.
+            cargo_args: "--features test-utils"
           - mode: server
             # Server build is feature-gated off the Tauri runtime; no
-            # need for webkit/appindicator system libs.
+            # need for webkit/appindicator system libs. `--lib` skips
+            # integration tests, so `test-utils` is not required here.
             cargo_args: "--no-default-features --bin codeg-server --lib"
     steps:
       - uses: actions/checkout@v4
@@ -99,3 +105,19 @@ jobs:
         # as errors now that the 8 pre-existing advisories are cleared.
         working-directory: src-tauri
         run: cargo clippy --all-targets ${{ matrix.cargo_args }} -- -D warnings
+
+      - name: Web handlers must route through commands/*_core
+        # Lock in the dedup from Phase 8: web/handlers/{folders,conversations}.rs
+        # must not call DB services directly. They have to delegate to a
+        # `_core` function in `commands/*.rs` so the Tauri command and HTTP
+        # entrypoints share one implementation. Run on Linux only — pure
+        # text check, no per-OS variance.
+        if: matrix.os == 'ubuntu-22.04' && matrix.mode == 'desktop'
+        working-directory: src-tauri
+        run: |
+          if grep -nE 'folder_service::|conversation_service::|tab_service::|import_service::' \
+             src/web/handlers/folders.rs \
+             src/web/handlers/conversations.rs; then
+            echo "::error::Web handlers must call commands/*_core, not services directly."
+            exit 1
+          fi

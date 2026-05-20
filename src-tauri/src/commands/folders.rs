@@ -17,13 +17,10 @@ use walkdir::WalkDir;
 use tauri::Manager;
 
 use crate::app_error::AppCommandError;
-#[cfg(feature = "tauri-runtime")]
 use crate::db::error::DbError;
-#[cfg(feature = "tauri-runtime")]
 use crate::db::service::folder_service;
 use crate::db::AppDatabase;
 use crate::models::GitCredentials;
-#[cfg(feature = "tauri-runtime")]
 use crate::models::{FolderDetail, FolderHistoryEntry};
 use crate::web::event_bridge::EventEmitter;
 
@@ -450,10 +447,12 @@ async fn estimate_push_commit_count(path: &str) -> usize {
     parse_count_from_output(&output.stdout).unwrap_or(0)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn get_folder(
-    db: tauri::State<'_, AppDatabase>,
+// ---------------------------------------------------------------------------
+// Shared core functions (used by both Tauri commands and web handlers)
+// ---------------------------------------------------------------------------
+
+pub async fn get_folder_core(
+    db: &AppDatabase,
     folder_id: i32,
 ) -> Result<FolderDetail, DbError> {
     folder_service::get_folder_by_id(&db.conn, folder_id)
@@ -461,29 +460,23 @@ pub async fn get_folder(
         .ok_or_else(|| DbError::Migration(format!("Folder {} not found", folder_id)))
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn load_folder_history(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn load_folder_history_core(
+    db: &AppDatabase,
 ) -> Result<Vec<FolderHistoryEntry>, AppCommandError> {
     folder_service::list_folders(&db.conn)
         .await
         .map_err(AppCommandError::from)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn add_folder_to_history(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn add_folder_to_history_core(
+    db: &AppDatabase,
     path: String,
 ) -> Result<FolderHistoryEntry, DbError> {
     folder_service::add_folder(&db.conn, &path).await
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn remove_folder_from_history(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn remove_folder_from_history_core(
+    db: &AppDatabase,
     path: String,
 ) -> Result<(), AppCommandError> {
     folder_service::remove_folder(&db.conn, &path)
@@ -491,30 +484,32 @@ pub async fn remove_folder_from_history(
         .map_err(AppCommandError::from)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn list_open_folder_details(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn list_open_folders_core(
+    db: &AppDatabase,
+) -> Result<Vec<FolderHistoryEntry>, AppCommandError> {
+    folder_service::list_open_folders(&db.conn)
+        .await
+        .map_err(AppCommandError::from)
+}
+
+pub async fn list_open_folder_details_core(
+    db: &AppDatabase,
 ) -> Result<Vec<FolderDetail>, AppCommandError> {
     folder_service::list_open_folder_details(&db.conn)
         .await
         .map_err(AppCommandError::from)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn list_all_folder_details(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn list_all_folder_details_core(
+    db: &AppDatabase,
 ) -> Result<Vec<FolderDetail>, AppCommandError> {
     folder_service::list_all_folder_details(&db.conn)
         .await
         .map_err(AppCommandError::from)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn open_folder(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn open_folder_core(
+    db: &AppDatabase,
     path: String,
 ) -> Result<FolderDetail, AppCommandError> {
     let entry = folder_service::add_folder(&db.conn, &path)
@@ -526,10 +521,8 @@ pub async fn open_folder(
         .ok_or_else(|| AppCommandError::not_found("Folder not found after add"))
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn open_folder_by_id(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn open_folder_by_id_core(
+    db: &AppDatabase,
     folder_id: i32,
 ) -> Result<FolderDetail, AppCommandError> {
     folder_service::set_folder_open(&db.conn, folder_id, true)
@@ -541,10 +534,8 @@ pub async fn open_folder_by_id(
         .ok_or_else(|| AppCommandError::not_found(format!("Folder {folder_id} not found")))
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn remove_folder_from_workspace(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn remove_folder_from_workspace_core(
+    db: &AppDatabase,
     folder_id: i32,
 ) -> Result<(), AppCommandError> {
     use crate::db::service::tab_service;
@@ -556,15 +547,126 @@ pub async fn remove_folder_from_workspace(
         .map_err(AppCommandError::from)
 }
 
+pub async fn reorder_folders_core(
+    db: &AppDatabase,
+    ids: Vec<i32>,
+) -> Result<(), AppCommandError> {
+    folder_service::reorder_folders(&db.conn, ids)
+        .await
+        .map_err(AppCommandError::from)
+}
+
+pub async fn update_folder_color_core(
+    db: &AppDatabase,
+    folder_id: i32,
+    color: String,
+) -> Result<FolderDetail, AppCommandError> {
+    folder_service::update_folder_color(&db.conn, folder_id, &color)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| AppCommandError::not_found("Folder not found"))
+}
+
+pub async fn update_folder_default_agent_core(
+    db: &AppDatabase,
+    folder_id: i32,
+    default_agent_type: Option<crate::models::agent::AgentType>,
+) -> Result<FolderDetail, AppCommandError> {
+    folder_service::update_folder_default_agent(&db.conn, folder_id, default_agent_type)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| AppCommandError::not_found("Folder not found"))
+}
+
+// ---------------------------------------------------------------------------
+// Tauri command wrappers (thin shims over _core)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn get_folder(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<FolderDetail, DbError> {
+    get_folder_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn load_folder_history(
+    db: tauri::State<'_, AppDatabase>,
+) -> Result<Vec<FolderHistoryEntry>, AppCommandError> {
+    load_folder_history_core(&db).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn add_folder_to_history(
+    db: tauri::State<'_, AppDatabase>,
+    path: String,
+) -> Result<FolderHistoryEntry, DbError> {
+    add_folder_to_history_core(&db, path).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn remove_folder_from_history(
+    db: tauri::State<'_, AppDatabase>,
+    path: String,
+) -> Result<(), AppCommandError> {
+    remove_folder_from_history_core(&db, path).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn list_open_folder_details(
+    db: tauri::State<'_, AppDatabase>,
+) -> Result<Vec<FolderDetail>, AppCommandError> {
+    list_open_folder_details_core(&db).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn list_all_folder_details(
+    db: tauri::State<'_, AppDatabase>,
+) -> Result<Vec<FolderDetail>, AppCommandError> {
+    list_all_folder_details_core(&db).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn open_folder(
+    db: tauri::State<'_, AppDatabase>,
+    path: String,
+) -> Result<FolderDetail, AppCommandError> {
+    open_folder_core(&db, path).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn open_folder_by_id(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<FolderDetail, AppCommandError> {
+    open_folder_by_id_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn remove_folder_from_workspace(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<(), AppCommandError> {
+    remove_folder_from_workspace_core(&db, folder_id).await
+}
+
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn reorder_folders(
     db: tauri::State<'_, AppDatabase>,
     ids: Vec<i32>,
 ) -> Result<(), AppCommandError> {
-    folder_service::reorder_folders(&db.conn, ids)
-        .await
-        .map_err(AppCommandError::from)
+    reorder_folders_core(&db, ids).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -573,11 +675,8 @@ pub async fn update_folder_color(
     db: tauri::State<'_, AppDatabase>,
     folder_id: i32,
     color: String,
-) -> Result<crate::models::FolderDetail, AppCommandError> {
-    folder_service::update_folder_color(&db.conn, folder_id, &color)
-        .await
-        .map_err(AppCommandError::from)?
-        .ok_or_else(|| AppCommandError::not_found("Folder not found"))
+) -> Result<FolderDetail, AppCommandError> {
+    update_folder_color_core(&db, folder_id, color).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -586,11 +685,8 @@ pub async fn update_folder_default_agent(
     db: tauri::State<'_, AppDatabase>,
     folder_id: i32,
     default_agent_type: Option<crate::models::agent::AgentType>,
-) -> Result<crate::models::FolderDetail, AppCommandError> {
-    folder_service::update_folder_default_agent(&db.conn, folder_id, default_agent_type)
-        .await
-        .map_err(AppCommandError::from)?
-        .ok_or_else(|| AppCommandError::not_found("Folder not found"))
+) -> Result<FolderDetail, AppCommandError> {
+    update_folder_default_agent_core(&db, folder_id, default_agent_type).await
 }
 
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -3832,4 +3928,104 @@ async fn get_unpushed_hashes(
         .collect::<HashSet<_>>();
 
     Ok((Some(hashes), has_upstream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_helpers::fresh_in_memory_db;
+    use crate::models::agent::AgentType;
+
+    #[tokio::test]
+    async fn add_folder_to_history_core_derives_name_from_path() {
+        let db = fresh_in_memory_db().await;
+        let entry = add_folder_to_history_core(&db, "/tmp/codeg-test-project".into())
+            .await
+            .expect("add folder");
+        assert_eq!(entry.name, "codeg-test-project");
+        assert_eq!(entry.path, "/tmp/codeg-test-project");
+    }
+
+    #[tokio::test]
+    async fn add_folder_to_history_core_upserts_on_duplicate_path() {
+        let db = fresh_in_memory_db().await;
+        let path = "/tmp/codeg-dup-test".to_string();
+        let first = add_folder_to_history_core(&db, path.clone())
+            .await
+            .expect("add 1st");
+        let second = add_folder_to_history_core(&db, path.clone())
+            .await
+            .expect("add 2nd");
+        assert_eq!(first.id, second.id, "duplicate path must reuse id");
+
+        let history = load_folder_history_core(&db).await.expect("history");
+        assert_eq!(
+            history.iter().filter(|f| f.path == path).count(),
+            1,
+            "no duplicate rows for same path"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_folder_from_history_core_soft_deletes() {
+        let db = fresh_in_memory_db().await;
+        let path = "/tmp/codeg-remove-test".to_string();
+        add_folder_to_history_core(&db, path.clone())
+            .await
+            .expect("add");
+        remove_folder_from_history_core(&db, path.clone())
+            .await
+            .expect("remove");
+        let history = load_folder_history_core(&db).await.expect("history");
+        assert!(
+            history.iter().all(|f| f.path != path),
+            "soft-deleted folder must not appear in list"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_folder_by_id_core_errors_when_missing() {
+        let db = fresh_in_memory_db().await;
+        let err = open_folder_by_id_core(&db, 99_999)
+            .await
+            .expect_err("missing id should error");
+        // Either the not_found wrapper (when set_folder_open returns Ok(()) on no-op)
+        // or the underlying DbError propagates — both are acceptable for "missing".
+        let msg = format!("{err:?}");
+        assert!(
+            msg.to_lowercase().contains("not found")
+                || msg.to_lowercase().contains("99999"),
+            "expected not-found-ish error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_folder_color_core_roundtrips() {
+        let db = fresh_in_memory_db().await;
+        let entry = add_folder_to_history_core(&db, "/tmp/codeg-color-test".into())
+            .await
+            .expect("add");
+        let updated = update_folder_color_core(&db, entry.id, "#ff8800".into())
+            .await
+            .expect("update color");
+        assert_eq!(updated.color, "#ff8800");
+        let read_back = get_folder_core(&db, entry.id).await.expect("get");
+        assert_eq!(read_back.color, "#ff8800");
+    }
+
+    #[tokio::test]
+    async fn update_folder_default_agent_core_set_then_clear() {
+        let db = fresh_in_memory_db().await;
+        let entry = add_folder_to_history_core(&db, "/tmp/codeg-agent-test".into())
+            .await
+            .expect("add");
+        let set = update_folder_default_agent_core(&db, entry.id, Some(AgentType::ClaudeCode))
+            .await
+            .expect("set agent");
+        assert_eq!(set.default_agent_type, Some(AgentType::ClaudeCode));
+        let cleared = update_folder_default_agent_core(&db, entry.id, None)
+            .await
+            .expect("clear agent");
+        assert_eq!(cleared.default_agent_type, None);
+    }
 }

@@ -142,6 +142,48 @@ impl ConnectionManager {
         }
     }
 
+    /// Insert a synthetic `AgentConnection` for tests that need to exercise
+    /// downstream code (attach, event broadcast, conversation linking)
+    /// without spawning a real agent process. The returned connection is
+    /// marked `Connected` and has a dropped `cmd_tx` receiver, so any
+    /// attempt to send a prompt resolves to `ProcessExited` — fine for
+    /// tests asserting on event-bus or session-state behavior.
+    ///
+    /// Gated behind `cfg(test)` (in-crate unit tests) and the `test-utils`
+    /// feature (integration tests in `tests/*.rs`); the item is physically
+    /// uncompiled in release builds so no production caller can reach it.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn insert_test_connection(
+        &self,
+        id: &str,
+        agent_type: AgentType,
+        working_dir: Option<PathBuf>,
+        emitter: EventEmitter,
+    ) {
+        use crate::acp::session_state::SessionState;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut state = SessionState::new(
+            id.to_string(),
+            agent_type,
+            working_dir,
+            "test-window".to_string(),
+            None,
+        );
+        state.status = ConnectionStatus::Connected;
+        let conn = AgentConnection {
+            id: id.to_string(),
+            agent_type,
+            status: ConnectionStatus::Connected,
+            owner_window_label: "test-window".to_string(),
+            cmd_tx: tx,
+            state: Arc::new(tokio::sync::RwLock::new(state)),
+            emitter,
+            prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let mut map = self.connections.lock().await;
+        map.insert(id.to_string(), conn);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_agent(
         &self,
@@ -1010,9 +1052,9 @@ mod tests {
         (bcast, rx)
     }
 
-    /// Insert a fake `AgentConnection` with the given emitter & working_dir.
-    /// The cmd_tx receiver is dropped — `send_prompt` will return
-    /// `ProcessExited`, which is fine for tests that only verify linkage.
+    /// Thin wrapper around `ConnectionManager::insert_test_connection` so the
+    /// existing in-crate tests keep their `insert_fake_connection(mgr, ...)`
+    /// call shape after the public test helper landed.
     async fn insert_fake_connection(
         mgr: &ConnectionManager,
         id: &str,
@@ -1020,27 +1062,8 @@ mod tests {
         working_dir: Option<PathBuf>,
         emitter: EventEmitter,
     ) {
-        let (tx, _rx) = mpsc::channel(1);
-        let mut state = SessionState::new(
-            id.to_string(),
-            agent_type,
-            working_dir,
-            "test-window".to_string(),
-            None,
-        );
-        state.status = ConnectionStatus::Connected;
-        let conn = AgentConnection {
-            id: id.to_string(),
-            agent_type,
-            status: ConnectionStatus::Connected,
-            owner_window_label: "test-window".to_string(),
-            cmd_tx: tx,
-            state: Arc::new(RwLock::new(state)),
-            emitter,
-            prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
-        };
-        let mut map = mgr.connections.lock().await;
-        map.insert(id.to_string(), conn);
+        mgr.insert_test_connection(id, agent_type, working_dir, emitter)
+            .await;
     }
 
     /// Subscribe directly to the per-connection event stream. Phase 4b

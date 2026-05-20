@@ -51,7 +51,7 @@ impl AppState {
     ///
     /// `data_dir` is a temp directory; handlers that touch it must use
     /// `tempfile::tempdir()` and pass the resulting path in.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_test(db: crate::db::AppDatabase, data_dir: PathBuf) -> Self {
         use crate::acp::{EventBusMetrics, InternalEventBus};
         use crate::web::event_bridge::WebEventBroadcaster;

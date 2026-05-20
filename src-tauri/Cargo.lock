@@ -466,9 +466,11 @@ dependencies = [
  "assert-json-diff",
  "auto-future",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "bytesize",
  "cookie",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -482,8 +484,10 @@ dependencies = [
  "serde_urlencoded",
  "smallvec",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tower",
  "url",
+ "uuid",
 ]
 
 [[package]]

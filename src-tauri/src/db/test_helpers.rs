@@ -7,8 +7,9 @@ use sea_orm_migration::MigratorTrait;
 
 use crate::db::error::DbError;
 use crate::db::migration::Migrator;
-use crate::db::service::folder_service;
+use crate::db::service::{conversation_service, folder_service};
 use crate::db::AppDatabase;
+use crate::models::agent::AgentType;
 
 pub async fn fresh_in_memory_db() -> AppDatabase {
     let conn = Database::connect("sqlite::memory:")
@@ -32,5 +33,12 @@ pub async fn seed_folder(db: &AppDatabase, path: &str) -> i32 {
     folder_service::add_folder(&db.conn, path)
         .await
         .expect("seed folder")
+        .id
+}
+
+pub async fn seed_conversation(db: &AppDatabase, folder_id: i32, agent_type: AgentType) -> i32 {
+    conversation_service::create(&db.conn, folder_id, agent_type, None, None)
+        .await
+        .expect("seed conversation")
         .id
 }

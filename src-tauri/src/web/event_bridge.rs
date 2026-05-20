@@ -138,7 +138,7 @@ impl EventEmitter {
     /// Test-only convenience: build a `WebOnly` emitter with a fresh,
     /// orphan `InternalEventBus`. Tests that assert against the
     /// broadcaster don't need to wire the bus through their own setup.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn test_web_only(broadcaster: Arc<WebEventBroadcaster>) -> Self {
         let metrics = Arc::new(EventBusMetrics::default());
         let bus = Arc::new(InternalEventBus::new(metrics));

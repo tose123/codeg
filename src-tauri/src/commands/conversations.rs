@@ -1,11 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::app_error::AppCommandError;
-#[cfg(feature = "tauri-runtime")]
 use crate::db::entities::conversation;
-#[cfg(feature = "tauri-runtime")]
-use crate::db::service::import_service;
-use crate::db::service::{conversation_service, folder_service};
+use crate::db::service::{conversation_service, folder_service, import_service, tab_service};
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
 use crate::models::*;
@@ -17,6 +14,19 @@ use crate::parsers::openclaw::OpenClawParser;
 use crate::parsers::opencode::OpenCodeParser;
 use crate::parsers::{path_eq_for_matching, AgentParser, ParseError};
 
+pub async fn list_all_conversations_core(
+    conn: &sea_orm::DatabaseConnection,
+    folder_ids: Option<Vec<i32>>,
+    agent_type: Option<AgentType>,
+    search: Option<String>,
+    sort_by: Option<String>,
+    status: Option<String>,
+) -> Result<Vec<DbConversationSummary>, AppCommandError> {
+    conversation_service::list_all(conn, folder_ids, agent_type, search, sort_by, status)
+        .await
+        .map_err(AppCommandError::from)
+}
+
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn list_all_conversations(
@@ -27,7 +37,13 @@ pub async fn list_all_conversations(
     sort_by: Option<String>,
     status: Option<String>,
 ) -> Result<Vec<DbConversationSummary>, AppCommandError> {
-    conversation_service::list_all(&db.conn, folder_ids, agent_type, search, sort_by, status)
+    list_all_conversations_core(&db.conn, folder_ids, agent_type, search, sort_by, status).await
+}
+
+pub async fn list_opened_tabs_core(
+    conn: &sea_orm::DatabaseConnection,
+) -> Result<Vec<OpenedTab>, AppCommandError> {
+    tab_service::list_all_tabs(conn)
         .await
         .map_err(AppCommandError::from)
 }
@@ -37,8 +53,14 @@ pub async fn list_all_conversations(
 pub async fn list_opened_tabs(
     db: tauri::State<'_, AppDatabase>,
 ) -> Result<Vec<OpenedTab>, AppCommandError> {
-    use crate::db::service::tab_service;
-    tab_service::list_all_tabs(&db.conn)
+    list_opened_tabs_core(&db.conn).await
+}
+
+pub async fn save_opened_tabs_core(
+    conn: &sea_orm::DatabaseConnection,
+    items: Vec<OpenedTab>,
+) -> Result<(), AppCommandError> {
+    tab_service::save_all_tabs(conn, items)
         .await
         .map_err(AppCommandError::from)
 }
@@ -49,10 +71,7 @@ pub async fn save_opened_tabs(
     db: tauri::State<'_, AppDatabase>,
     items: Vec<OpenedTab>,
 ) -> Result<(), AppCommandError> {
-    use crate::db::service::tab_service;
-    tab_service::save_all_tabs(&db.conn, items)
-        .await
-        .map_err(AppCommandError::from)
+    save_opened_tabs_core(&db.conn, items).await
 }
 
 /// Synchronous implementation shared by list_conversations, list_folders, and get_stats.
@@ -259,13 +278,11 @@ fn compute_folders(all_conversations: &[ConversationSummary]) -> Vec<FolderInfo>
     folders
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn import_local_conversations(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn import_local_conversations_core(
+    conn: &sea_orm::DatabaseConnection,
     folder_id: i32,
 ) -> Result<ImportResult, AppCommandError> {
-    let folder = folder_service::get_folder_by_id(&db.conn, folder_id)
+    let folder = folder_service::get_folder_by_id(conn, folder_id)
         .await
         .map_err(AppCommandError::from)?
         .ok_or_else(|| {
@@ -273,9 +290,18 @@ pub async fn import_local_conversations(
                 .with_detail(format!("folder_id={folder_id}"))
         })?;
 
-    import_service::import_local_conversations(&db.conn, folder_id, &folder.path)
+    import_service::import_local_conversations(conn, folder_id, &folder.path)
         .await
         .map_err(AppCommandError::from)
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn import_local_conversations(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<ImportResult, AppCommandError> {
+    import_local_conversations_core(&db.conn, folder_id).await
 }
 
 /// Core logic for loading a folder conversation with full OpenClaw fallback.
@@ -441,10 +467,8 @@ async fn detect_git_branch(path: &str) -> Option<String> {
     Some(branch)
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn update_conversation_status(
-    db: tauri::State<'_, AppDatabase>,
+pub async fn update_conversation_status_core(
+    conn: &sea_orm::DatabaseConnection,
     conversation_id: i32,
     status: String,
 ) -> Result<(), AppCommandError> {
@@ -452,7 +476,27 @@ pub async fn update_conversation_status(
         serde_json::from_value(serde_json::Value::String(status)).map_err(|e| {
             AppCommandError::invalid_input("Invalid conversation status").with_detail(e.to_string())
         })?;
-    conversation_service::update_status(&db.conn, conversation_id, status_enum)
+    conversation_service::update_status(conn, conversation_id, status_enum)
+        .await
+        .map_err(AppCommandError::from)
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn update_conversation_status(
+    db: tauri::State<'_, AppDatabase>,
+    conversation_id: i32,
+    status: String,
+) -> Result<(), AppCommandError> {
+    update_conversation_status_core(&db.conn, conversation_id, status).await
+}
+
+pub async fn update_conversation_title_core(
+    conn: &sea_orm::DatabaseConnection,
+    conversation_id: i32,
+    title: String,
+) -> Result<(), AppCommandError> {
+    conversation_service::update_title(conn, conversation_id, title)
         .await
         .map_err(AppCommandError::from)
 }
@@ -464,7 +508,14 @@ pub async fn update_conversation_title(
     conversation_id: i32,
     title: String,
 ) -> Result<(), AppCommandError> {
-    conversation_service::update_title(&db.conn, conversation_id, title)
+    update_conversation_title_core(&db.conn, conversation_id, title).await
+}
+
+pub async fn delete_conversation_core(
+    conn: &sea_orm::DatabaseConnection,
+    conversation_id: i32,
+) -> Result<(), AppCommandError> {
+    conversation_service::soft_delete(conn, conversation_id)
         .await
         .map_err(AppCommandError::from)
 }
@@ -475,9 +526,7 @@ pub async fn delete_conversation(
     db: tauri::State<'_, AppDatabase>,
     conversation_id: i32,
 ) -> Result<(), AppCommandError> {
-    conversation_service::soft_delete(&db.conn, conversation_id)
-        .await
-        .map_err(AppCommandError::from)
+    delete_conversation_core(&db.conn, conversation_id).await
 }
 
 fn compute_stats(all_conversations: &[ConversationSummary]) -> AgentStats {
@@ -520,5 +569,216 @@ fn parse_error_to_app_error(error: ParseError) -> AppCommandError {
         }
         ParseError::Db(err) => AppCommandError::database_error("Database operation failed")
             .with_detail(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+
+    #[tokio::test]
+    async fn create_conversation_core_happy_path() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-conv-test-1").await;
+        let id = create_conversation_core(
+            &db.conn,
+            folder_id,
+            AgentType::ClaudeCode,
+            Some("hello".into()),
+        )
+        .await
+        .expect("create");
+        assert!(id > 0, "expected positive conversation id, got {id}");
+
+        let summary = conversation_service::get_by_id(&db.conn, id)
+            .await
+            .expect("read back");
+        assert_eq!(summary.folder_id, folder_id);
+        assert_eq!(summary.agent_type, AgentType::ClaudeCode);
+    }
+
+    #[tokio::test]
+    async fn create_conversation_core_non_git_path_yields_no_branch() {
+        let db = fresh_in_memory_db().await;
+        // Use a tempdir that's guaranteed not a git repo (no .git).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let folder_id =
+            seed_folder(&db, &temp.path().to_string_lossy()).await;
+        let id = create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
+            .await
+            .expect("create succeeds even without git");
+        let summary = conversation_service::get_by_id(&db.conn, id)
+            .await
+            .expect("read back");
+        assert!(
+            summary.git_branch.is_none(),
+            "non-git path should produce no branch, got: {:?}",
+            summary.git_branch
+        );
+    }
+
+    #[tokio::test]
+    async fn create_conversation_core_missing_folder_still_creates() {
+        // FK on folder_id is not enforced (no FK constraint in schema/PRAGMA),
+        // so creating a conversation against an unknown folder_id should not
+        // panic. detect_git_branch is skipped because folder lookup returns None.
+        let db = fresh_in_memory_db().await;
+        let result =
+            create_conversation_core(&db.conn, 999_999, AgentType::Gemini, None).await;
+        // Behavior contract: either success (current FK-loose behavior) or a
+        // database error — never panic. Accept both.
+        match result {
+            Ok(id) => assert!(id > 0),
+            Err(err) => {
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.to_lowercase().contains("foreign")
+                        || msg.to_lowercase().contains("constraint")
+                        || msg.to_lowercase().contains("999999"),
+                    "unexpected error shape: {msg}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn get_folder_conversation_core_missing_id_errors() {
+        let db = fresh_in_memory_db().await;
+        let err = get_folder_conversation_core(&db.conn, 999_999)
+            .await
+            .expect_err("missing conversation must error, not panic");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.to_lowercase().contains("not found")
+                || msg.to_lowercase().contains("999999"),
+            "expected not-found-shaped error, got: {msg}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Phase 8 — _core wrappers around DB-only service calls. These were
+    // extracted from the web handlers so HTTP and Tauri callers share one
+    // implementation. Tests pin the boundary contract: empty-state shape,
+    // roundtrip behavior, and how the wrappers surface error conditions.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_all_conversations_core_empty_db_returns_empty() {
+        let db = fresh_in_memory_db().await;
+        let rows = list_all_conversations_core(&db.conn, None, None, None, None, None)
+            .await
+            .expect("list");
+        assert!(rows.is_empty(), "fresh db must have zero conversations");
+    }
+
+    #[tokio::test]
+    async fn list_opened_tabs_core_empty_db_returns_empty() {
+        let db = fresh_in_memory_db().await;
+        let tabs = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert!(tabs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_opened_tabs_core_roundtrip() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-tabs-test").await;
+        let items = vec![
+            OpenedTab {
+                id: 0,
+                folder_id,
+                conversation_id: None,
+                agent_type: AgentType::ClaudeCode,
+                position: 0,
+                is_active: true,
+                is_pinned: false,
+            },
+            OpenedTab {
+                id: 0,
+                folder_id,
+                conversation_id: None,
+                agent_type: AgentType::Codex,
+                position: 1,
+                is_active: false,
+                is_pinned: false,
+            },
+        ];
+        save_opened_tabs_core(&db.conn, items).await.expect("save");
+        let tabs = list_opened_tabs_core(&db.conn).await.expect("list");
+        assert_eq!(tabs.len(), 2, "expected 2 tabs roundtrip, got {}", tabs.len());
+    }
+
+    #[tokio::test]
+    async fn import_local_conversations_core_missing_folder_errors() {
+        let db = fresh_in_memory_db().await;
+        let err = import_local_conversations_core(&db.conn, 999_999)
+            .await
+            .expect_err("missing folder must surface as error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.to_lowercase().contains("not found")
+                || msg.to_lowercase().contains("999999"),
+            "expected not-found-shaped error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_conversation_status_core_invalid_string_errors() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-status-test").await;
+        let conv_id =
+            create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+                .await
+                .expect("create");
+        let err = update_conversation_status_core(
+            &db.conn,
+            conv_id,
+            "not-a-real-status".to_string(),
+        )
+        .await
+        .expect_err("garbage status must error before touching the DB");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.to_lowercase().contains("invalid"),
+            "expected invalid-input error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_conversation_title_core_roundtrip() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-title-test").await;
+        let conv_id =
+            create_conversation_core(&db.conn, folder_id, AgentType::Gemini, None)
+                .await
+                .expect("create");
+        update_conversation_title_core(&db.conn, conv_id, "Renamed".into())
+            .await
+            .expect("update");
+        let summary = conversation_service::get_by_id(&db.conn, conv_id)
+            .await
+            .expect("read back");
+        assert_eq!(summary.title.as_deref(), Some("Renamed"));
+    }
+
+    #[tokio::test]
+    async fn delete_conversation_core_soft_deletes() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-delete-test").await;
+        let conv_id =
+            create_conversation_core(&db.conn, folder_id, AgentType::Codex, None)
+                .await
+                .expect("create");
+        delete_conversation_core(&db.conn, conv_id)
+            .await
+            .expect("delete");
+        // After soft delete the row should no longer show up in list_all.
+        let remaining = list_all_conversations_core(&db.conn, None, None, None, None, None)
+            .await
+            .expect("list");
+        assert!(
+            remaining.iter().all(|c| c.id != conv_id),
+            "soft-deleted conversation must not appear in list_all"
+        );
     }
 }

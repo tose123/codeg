@@ -123,7 +123,7 @@ impl ClineParser {
 
     /// Test-only constructor that lets callers point the parser at a fixture
     /// directory instead of `~/.cline/data`.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
         Self { base_dir }
     }

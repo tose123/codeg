@@ -11,7 +11,7 @@
 //! fallback fires unexpectedly.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use codeg_lib::parsers::{
     claude::ClaudeParser, cline::ClineParser, codex::CodexParser, gemini::GeminiParser,
@@ -342,16 +342,148 @@ fn cline_minimal_session_snapshot() {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// OpenCode — placeholder
+// OpenCode
 // ────────────────────────────────────────────────────────────────────────────
 
-/// OpenCode reads from a SeaORM-managed SQLite file. Generating a deterministic
-/// fixture `opencode.db` requires running the OpenCode-side migrations against
-/// an empty in-memory database and committing the resulting binary, or
-/// scripting it at test setup time. Out of scope for the first snapshot pass —
-/// tracked as a follow-up so that we don't block the other 5 parsers on it.
+/// OpenCode parser reads from a SeaORM-managed SQLite file. It does NOT import
+/// the OpenCode CLI's migrations — it issues raw SELECTs against three tables
+/// (`session`, `message`, `part`). So the test fixture just creates those
+/// tables with the columns the parser actually queries and inserts a minimal
+/// conversation.
+///
+/// `OpenCodeParser` builds its own current-thread runtime via `block_on` on
+/// every call, so it's safe to drive from either `#[test]` (sync) or a
+/// `#[tokio::test]`. We use sync here and spin up a local runtime only for
+/// the async DB setup.
 #[test]
-#[ignore = "TODO: requires SeaORM-seeded opencode.db fixture; see plan Phase 2"]
 fn opencode_minimal_session_snapshot() {
-    let _ = OpenCodeParser::with_base_dir(PathBuf::from("/dev/null"));
+    use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
+
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let base = temp.path().to_path_buf();
+    let db_path = base.join("opencode.db");
+    let session_id = "oc-sess-001";
+
+    // 2026-03-01T10:00:00Z in milliseconds.
+    let t0: i64 = 1_772_020_800_000;
+    let t_user_created = t0 + 500;
+    let t_asst_created = t0 + 2_000;
+    let t_asst_completed = t0 + 3_000;
+    let t_updated = t0 + 4_000;
+
+    // Build the fixture DB inside a one-off current-thread runtime.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    rt.block_on(async {
+        let conn = Database::connect(format!("sqlite:{}?mode=rwc", db_path.display()))
+            .await
+            .expect("open sqlite");
+
+        for ddl in [
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, \
+             time_created INTEGER, time_updated INTEGER)",
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, \
+             time_created INTEGER, data TEXT)",
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, \
+             time_created INTEGER, data TEXT)",
+        ] {
+            conn.execute(Statement::from_string(DatabaseBackend::Sqlite, ddl))
+                .await
+                .expect("create table");
+        }
+
+        // Session row.
+        conn.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO session (id, directory, title, time_created, time_updated) \
+             VALUES (?, ?, ?, ?, ?)",
+            [
+                session_id.into(),
+                "/tmp/demo".into(),
+                "OpenCode demo session".into(),
+                t0.into(),
+                t_updated.into(),
+            ],
+        ))
+        .await
+        .expect("insert session");
+
+        // User message.
+        let user_data = json!({
+            "role": "user",
+            "time": { "created": t_user_created },
+        })
+        .to_string();
+        conn.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            [
+                "m-user".into(),
+                session_id.into(),
+                t_user_created.into(),
+                user_data.into(),
+            ],
+        ))
+        .await
+        .expect("insert user message");
+
+        // Assistant message with usage + completion.
+        let asst_data = json!({
+            "role": "assistant",
+            "modelID": "claude-sonnet-4-6",
+            "time": { "created": t_asst_created, "completed": t_asst_completed },
+            "tokens": {
+                "input": 12,
+                "output": 15,
+                "cache": { "read": 0, "write": 0 },
+            },
+        })
+        .to_string();
+        conn.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+            [
+                "m-asst".into(),
+                session_id.into(),
+                t_asst_created.into(),
+                asst_data.into(),
+            ],
+        ))
+        .await
+        .expect("insert assistant message");
+
+        // Text parts for each message.
+        for (pid, mid, t, text) in [
+            ("p-user-text", "m-user", t_user_created, "hello opencode"),
+            ("p-asst-text", "m-asst", t_asst_created + 500, "world!"),
+        ] {
+            let data = json!({ "type": "text", "text": text }).to_string();
+            conn.execute(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)",
+                [pid.into(), mid.into(), t.into(), data.into()],
+            ))
+            .await
+            .expect("insert part");
+        }
+    });
+
+    let parser = OpenCodeParser::with_base_dir(base);
+    let conversations = parser.list_conversations().expect("list conversations");
+    assert_json_snapshot!("opencode_list", conversations, {
+        ".**.started_at" => "[ts]",
+        ".**.ended_at" => "[ts]",
+    });
+
+    let detail = parser
+        .get_conversation(session_id)
+        .expect("get conversation");
+    assert_json_snapshot!("opencode_detail", detail, {
+        ".**.started_at" => "[ts]",
+        ".**.ended_at" => "[ts]",
+        ".**.timestamp" => "[ts]",
+        ".**.completed_at" => "[ts]",
+    });
 }
