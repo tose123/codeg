@@ -115,10 +115,14 @@ struct PendingCalls {
 ///   * `cancel_by_child_connection` — a freshly-spawned child connection dying
 ///     before its first prompt is answered. Keyed by `child_connection_id`.
 ///
-/// Parent-side `cancel_by_parent` only drains already-parked entries: a parent
-/// cancel that lands while a child is still mid-setup is left to the normal
-/// child-terminal / connection-teardown cascade rather than buffered here (see
-/// the follow-up issue on full parent-cancel-lifecycle coverage).
+/// Parent-side cancels (`cancel_by_parent` / `cancel_by_parent_turn`) are
+/// covered symmetrically by the `inflight` registry: `handle_request` registers
+/// each setup at entry, and `mark_inflight_canceled_for_parent` runs in the SAME
+/// lock acquisition that drains the parked `calls`. A parent cancel landing
+/// while a child is still mid-setup therefore flags the in-flight record, and
+/// `handle_request` observes the flag at its next checkpoint (or atomically at
+/// park) and tears the child down itself — it is no longer left to the child's
+/// own terminal / connection-teardown cascade.
 ///
 /// The reservation records the `child_connection_id` each resolver gates on;
 /// `handle_request` drains both buffers at park.
@@ -143,6 +147,30 @@ struct PendingInner {
     /// the full outcome at park with the real `child_conversation_id` (which the
     /// resolver, finding no entry, lacked).
     early_cancels: HashMap<String, String>,
+    /// In-flight `handle_request` setups, keyed by a unique per-call id and
+    /// registered at entry (BEFORE the claim poll, so the whole claim→park
+    /// window is covered). This is the parent-cancel counterpart to `setups`:
+    /// `setups` lets a *child* terminal reach a not-yet-parked delegation,
+    /// while `inflight` lets a *parent* cancel reach one. `cancel_by_parent*`
+    /// flags every entry it owns (`mark_inflight_canceled_for_parent`);
+    /// `handle_request` consults the flag after claim, after spawn, and
+    /// atomically at park, tearing the spawned child down itself when set.
+    /// Removed at park and on every early-return (no Drop guard — see
+    /// `register_inflight`).
+    inflight: HashMap<u64, InflightSetup>,
+    /// Source of unique `inflight` keys. A plain counter, NOT an ordering
+    /// clock: Item-1 parent-cancel coverage only needs a flag, and the park
+    /// tie-break prefers a buffered child terminal regardless of arrival order.
+    next_inflight_id: u64,
+}
+
+/// One in-flight `handle_request` setup tracked for parent-cancel coverage.
+struct InflightSetup {
+    parent_connection_id: String,
+    /// Set when a parent cancel lands while this delegation is mid-setup
+    /// (spawned / sending, not yet parked). Monotonic: once set it is never
+    /// cleared, so a cancel can't be lost between `handle_request`'s checkpoints.
+    canceled: bool,
 }
 
 impl PendingInner {
@@ -210,6 +238,51 @@ impl PendingInner {
     /// `handle_request` at park.
     fn take_early_cancel(&mut self, child_connection_id: &str) -> Option<String> {
         self.early_cancels.remove(child_connection_id)
+    }
+
+    /// Register an in-flight setup at `handle_request` entry, returning its
+    /// unique id. The caller MUST `deregister_inflight` on every exit path
+    /// (each early-return, and at park). There is deliberately NO Drop guard:
+    /// the park hand-off — `calls.insert` followed by `deregister_inflight` —
+    /// has to be atomic under this lock so a concurrent parent cancel sees the
+    /// entry in exactly one of `inflight` or `calls`, and a guard firing after
+    /// the lock releases would reopen that window.
+    fn register_inflight(&mut self, parent_connection_id: &str) -> u64 {
+        let id = self.next_inflight_id;
+        self.next_inflight_id = self.next_inflight_id.wrapping_add(1);
+        self.inflight.insert(
+            id,
+            InflightSetup {
+                parent_connection_id: parent_connection_id.to_string(),
+                canceled: false,
+            },
+        );
+        id
+    }
+
+    /// Drop an in-flight setup record (idempotent).
+    fn deregister_inflight(&mut self, id: u64) {
+        self.inflight.remove(&id);
+    }
+
+    /// Whether a parent cancel flagged this in-flight setup. False once the
+    /// record is gone (already parked / deregistered).
+    fn inflight_canceled(&self, id: u64) -> bool {
+        self.inflight.get(&id).map(|s| s.canceled).unwrap_or(false)
+    }
+
+    /// Flag every in-flight setup owned by `parent_connection_id` as canceled.
+    /// Called from `drain_for_parent_cancel` in the SAME lock acquisition that
+    /// drains the parked `calls`, so each of the parent's delegations is caught
+    /// either here (still in-flight → flagged; `handle_request` tears its child
+    /// down at the next checkpoint) or by the parked-call drain (already
+    /// parked) — never neither.
+    fn mark_inflight_canceled_for_parent(&mut self, parent_connection_id: &str) {
+        for setup in self.inflight.values_mut() {
+            if setup.parent_connection_id == parent_connection_id {
+                setup.canceled = true;
+            }
+        }
     }
 }
 
@@ -1029,9 +1102,45 @@ impl DelegationBroker {
         self.config.lock().await.clone()
     }
 
+    /// If this in-flight setup has been flagged canceled by a parent cancel,
+    /// deregister it and return true. One lock acquisition; used at the
+    /// pre-spawn / post-spawn checkpoints in `handle_request`.
+    async fn take_inflight_cancel(&self, inflight_id: u64) -> bool {
+        let mut inner = self.pending.inner.lock().await;
+        if inner.inflight_canceled(inflight_id) {
+            inner.deregister_inflight(inflight_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop this setup's in-flight record. Called on each `handle_request`
+    /// early-return that isn't a park hand-off (the park region deregisters
+    /// inline, atomically with `calls.insert`).
+    async fn drop_inflight(&self, inflight_id: u64) {
+        self.pending.inner.lock().await.deregister_inflight(inflight_id);
+    }
+
     /// Entry point. Drives the full lifecycle and returns whatever the parent
     /// LLM should see as the `delegate_to_agent` tool_result.
     pub async fn handle_request(&self, mut req: DelegationRequest) -> DelegationOutcome {
+        // Register this setup as the VERY FIRST thing — before the pre-cancel
+        // check's `.await` and the (possibly multi-second) claim poll — so a
+        // parent cancel landing ANYWHERE from here to park reaches it, not just
+        // after park (which is all the `cancel_by_parent*` parked-call drain
+        // covers on its own). The only residual gap is a cancel firing before
+        // the broker is even invoked for this request, which no
+        // in-`handle_request` mechanism can observe. Deregistered on every exit
+        // path below: each early-return via `drop_inflight` /
+        // `take_inflight_cancel`, or inline at park (atomically with
+        // `calls.insert`).
+        let inflight_id = self
+            .pending
+            .inner
+            .lock()
+            .await
+            .register_inflight(&req.parent_connection_id);
         // Pre-cancel short-circuit. If the MCP companion already received
         // `notifications/cancelled` for this `tools/call` before we even
         // started processing (cancel ran ahead of the UDS round-trip), we
@@ -1040,6 +1149,7 @@ impl DelegationBroker {
         // response either way (the companion suppresses it per MCP spec).
         if let Some(handle) = req.external_handle.as_deref() {
             if self.take_pre_canceled_handle(handle).await {
+                self.drop_inflight(inflight_id).await;
                 return DelegationOutcome::from_err(
                     DelegationError::Canceled {
                         reason: "canceled before spawn".into(),
@@ -1083,6 +1193,7 @@ impl DelegationBroker {
         }
         let cfg = self.config_snapshot().await;
         if !cfg.enabled {
+            self.drop_inflight(inflight_id).await;
             return DelegationOutcome::from_err(
                 DelegationError::Canceled {
                     reason: "delegation disabled".into(),
@@ -1106,12 +1217,16 @@ impl DelegationBroker {
         .await
         {
             Ok(d) => d,
-            Err(e) => return DelegationOutcome::from_err(e, None),
+            Err(e) => {
+                self.drop_inflight(inflight_id).await;
+                return DelegationOutcome::from_err(e, None);
+            }
         };
         // The child the broker is about to create would sit at `parent_depth + 1`.
         // Reject only when the *child* depth would strictly exceed the limit;
         // a child sitting exactly at `depth_limit` is allowed.
         if parent_depth + 1 > cfg.depth_limit {
+            self.drop_inflight(inflight_id).await;
             return DelegationOutcome::from_err(
                 DelegationError::DepthLimitExceeded {
                     current_depth: parent_depth,
@@ -1130,6 +1245,17 @@ impl DelegationBroker {
             .get(&req.agent_type)
             .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
             .unwrap_or((None, BTreeMap::new()));
+        // Checkpoint #1 (opportunistic): if a parent cancel already landed
+        // during the claim/depth phase, bail before spawning a child the parent
+        // has abandoned. No child exists yet, so there's nothing to tear down.
+        if self.take_inflight_cancel(inflight_id).await {
+            return DelegationOutcome::from_err(
+                DelegationError::Canceled {
+                    reason: "parent canceled".into(),
+                },
+                None,
+            );
+        }
         let child_connection_id = match self
             .spawner
             .spawn(
@@ -1143,12 +1269,28 @@ impl DelegationBroker {
         {
             Ok(id) => id,
             Err(e) => {
+                self.drop_inflight(inflight_id).await;
                 return DelegationOutcome::from_err(
                     DelegationError::SpawnFailed(e.to_string()),
                     None,
                 );
             }
         };
+
+        // Checkpoint #2: a parent cancel that landed during spawn() — the child
+        // now exists but no prompt has been sent, so disconnect it (mirroring
+        // the send-failure path's disconnect-only teardown) and bail. This is
+        // the primary guard for the spawn window, which can block while the
+        // agent process starts up.
+        if self.take_inflight_cancel(inflight_id).await {
+            let _ = self.spawner.disconnect(&child_connection_id).await;
+            return DelegationOutcome::from_err(
+                DelegationError::Canceled {
+                    reason: "parent canceled".into(),
+                },
+                None,
+            );
+        }
 
         // --- Send linked prompt ------------------------------------------------
         let call_id = uuid::Uuid::new_v4().to_string();
@@ -1187,12 +1329,13 @@ impl DelegationBroker {
             Err(e) => {
                 // Setup failed before parking — release the reservation (and
                 // discard any terminal that buffered against this delegation in
-                // the window) so nothing lingers or mis-binds a future id.
-                self.pending
-                    .inner
-                    .lock()
-                    .await
-                    .unreserve(&call_id, &child_connection_id);
+                // the window) so nothing lingers or mis-binds a future id, and
+                // drop the in-flight record in the same lock acquisition.
+                {
+                    let mut inner = self.pending.inner.lock().await;
+                    inner.unreserve(&call_id, &child_connection_id);
+                    inner.deregister_inflight(inflight_id);
+                }
                 let _ = self.spawner.disconnect(&child_connection_id).await;
                 return DelegationOutcome::from_err(
                     DelegationError::SpawnFailed(e.to_string()),
@@ -1219,23 +1362,36 @@ impl DelegationBroker {
         )
         .await;
 
-        // --- Register pending + await completion or cancel --------------------
-        // Under a single lock: drain any terminal event that fired while we were
-        // still setting up — a `TurnComplete` via `complete_call` (keyed by
-        // `call_id`) OR a child failure via `cancel_by_child_connection` (keyed
-        // by `child_connection_id`); either can race ahead of this
-        // registration. Then un-reserve the delegation and — only if nothing
-        // beat us — park the entry for a future resolver. When a terminal DID
-        // beat us we deliberately DON'T park: resolving inline below (never
-        // leaving an entry for a second resolver to grab) is what rules out a
-        // double-finalize.
+        // --- Register pending, or resolve a terminal that beat us -------------
+        // Under a single lock, decide this delegation's fate atomically against
+        // everything a concurrent resolver may have recorded while we were
+        // setting up:
+        //   * a child terminal buffered against the reservation — a
+        //     `TurnComplete` via `complete_call` (keyed by `call_id`) OR a child
+        //     failure via `cancel_by_child_connection` (keyed by
+        //     `child_connection_id`); either can race ahead of this park; or
+        //   * a parent cancel that flagged this in-flight setup
+        //     (`mark_inflight_canceled_for_parent`, which runs in the SAME lock
+        //     acquisition that drains the parked `calls`).
+        // Precedence: a real child terminal wins over a parent cancel — the
+        // child already produced a result, so the cancel is moot; this also
+        // matches the existing completion-over-teardown ordering. Only when
+        // NOTHING beat us do we park for a future resolver, deregistering the
+        // in-flight record adjacent to `calls.insert` with no `.await` between —
+        // so a parent cancel serialized AFTER us finds the entry in `calls` and
+        // drains it, while one serialized BEFORE us is seen here as
+        // `parent_canceled`. When a terminal/cancel DID beat us we deliberately
+        // DON'T park: resolving inline (never leaving an entry for a second
+        // resolver to grab) rules out a double-finalize.
+        enum Disposition {
+            ChildTerminal(DelegationOutcome),
+            ParentCanceled,
+            Parked,
+        }
         let (tx, rx) = oneshot::channel();
-        let early_outcome = {
+        let disposition = {
             let mut inner = self.pending.inner.lock().await;
-            // A completion (by `call_id`) takes precedence over a later
-            // teardown-cancel (by child id) — if both somehow buffered, the
-            // child's actual result wins.
-            let resolved = if let Some(outcome) = inner.take_early_complete(&call_id) {
+            let child_terminal = if let Some(outcome) = inner.take_early_complete(&call_id) {
                 Some(outcome)
             } else {
                 inner.take_early_cancel(&child_connection_id).map(|reason| {
@@ -1245,38 +1401,93 @@ impl DelegationBroker {
                     )
                 })
             };
+            let parent_canceled = inner.inflight_canceled(inflight_id);
             inner.unreserve(&call_id, &child_connection_id);
-            if resolved.is_none() {
-                inner.calls.insert(
-                    call_id.clone(),
-                    PendingCall {
-                        child_connection_id: child_connection_id.clone(),
-                        child_conversation_id,
-                        parent_connection_id: req.parent_connection_id.clone(),
-                        parent_tool_use_id: req.parent_tool_use_id.clone(),
-                        external_handle: req.external_handle.clone(),
-                        tx,
-                    },
-                );
+            match child_terminal {
+                Some(outcome) => {
+                    inner.deregister_inflight(inflight_id);
+                    Disposition::ChildTerminal(outcome)
+                }
+                None if parent_canceled => {
+                    inner.deregister_inflight(inflight_id);
+                    Disposition::ParentCanceled
+                }
+                None => {
+                    inner.calls.insert(
+                        call_id.clone(),
+                        PendingCall {
+                            child_connection_id: child_connection_id.clone(),
+                            child_conversation_id,
+                            parent_connection_id: req.parent_connection_id.clone(),
+                            parent_tool_use_id: req.parent_tool_use_id.clone(),
+                            external_handle: req.external_handle.clone(),
+                            tx,
+                        },
+                    );
+                    // Adjacent to the insert, no `.await` between (see above).
+                    inner.deregister_inflight(inflight_id);
+                    Disposition::Parked
+                }
             }
-            resolved
         };
 
-        // A child terminal event (completion or failure) beat our registration.
-        // Finish here so the parent's `delegate_to_agent` resolves instead of
-        // hanging on `rx.await` (the resolver no-oped because no entry existed
-        // when it fired). The `running` meta written above is correctly
-        // superseded by the terminal meta `finalize_delegation` writes.
-        if let Some(outcome) = early_outcome {
-            self.finalize_delegation(
-                &req.parent_connection_id,
-                &req.parent_tool_use_id,
-                &child_connection_id,
-                child_conversation_id,
-                &outcome,
-            )
-            .await;
-            return outcome;
+        match disposition {
+            // A child terminal event (completion or failure) beat our
+            // registration. Finish here so the parent's `delegate_to_agent`
+            // resolves instead of hanging on `rx.await` (the resolver no-oped
+            // because no entry existed when it fired). The `running` meta is
+            // correctly superseded by the terminal meta `finalize_delegation`
+            // writes.
+            Disposition::ChildTerminal(outcome) => {
+                self.finalize_delegation(
+                    &req.parent_connection_id,
+                    &req.parent_tool_use_id,
+                    &child_connection_id,
+                    child_conversation_id,
+                    &outcome,
+                )
+                .await;
+                return outcome;
+            }
+            // A parent cancel reached this delegation mid-setup — after the
+            // prompt was sent, before we parked. The child would otherwise run
+            // orphaned, so tear it down ourselves (cancel + disconnect, since a
+            // turn is in flight) and resolve as canceled, mirroring the teardown
+            // `finalize_parent_cancel` performs for parked entries.
+            Disposition::ParentCanceled => {
+                self.write_meta_if_real(
+                    &req.parent_connection_id,
+                    &req.parent_tool_use_id,
+                    build_delegation_meta(
+                        "failed",
+                        Some(&child_connection_id),
+                        Some(child_conversation_id),
+                        Some("canceled"),
+                    ),
+                )
+                .await;
+                self.emit_completed_if_real(
+                    &req.parent_connection_id,
+                    &req.parent_tool_use_id,
+                    &child_connection_id,
+                    child_conversation_id,
+                    DelegationResultSummary::Err {
+                        error_code: "canceled".to_string(),
+                    },
+                )
+                .await;
+                let _ = self.spawner.cancel(&child_connection_id).await;
+                let _ = self.spawner.disconnect(&child_connection_id).await;
+                return DelegationOutcome::from_err(
+                    DelegationError::Canceled {
+                        reason: "parent canceled".into(),
+                    },
+                    Some(child_conversation_id),
+                );
+            }
+            // Nothing beat us — the entry is parked; fall through to the second
+            // pre-cancel check and `rx.await`.
+            Disposition::Parked => {}
         }
 
         // Second pre-cancel check: a `notifications/cancelled` may have
@@ -1722,6 +1933,13 @@ impl DelegationBroker {
         self.drop_tool_calls_for_parent(parent_connection_id, keep_consumed)
             .await;
         let mut inner = self.pending.inner.lock().await;
+        // Flag every still-in-flight setup this parent owns in the SAME lock
+        // acquisition that drains its parked `calls`: a delegation is then
+        // caught either here (mid-setup → `handle_request` tears its child down
+        // at the next checkpoint / at park) or by the parked-call drain below
+        // (already parked) — there is no interleaving where both miss it. A
+        // separate lock for the flag would reopen that gap.
+        inner.mark_inflight_canceled_for_parent(parent_connection_id);
         let keys: Vec<String> = inner
             .calls
             .iter()
@@ -1784,6 +2002,13 @@ impl DelegationBroker {
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn pending_count(&self) -> usize {
         self.pending.inner.lock().await.calls.len()
+    }
+
+    /// Count of in-flight (registered-at-entry, not-yet-parked / not-yet-exited)
+    /// `handle_request` setups. Should return to 0 on every exit path.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn inflight_count(&self) -> usize {
+        self.pending.inner.lock().await.inflight.len()
     }
 
     /// Count of in-setup (reserved, not-yet-parked) delegations. Each holds one
@@ -3903,6 +4128,403 @@ mod tests {
         assert_eq!(broker.pending_count().await, 0);
     }
 
+    // -- Item 1: parent-cancel coverage of the `handle_request` setup window --
+
+    /// A parent cancel that lands while `handle_request` is INSIDE `spawn` (the
+    /// child exists but no prompt has been sent) must disconnect the child and
+    /// bail — never send it a prompt — instead of no-oping and letting it run
+    /// orphaned. Pinned with the spawn gate.
+    #[tokio::test]
+    async fn parent_cancel_in_spawn_window_disconnects_child_without_sending() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c2".into())).await;
+        mock.queue_send(Ok(99)).await; // staged but must NOT be consumed
+        let release = mock.install_spawn_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-2")).await })
+        };
+        // Inside spawn (call recorded, held by the gate): registered in-flight,
+        // not yet reserved.
+        loop {
+            if !mock.spawn_args.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(broker.inflight_count().await, 1);
+        assert_eq!(broker.reserved_child_count().await, 0, "not reserved yet");
+
+        broker.cancel_by_parent_turn("parent-conn").await;
+        let _ = release.send(());
+
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "canceled"),
+            other => panic!("expected canceled, got {other:?}"),
+        }
+        assert_eq!(mock.disconnects.lock().await.as_slice(), &["c2"]);
+        assert!(
+            mock.cancels.lock().await.is_empty(),
+            "no prompt was sent, so no cancel — disconnect only"
+        );
+        assert_eq!(
+            mock.send_results.lock().await.len(),
+            1,
+            "send must not be consumed — no prompt sent to an abandoned child"
+        );
+        assert_eq!(broker.inflight_count().await, 0);
+        assert_eq!(broker.reserved_child_count().await, 0);
+    }
+
+    /// A parent cancel that lands in the reserve→park window (prompt already
+    /// sent, entry not yet parked) must cancel AND disconnect the child and
+    /// resolve the request as canceled. Pinned with the send gate; also asserts
+    /// the running→failed/canceled meta trail.
+    #[tokio::test]
+    async fn parent_cancel_in_reserve_park_window_tears_down_child() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c3".into())).await;
+        mock.queue_send(Ok(33)).await;
+        let release = mock.install_send_gate().await;
+        let writer = Arc::new(MockMetaWriter::new());
+        let broker = broker_with_meta(mock.clone(), writer.clone()).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-3")).await })
+        };
+        // Spawned + reserved, held inside send_prompt.
+        loop {
+            if broker.reserved_child_count().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(broker.inflight_count().await, 1);
+        assert_eq!(broker.pending_count().await, 0, "not parked yet");
+
+        broker.cancel_by_parent_turn("parent-conn").await;
+        let _ = release.send(());
+
+        match driver.await.unwrap() {
+            DelegationOutcome::Err {
+                code,
+                child_conversation_id,
+                ..
+            } => {
+                assert_eq!(code, "canceled");
+                assert_eq!(child_conversation_id, Some(33));
+            }
+            other => panic!("expected canceled, got {other:?}"),
+        }
+        // Prompt was sent → child cancel()'d AND disconnected.
+        assert_eq!(mock.cancels.lock().await.as_slice(), &["c3"]);
+        assert_eq!(mock.disconnects.lock().await.as_slice(), &["c3"]);
+        assert_eq!(broker.inflight_count().await, 0);
+        assert_eq!(broker.reserved_child_count().await, 0);
+        assert_eq!(broker.early_cancel_count().await, 0);
+        assert_eq!(broker.pending_count().await, 0);
+
+        // Meta trail: running (pre-park) then failed/canceled (ParentCanceled).
+        let calls = writer.snapshot().await;
+        assert_eq!(calls.len(), 2);
+        let running = calls[0]
+            .meta
+            .get("codeg.delegation")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(running.get("status").unwrap().as_str().unwrap(), "running");
+        let failed = calls[1]
+            .meta
+            .get("codeg.delegation")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(failed.get("status").unwrap().as_str().unwrap(), "failed");
+        assert_eq!(
+            failed.get("error_code").unwrap().as_str().unwrap(),
+            "canceled"
+        );
+    }
+
+    /// First-terminal tie-break (child-priority): when a child completion
+    /// buffers and THEN a parent cancel lands, the real child result wins.
+    #[tokio::test]
+    async fn child_terminal_wins_over_later_parent_cancel() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c4".into())).await;
+        mock.queue_send(Ok(44)).await;
+        let release = mock.install_send_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-4")).await })
+        };
+        let call_id = loop {
+            if let Some(id) = broker.peek_reserved_call_id().await {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(broker.inflight_count().await, 1);
+
+        // Child completes FIRST, then the parent cancels — child result wins.
+        broker
+            .complete_call(
+                &call_id,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "done".into(),
+                    child_conversation_id: 44,
+                    child_agent_type: AgentType::ClaudeCode,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                }),
+            )
+            .await;
+        broker.cancel_by_parent_turn("parent-conn").await;
+        let _ = release.send(());
+
+        assert!(matches!(driver.await.unwrap(), DelegationOutcome::Ok(_)));
+        assert!(
+            mock.cancels.lock().await.is_empty(),
+            "child completed — the moot parent cancel must not cancel it"
+        );
+        assert_eq!(broker.inflight_count().await, 0);
+        assert_eq!(broker.early_complete_count().await, 0);
+    }
+
+    /// Item-1 tie-break is child-terminal priority (NOT arrival order): even
+    /// when the parent cancel is recorded BEFORE the child completion buffers, a
+    /// real child terminal still wins. (Item 3 would flip this to
+    /// first-terminal-wins; this test pins the Item-1 contract.)
+    #[tokio::test]
+    async fn child_terminal_wins_even_when_parent_cancel_arrived_first() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c5".into())).await;
+        mock.queue_send(Ok(55)).await;
+        let release = mock.install_send_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-5")).await })
+        };
+        let call_id = loop {
+            if let Some(id) = broker.peek_reserved_call_id().await {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+
+        // Parent cancels FIRST; the child completes anyway.
+        broker.cancel_by_parent_turn("parent-conn").await;
+        broker
+            .complete_call(
+                &call_id,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "late".into(),
+                    child_conversation_id: 55,
+                    child_agent_type: AgentType::ClaudeCode,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                }),
+            )
+            .await;
+        let _ = release.send(());
+
+        assert!(
+            matches!(driver.await.unwrap(), DelegationOutcome::Ok(_)),
+            "child-terminal priority: a buffered completion wins over the cancel flag"
+        );
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    /// The teardown variant `cancel_by_parent` covers the same reserve→park
+    /// window as the turn variant — both funnel through `drain_for_parent_cancel`
+    /// where the in-flight mark is applied.
+    #[tokio::test]
+    async fn parent_teardown_in_reserve_park_window_tears_down_child() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c7".into())).await;
+        mock.queue_send(Ok(77)).await;
+        let release = mock.install_send_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-7")).await })
+        };
+        loop {
+            if broker.reserved_child_count().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        broker.cancel_by_parent("parent-conn").await;
+        let _ = release.send(());
+
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "canceled"),
+            other => panic!("expected canceled, got {other:?}"),
+        }
+        assert_eq!(mock.cancels.lock().await.as_slice(), &["c7"]);
+        assert_eq!(mock.disconnects.lock().await.as_slice(), &["c7"]);
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    /// A cancel targeting a DIFFERENT parent must not flag this setup: it parks
+    /// normally and resolves via its own child terminal.
+    #[tokio::test]
+    async fn parent_cancel_for_other_parent_leaves_setup_intact() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c8".into())).await;
+        mock.queue_send(Ok(88)).await;
+        let release = mock.install_send_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-8")).await })
+        };
+        loop {
+            if broker.reserved_child_count().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Wrong-parent cancel — a no-op for this setup.
+        broker.cancel_by_parent_turn("some-other-parent").await;
+        let _ = release.send(());
+
+        // It must park normally; resolve it via its child completion.
+        let parked = loop {
+            if let Some(id) = broker.peek_first_pending_call_id().await {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        broker
+            .complete_call(
+                &parked,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "fine".into(),
+                    child_conversation_id: 88,
+                    child_agent_type: AgentType::ClaudeCode,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                }),
+            )
+            .await;
+        assert!(matches!(driver.await.unwrap(), DelegationOutcome::Ok(_)));
+        assert!(
+            mock.cancels.lock().await.is_empty(),
+            "a wrong-parent cancel must not tear this child down"
+        );
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    /// The in-flight record is deregistered on every exit path: the normal park
+    /// hand-off, and each early-return (disabled / spawn-fail / send-fail).
+    #[tokio::test]
+    async fn inflight_drained_on_normal_park() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-ok".into())).await;
+        mock.queue_send(Ok(70)).await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move { broker.handle_request(request(1, "pt-ok")).await })
+        };
+        let call_id = loop {
+            if let Some(id) = broker.peek_first_pending_call_id().await {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        // Parked → the in-flight record was handed off (deregistered) at park.
+        assert_eq!(broker.inflight_count().await, 0, "park deregisters in-flight");
+        broker
+            .complete_call(
+                &call_id,
+                DelegationOutcome::Ok(DelegationSuccess {
+                    text: "ok".into(),
+                    child_conversation_id: 70,
+                    child_agent_type: AgentType::ClaudeCode,
+                    turn_count: 1,
+                    duration_ms: 5,
+                    token_usage: None,
+                }),
+            )
+            .await;
+        assert!(matches!(driver.await.unwrap(), DelegationOutcome::Ok(_)));
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn inflight_drained_on_disabled() {
+        let broker = DelegationBroker::new(
+            Arc::new(MockSpawner::new()) as Arc<dyn ConnectionSpawner>,
+            shallow_lookup(),
+        );
+        // `enabled` defaults to false → short-circuits at the disabled check.
+        let outcome = broker.handle_request(request(1, "pt-d")).await;
+        assert!(matches!(outcome, DelegationOutcome::Err { .. }));
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn inflight_drained_on_spawn_failure() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Err(SpawnerError::Spawn("nope".into())))
+            .await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+        match broker.handle_request(request(1, "pt-sf")).await {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "spawn_failed"),
+            other => panic!("expected spawn_failed, got {other:?}"),
+        }
+        assert_eq!(broker.inflight_count().await, 0);
+        assert!(mock.disconnects.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inflight_drained_on_send_failure() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c6".into())).await;
+        mock.queue_send(Err(SpawnerError::Send("boom".into())))
+            .await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+        match broker.handle_request(request(1, "pt-sendf")).await {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "spawn_failed"),
+            other => panic!("expected spawn_failed, got {other:?}"),
+        }
+        assert_eq!(broker.inflight_count().await, 0);
+        assert_eq!(mock.disconnects.lock().await.as_slice(), &["c6"]);
+        assert!(mock.cancels.lock().await.is_empty());
+    }
+
     /// A terminal failure for a child the broker never reserved (unknown id, or
     /// one whose delegation already fully resolved) is a clean no-op — it must
     /// not buffer, so the buffer can only ever hold genuine pre-registration
@@ -4194,6 +4816,52 @@ mod tests {
         // been opened.
         assert!(mock.cancels.lock().await.is_empty());
         assert!(mock.disconnects.lock().await.is_empty());
+        // The pre-cancel early-return must also drop the in-flight record
+        // (registered as handle_request's first statement, before this check).
+        assert_eq!(broker.inflight_count().await, 0);
+    }
+
+    /// The real MCP-shaped path carries an `external_handle`. Registration now
+    /// happens as `handle_request`'s FIRST statement — before the pre-cancel
+    /// `.await` — so a parent cancel in the setup window reaches these requests
+    /// too, not just the synthetic-id path. Guards the regression Codex flagged
+    /// (registration ordered after the pre-cancel await left a miss window).
+    #[tokio::test]
+    async fn parent_cancel_covers_external_handle_setup_window() {
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("c-eh".into())).await;
+        mock.queue_send(Ok(21)).await;
+        let release = mock.install_send_gate().await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+        enable_delegation(&broker).await;
+
+        let driver = {
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                broker
+                    .handle_request(request_with_handle(1, "pt-eh", "h-eh"))
+                    .await
+            })
+        };
+        loop {
+            if broker.reserved_child_count().await == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(broker.inflight_count().await, 1);
+
+        broker.cancel_by_parent_turn("parent-conn").await;
+        let _ = release.send(());
+
+        match driver.await.unwrap() {
+            DelegationOutcome::Err { code, .. } => assert_eq!(code, "canceled"),
+            other => panic!("expected canceled, got {other:?}"),
+        }
+        assert_eq!(mock.cancels.lock().await.as_slice(), &["c-eh"]);
+        assert_eq!(mock.disconnects.lock().await.as_slice(), &["c-eh"]);
+        assert_eq!(broker.inflight_count().await, 0);
     }
 
     #[tokio::test]

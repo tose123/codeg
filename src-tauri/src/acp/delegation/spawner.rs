@@ -126,6 +126,12 @@ pub mod mock {
         /// pending entry, so a racing terminal event can be exercised
         /// deterministically. `None` (default) = no gate, return immediately.
         pub send_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// When set, `spawn` awaits this receiver before returning the child id
+        /// (but AFTER recording `spawn_args`) — lets a test pin `handle_request`
+        /// INSIDE `spawn`, before it reserves the child or sends a prompt, to
+        /// exercise a parent cancel landing in the spawn window. `None`
+        /// (default) = no gate, return immediately.
+        pub spawn_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +165,16 @@ pub mod mock {
             *self.send_gate.lock().await = Some(rx);
             tx
         }
+
+        /// Install a one-shot gate that holds the next `spawn` (after it records
+        /// `spawn_args`, before it returns the child id) until the returned
+        /// sender fires. Used to deterministically pin `handle_request` in the
+        /// spawn window. See [`MockSpawner::spawn_gate`].
+        pub async fn install_spawn_gate(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.spawn_gate.lock().await = Some(rx);
+            tx
+        }
     }
 
     #[async_trait]
@@ -178,6 +194,13 @@ pub mod mock {
                 preferred_mode_id,
                 preferred_config_values,
             });
+            // Honor a test-installed gate: block here (after recording the call,
+            // before returning the child id) so a test can pin `handle_request`
+            // in the spawn window — before it reserves the child or sends.
+            let gate = self.spawn_gate.lock().await.take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
             self.spawn_results
                 .lock()
                 .await
