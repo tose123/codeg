@@ -91,13 +91,31 @@ pub fn run() -> ! {
             })
     };
 
-    let mut child = spawn_worker();
+    // Spawn + publish the PID, then close the spawn→store race: if a stop
+    // signal landed in that window the handler couldn't forward it (the PID
+    // was still 0), so forward it here.
+    let spawn_and_track = || -> std::process::Child {
+        let child = spawn_worker();
+        let pid = child.id() as i32;
+        WORKER_PID.store(pid, Ordering::SeqCst);
+        if TERMINATING.load(Ordering::SeqCst) {
+            // SAFETY: `kill` is async-signal-safe; `pid` is our just-spawned child.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        child
+    };
+
+    // A worker is "on trial" when this launch is the trial of a freshly
+    // swapped version — i.e. a staged-upgrade marker was present at launch. A
+    // plain restart (no pending upgrade) consumes no marker and is not on
+    // trial, so it is never auto-rolled-back. The initial launch can also be
+    // a trial if a swap completed in a prior lifetime and the container was
+    // restarted before the upgrade-restart fired.
+    let mut on_trial = crate::update::install::take_upgrade_staged();
+    let mut child = spawn_and_track();
     let mut spawned_at = std::time::Instant::now();
-    // True only for a worker we relaunched *because of* an upgrade — it is on
-    // probation until it survives the trial window. The initial worker is the
-    // baseline (there is nothing earlier to roll back to).
-    let mut on_trial = false;
-    WORKER_PID.store(child.id() as i32, Ordering::SeqCst);
     eprintln!("[supervise] worker started (pid {})", child.id());
 
     loop {
@@ -149,10 +167,12 @@ pub fn run() -> ! {
                 if TERMINATING.load(Ordering::SeqCst) {
                     std::process::exit(0);
                 }
-                child = spawn_worker();
+                // On trial only if an upgrade was actually staged (consumes
+                // the marker); a plain restart leaves no marker and relaunches
+                // without probation.
+                on_trial = crate::update::install::take_upgrade_staged();
+                child = spawn_and_track();
                 spawned_at = std::time::Instant::now();
-                on_trial = true; // freshly upgraded — on probation
-                WORKER_PID.store(child.id() as i32, Ordering::SeqCst);
                 eprintln!("[supervise] worker relaunched (pid {})", child.id());
                 continue;
             }
@@ -166,10 +186,9 @@ pub fn run() -> ! {
                     elapsed.as_secs_f64()
                 ))
             {
-                child = spawn_worker();
-                spawned_at = std::time::Instant::now();
                 on_trial = false;
-                WORKER_PID.store(child.id() as i32, Ordering::SeqCst);
+                child = spawn_and_track();
+                spawned_at = std::time::Instant::now();
                 eprintln!("[supervise] previous version relaunched (pid {})", child.id());
                 continue;
             }
@@ -186,10 +205,9 @@ pub fn run() -> ! {
                     elapsed.as_secs_f64()
                 ))
             {
-                child = spawn_worker();
-                spawned_at = std::time::Instant::now();
                 on_trial = false;
-                WORKER_PID.store(child.id() as i32, Ordering::SeqCst);
+                child = spawn_and_track();
+                spawned_at = std::time::Instant::now();
                 eprintln!("[supervise] previous version relaunched (pid {})", child.id());
                 continue;
             }
@@ -211,7 +229,9 @@ pub fn run() -> ! {
     let args = worker_args();
     let delay = runtime::restart_delay_ms();
     let trial = std::time::Duration::from_secs(runtime::upgrade_trial_secs());
-    let mut on_trial = false;
+    // On trial only if a swap was actually staged at this launch (see the unix
+    // path for the full rationale); a plain restart is never auto-rolled-back.
+    let mut on_trial = crate::update::install::take_upgrade_staged();
 
     loop {
         let spawned_at = std::time::Instant::now();
@@ -235,7 +255,8 @@ pub fn run() -> ! {
             Some(code) if code == runtime::EXIT_RESTART => {
                 eprintln!("[supervise] upgrade restart requested; relaunching in {delay}ms");
                 std::thread::sleep(std::time::Duration::from_millis(delay));
-                on_trial = true; // freshly upgraded — on probation
+                // Probation for the next launch only if an upgrade was staged.
+                on_trial = crate::update::install::take_upgrade_staged();
             }
             Some(code) => {
                 // A freshly-upgraded worker that dies fast can't boot —

@@ -137,6 +137,7 @@
     "restartingIn": "{seconds} 秒後に再起動します...",
     "waitingForServer": "サーバーの復帰を待っています...",
     "dockerUpgradeHint": "これは実行中のコンテナをアップグレードします。コンテナ再作成後も維持するには、docker compose pull も実行してください。",
+    "upgradeRolledBack": "アップグレードに失敗しました。サーバーは前のバージョンにロールバックしました。",
     "updateErrors": {
       "sourceUnavailable": "更新ソースに接続できません。ネットワークまたはプロキシを確認して再試行してください。",
       "network": "ネットワーク接続に失敗しました。ネットワークまたはプロキシを確認して再試行してください。",

@@ -137,6 +137,7 @@
     "restartingIn": "將在 {seconds} 秒後重新啟動...",
     "waitingForServer": "正在等待服務恢復...",
     "dockerUpgradeHint": "這將升級目前執行的容器。若要在容器重建後仍然生效，請同時執行 docker compose pull。",
+    "upgradeRolledBack": "升級失敗，伺服器已自動回復到上一版本。",
     "updateErrors": {
       "sourceUnavailable": "無法連線更新來源，請檢查網路或代理設定後重試。",
       "network": "網路連線異常，請檢查網路或代理設定後重試。",

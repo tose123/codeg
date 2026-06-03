@@ -137,6 +137,7 @@
     "restartingIn": "Reiniciando em {seconds} s...",
     "waitingForServer": "Aguardando o servidor voltar...",
     "dockerUpgradeHint": "Isto atualiza o contêiner em execução. Para manter após recriar o contêiner, execute também docker compose pull.",
+    "upgradeRolledBack": "Falha na atualização; o servidor reverteu para a versão anterior.",
     "updateErrors": {
       "sourceUnavailable": "Não foi possível acessar a fonte de atualização. Verifique sua rede ou proxy e tente novamente.",
       "network": "Falha na conexão de rede. Verifique sua rede ou proxy e tente novamente.",

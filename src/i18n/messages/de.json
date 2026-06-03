@@ -137,6 +137,7 @@
     "restartingIn": "Neustart in {seconds} s...",
     "waitingForServer": "Warten, bis der Server zurückkehrt...",
     "dockerUpgradeHint": "Dies aktualisiert den laufenden Container. Damit es nach dem Neuerstellen des Containers erhalten bleibt, führe auch docker compose pull aus.",
+    "upgradeRolledBack": "Upgrade fehlgeschlagen; der Server wurde auf die vorherige Version zurückgesetzt.",
     "updateErrors": {
       "sourceUnavailable": "Die Update-Quelle ist nicht erreichbar. Prüfe Netzwerk oder Proxy und versuche es erneut.",
       "network": "Netzwerkverbindung fehlgeschlagen. Prüfe Netzwerk oder Proxy und versuche es erneut.",

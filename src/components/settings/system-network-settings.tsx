@@ -418,12 +418,30 @@ export function SystemNetworkSettings() {
         timeoutMs: 90_000,
         intervalMs: 1500,
       })
-      if (healthy) {
-        toast.success(t("upgradeSuccess"))
-        window.location.reload()
-      } else {
+      if (!healthy) {
         setUpdateError(t("restartTimeout"))
         toast.error(t("restartTimeout"))
+        return
+      }
+      // The server answered — but the supervisor may have auto-rolled-back a
+      // version that couldn't boot, in which case the OLD version is now
+      // serving and healthy. Confirm the running version actually advanced
+      // before claiming success.
+      let rolledBack = false
+      if (result.version) {
+        try {
+          const after = await checkAppUpdate()
+          rolledBack = after.currentVersion !== result.version
+        } catch {
+          // Re-check failed; don't block — assume the upgrade applied.
+        }
+      }
+      if (rolledBack) {
+        setUpdateError(t("upgradeRolledBack"))
+        toast.error(t("upgradeRolledBack"))
+      } else {
+        toast.success(t("upgradeSuccess"))
+        window.location.reload()
       }
     } catch (err) {
       const message = formatUpdateError(err, "install")

@@ -75,9 +75,24 @@ fn busy() -> AppCommandError {
     AppCommandError::already_exists("An update operation is already in progress")
 }
 
+/// Refuse on platforms where in-place self-update is not validated. Windows
+/// server self-update is disabled (running-.exe swap + re-exec rebind are
+/// untested there); the desktop Windows app updates via tauri-plugin-updater.
+#[cfg(not(feature = "tauri-runtime"))]
+fn ensure_supported() -> Result<(), AppCommandError> {
+    if cfg!(target_os = "windows") {
+        return Err(AppCommandError::invalid_input(
+            "In-place server self-update is not supported on Windows yet",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(not(feature = "tauri-runtime"))]
 async fn perform_impl(state: Arc<AppState>) -> Result<UpdateActionResult, AppCommandError> {
     use crate::update::install::UpdatePhase;
+
+    ensure_supported()?;
 
     // Hold the lock for the whole download/verify/swap so a concurrent
     // perform/restart/rollback is rejected rather than racing the swap.
@@ -108,6 +123,7 @@ async fn perform_impl(state: Arc<AppState>) -> Result<UpdateActionResult, AppCom
 
 #[cfg(not(feature = "tauri-runtime"))]
 fn restart_impl(state: Arc<AppState>) -> Result<UpdateActionResult, AppCommandError> {
+    ensure_supported()?;
     // Just guard against a perform/rollback in flight; the lock is released
     // immediately (the restart itself is fire-and-forget).
     if state.system_op_lock.try_lock().is_err() {
@@ -126,6 +142,7 @@ fn restart_impl(state: Arc<AppState>) -> Result<UpdateActionResult, AppCommandEr
 
 #[cfg(not(feature = "tauri-runtime"))]
 async fn rollback_impl(state: Arc<AppState>) -> Result<UpdateActionResult, AppCommandError> {
+    ensure_supported()?;
     let _guard = state.system_op_lock.try_lock().map_err(|_| busy())?;
     crate::update::install::rollback()?;
     Ok(UpdateActionResult {

@@ -137,6 +137,7 @@
     "restartingIn": "Restarting in {seconds}s...",
     "waitingForServer": "Waiting for the server to come back...",
     "dockerUpgradeHint": "This upgrades the running container now. To keep it after recreating the container, also run docker compose pull.",
+    "upgradeRolledBack": "Upgrade failed; the server rolled back to the previous version.",
     "updateErrors": {
       "sourceUnavailable": "Cannot reach the update source. Check your network or proxy and try again.",
       "network": "Network connection failed. Check your network or proxy and try again.",

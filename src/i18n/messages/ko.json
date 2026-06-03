@@ -137,6 +137,7 @@
     "restartingIn": "{seconds}초 후에 다시 시작합니다...",
     "waitingForServer": "서버가 복구되기를 기다리는 중...",
     "dockerUpgradeHint": "실행 중인 컨테이너를 업그레이드합니다. 컨테이너 재생성 후에도 유지하려면 docker compose pull도 실행하세요.",
+    "upgradeRolledBack": "업그레이드에 실패하여 서버가 이전 버전으로 롤백되었습니다.",
     "updateErrors": {
       "sourceUnavailable": "업데이트 소스에 연결할 수 없습니다. 네트워크 또는 프록시를 확인한 뒤 다시 시도하세요.",
       "network": "네트워크 연결에 실패했습니다. 네트워크 또는 프록시를 확인한 뒤 다시 시도하세요.",

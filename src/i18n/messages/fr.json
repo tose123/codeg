@@ -137,6 +137,7 @@
     "restartingIn": "Redémarrage dans {seconds} s...",
     "waitingForServer": "En attente du retour du serveur...",
     "dockerUpgradeHint": "Cela met à niveau le conteneur en cours d'exécution. Pour le conserver après la recréation du conteneur, exécutez aussi docker compose pull.",
+    "upgradeRolledBack": "Échec de la mise à niveau ; le serveur est revenu à la version précédente.",
     "updateErrors": {
       "sourceUnavailable": "Impossible d’atteindre la source de mise à jour. Vérifiez votre réseau ou proxy et réessayez.",
       "network": "La connexion réseau a échoué. Vérifiez votre réseau ou proxy et réessayez.",

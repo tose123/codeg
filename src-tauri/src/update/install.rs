@@ -20,6 +20,13 @@ use crate::update::{verify, version};
 /// unbounded allocation, not a real limit.
 const MAX_ARCHIVE_BYTES: u64 = 600 * 1024 * 1024;
 
+/// Cap on cumulative *decompressed* bytes during extraction. The compressed
+/// download is bounded separately by [`MAX_ARCHIVE_BYTES`]; this stops a
+/// signed-but-mispackaged (or, under key compromise, hostile) archive from
+/// expanding without bound and filling the disk while it holds the update
+/// lock. Real server bundles are well under this.
+const MAX_EXTRACTED_BYTES: u64 = 1536 * 1024 * 1024;
+
 /// Progress milestones surfaced to the frontend over the WS bridge.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +109,52 @@ fn resolve_targets() -> Result<Targets, AppCommandError> {
     })
 }
 
+// ─── staged-upgrade marker ────────────────────────────────────────────────
+//
+// A completed swap drops this marker next to the server binary. It does two
+// jobs:
+//   1. Tells the supervisor that the *next* worker launch is the trial of a
+//      newly-swapped version (so it is put on probation and auto-rolled-back
+//      if it cannot boot) — and, crucially, that a plain `restart_app` with
+//      no pending upgrade is NOT a trial.
+//   2. Makes a second `perform_update` refuse before the first has been
+//      applied by a restart; re-swapping would overwrite the `.bak` with the
+//      already-new files and destroy rollback to the original version.
+
+fn upgrade_marker_path() -> Option<PathBuf> {
+    crate::update::runtime::self_exe()
+        .parent()
+        .map(|d| d.join(".codeg-upgrade-staged"))
+}
+
+/// True if a swapped-but-not-yet-applied upgrade is staged.
+pub fn upgrade_staged() -> bool {
+    upgrade_marker_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Record that an upgrade has been staged (best-effort: a failure only means
+/// the supervisor won't put the next launch on probation, not data loss).
+fn mark_upgrade_staged() {
+    if let Some(p) = upgrade_marker_path() {
+        if let Err(e) = std::fs::write(&p, b"staged\n") {
+            eprintln!("[update][WARN] failed to write upgrade marker: {e}");
+        }
+    }
+}
+
+/// Consume the staged-upgrade marker, returning whether it was present. The
+/// supervisor calls this when (re)launching a worker: a present marker means
+/// this launch is the trial of a freshly-swapped version.
+pub fn take_upgrade_staged() -> bool {
+    match upgrade_marker_path() {
+        Some(p) if p.exists() => {
+            let _ = std::fs::remove_file(&p);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Fail fast if we cannot write where the swap needs to land — much better
 /// to abort before downloading 50 MB than to discover a read-only
 /// `/usr/local/bin` halfway through.
@@ -151,6 +204,15 @@ pub async fn perform_update(
         )
     })?;
 
+    // Refuse to stage a second upgrade on top of one that was swapped but not
+    // yet applied by a restart: re-swapping would move the already-new files
+    // into `.bak` and lose the ability to roll back to the original version.
+    if upgrade_staged() {
+        return Err(AppCommandError::already_exists(
+            "An update is already staged; restart the server to apply it before updating again",
+        ));
+    }
+
     let targets = resolve_targets()?;
     preflight_writable(&targets)?;
 
@@ -187,10 +249,13 @@ pub async fn perform_update(
     let new_server = bundle_root.join(server_bin_filename());
     let new_mcp = bundle_root.join(mcp_bin_filename());
     let new_web = bundle_root.join("web");
-    if !new_server.exists() {
+    // Require the full bundle before touching any live file. A signed but
+    // mis-packaged release that dropped, say, `web/` must not be allowed to
+    // install a half-new mixture (new server, stale frontend).
+    if !new_server.exists() || !new_mcp.exists() || !new_web.is_dir() {
         return Err(AppCommandError::new(
             crate::app_error::AppErrorCode::TaskExecutionFailed,
-            "Downloaded update is missing the server binary",
+            "Downloaded update is incomplete (expected codeg-server, codeg-mcp and a web/ directory)",
         ));
     }
 
@@ -211,6 +276,11 @@ pub async fn perform_update(
         let _ = restore_dir_from_bak(&targets.web_dir);
         return Err(e);
     }
+
+    // The swap is complete. Mark it staged so (a) the supervisor puts the
+    // next launch on probation and (b) a second perform is refused until a
+    // restart applies this one.
+    mark_upgrade_staged();
 
     Ok(InstallOutcome {
         version: new_version,
@@ -322,6 +392,7 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), AppCommandError> {
     let entries = archive
         .entries()
         .map_err(|e| extract_err("read tar entries", e))?;
+    let mut extracted: u64 = 0;
     for entry in entries {
         let mut entry = entry.map_err(|e| extract_err("read tar entry", e))?;
         let rel = entry
@@ -330,9 +401,17 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), AppCommandError> {
             .into_owned();
         let safe = sanitize_entry_path(&rel)?;
         let out = dest.join(&safe);
-        if entry.header().entry_type().is_dir() {
+        let etype = entry.header().entry_type();
+        if etype.is_dir() {
             std::fs::create_dir_all(&out).map_err(AppCommandError::io)?;
-        } else {
+        } else if etype.is_file() {
+            // Bound cumulative decompressed output before writing anything.
+            extracted = extracted.saturating_add(entry.header().size().unwrap_or(0));
+            if extracted > MAX_EXTRACTED_BYTES {
+                return Err(AppCommandError::invalid_input(
+                    "Update archive decompresses to more than the allowed size",
+                ));
+            }
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent).map_err(AppCommandError::io)?;
             }
@@ -341,6 +420,15 @@ fn extract_tar_gz(bytes: &[u8], dest: &Path) -> Result<(), AppCommandError> {
             entry
                 .unpack(&out)
                 .map_err(|e| extract_err("unpack tar entry", e))?;
+        } else {
+            // Reject symlinks, hardlinks, devices, fifos. `unpack` would
+            // materialize a symlink, letting a later entry write through it to
+            // escape the staging dir before any `.bak` exists. We only ever
+            // ship regular files and directories.
+            return Err(AppCommandError::invalid_input(format!(
+                "Update archive contains an unsupported entry type ({etype:?}): {}",
+                safe.display()
+            )));
         }
     }
     Ok(())
@@ -351,6 +439,7 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), AppCommandError> {
 
     let mut archive =
         ZipArchive::new(Cursor::new(bytes)).map_err(|e| extract_err("open zip", e))?;
+    let mut extracted: u64 = 0;
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
@@ -365,6 +454,13 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), AppCommandError> {
         if file.is_dir() {
             std::fs::create_dir_all(&out).map_err(AppCommandError::io)?;
             continue;
+        }
+        // Bound cumulative decompressed output (zip-bomb guard).
+        extracted = extracted.saturating_add(file.size());
+        if extracted > MAX_EXTRACTED_BYTES {
+            return Err(AppCommandError::invalid_input(
+                "Update archive decompresses to more than the allowed size",
+            ));
         }
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(AppCommandError::io)?;
