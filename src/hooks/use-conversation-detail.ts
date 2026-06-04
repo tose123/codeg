@@ -14,7 +14,7 @@ export function useConversationDetail(
     /**
      * Gate the built-in auto-fetch. Defaults to `true`. Pass `false` when the
      * caller drives fetching itself and must prevent a fetch from landing at
-     * the wrong moment — e.g. the sub-agent session sheet, which must not load
+     * the wrong moment — e.g. the sub-agent session dialog, which must not load
      * the child's persisted detail while it is mid-stream (the parser surfaces
      * the in-progress turn as a normal turn, which would then duplicate the
      * live stream).

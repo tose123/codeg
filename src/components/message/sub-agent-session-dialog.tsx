@@ -12,11 +12,11 @@
  * approval, the dialog is surfaced here to allow/deny, since the parent
  * card itself is non-interactive (it only badges "awaiting approval").
  *
- * Streaming: while the sheet is open, the child connection's live
+ * Streaming: while the dialog is open, the child connection's live
  * message and status (from `acp-connections-context`) are mirrored
  * into the runtime session for the child `conversationId` so the
  * `MessageListView` shows real-time deltas. The bridge runs only
- * while the sheet is mounted; once it closes, no further mirroring
+ * while the dialog is mounted; once it closes, no further mirroring
  * happens. Persistence of completed turns comes from the broker's
  * own DB writes, surfaced via `useConversationDetail`.
  */
@@ -27,11 +27,11 @@ import { useTranslations } from "next-intl"
 import { AgentIcon } from "@/components/agent-icon"
 import { MessageListView } from "@/components/message/message-list-view"
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetTitle,
-} from "@/components/ui/sheet"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
 import { useConversationRuntime } from "@/contexts/conversation-runtime-context"
 import {
@@ -79,29 +79,29 @@ function useChildConnectionState(
  * Bridge the child connection's `liveMessage` and status transitions into
  * the runtime session for `childConversationId`, so the read-only
  * `MessageListView` sees streaming turns and turn completions while the
- * sheet is open.
+ * dialog is open.
  *
  * Mirrors the effects in `conversation-detail-panel.tsx`, with one concern
- * specific to this read-only sheet:
+ * specific to this read-only dialog:
  *
  *  **Close-mid-stream / reopen-after-complete.** The cleanup of the
  *  mirror-live effect intentionally does not clear `liveMessage` while
  *  still prompting (so it remains promotable for the completeTurn edge).
- *  If the user closes the sheet during that window and the child later
+ *  If the user closes the dialog during that window and the child later
  *  finishes, no bridge is running to dispatch `completeTurn`, leaving stale
  *  `liveMessage` in runtime state. On reopen, `fetchDetail`'s active-data
  *  guard would skip the refetch and the user would see a stale partial
- *  transcript. We solve this by calling `removeConversation` on the sheet
- *  body's full unmount — the runtime session is owned by this sheet alone,
+ *  transcript. We solve this by calling `removeConversation` on the dialog
+ *  body's full unmount — the runtime session is owned by this dialog alone,
  *  so dropping it forces the next open to fetch the persisted detail from
  *  scratch.
  *
- * The detail-fetch no longer races the streaming bridge: the sheet's mount
+ * The detail-fetch no longer races the streaming bridge: the dialog's mount
  * fetch uses `preserveLive: true`, so `FETCH_DETAIL_SUCCESS` keeps the bridged
  * `liveMessage` instead of wiping it — no re-bridge effect is needed.
  *
  * One more case is handled explicitly: **reopen-after-completion.** If the
- * sheet mounts onto a child that already finished but whose connection still
+ * dialog mounts onto a child that already finished but whose connection still
  * holds its final `liveMessage` (kept for a short grace period after
  * completion), the streaming→settled `completeTurn` edge never fires and the
  * non-live mirror is rejected while the detail loads — so the
@@ -156,7 +156,7 @@ function useChildLiveBridge(
     }
   }, [liveMessage, connStatus, childConversationId, setLiveMessage])
 
-  // Adopt-settled-reply: handle reopening the sheet onto a child that ALREADY
+  // Adopt-settled-reply: handle reopening the dialog onto a child that ALREADY
   // finished but whose connection still carries its final liveMessage (kept for
   // CHILD_DETACH_GRACE_MS after completion to bridge DB lag). For such a mount
   // the streaming→settled completeTurn edge never fires (we never saw
@@ -186,7 +186,7 @@ function useChildLiveBridge(
     completeTurn,
   ])
 
-  // Full teardown on sheet close: drop the runtime session so the next
+  // Full teardown on dialog close: drop the runtime session so the next
   // open starts from a fresh `fetchDetail` instead of stale bridged state.
   useEffect(() => {
     return () => {
@@ -195,7 +195,7 @@ function useChildLiveBridge(
   }, [childConversationId, removeConversation])
 }
 
-export function SubAgentSessionSheet({
+export function SubAgentSessionDialog({
   open,
   onOpenChange,
   childConversationId,
@@ -206,15 +206,15 @@ export function SubAgentSessionSheet({
   const t = useTranslations("Folder.chat.delegation")
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side="right"
-        className="w-full sm:max-w-2xl lg:max-w-3xl [&_[data-slot=sheet-close]]:top-2"
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        closeButtonClassName="top-2 right-2"
+        className="flex h-[85vh] w-full max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl p-0 lg:max-w-4xl"
       >
-        <SheetTitle className="sr-only">{t("detailTitle")}</SheetTitle>
-        <SheetDescription className="sr-only">
+        <DialogTitle className="sr-only">{t("detailTitle")}</DialogTitle>
+        <DialogDescription className="sr-only">
           {t("detailDescription")}
-        </SheetDescription>
+        </DialogDescription>
         {open ? (
           <SubAgentSessionBody
             childConversationId={childConversationId}
@@ -223,8 +223,8 @@ export function SubAgentSessionSheet({
             kickoffTask={kickoffTask}
           />
         ) : null}
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -283,7 +283,7 @@ function SubAgentSessionBody({
 
   // The child runs with the user's configured permission level, so it may
   // raise a permission request. The parent card no longer answers it inline
-  // (it only badges "awaiting approval"); this sheet is where the user
+  // (it only badges "awaiting approval"); this dialog is where the user
   // resolves it. Route the response through the CHILD connection id.
   const { respondPermission } = useAcpActions()
   const childPendingPermission = childConn?.pendingPermission ?? null

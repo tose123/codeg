@@ -70,7 +70,7 @@ export interface ConversationRuntimeSession {
 
   // Read-only delegation-child viewer marker. When true, `getTimelineTurns`
   // suppresses the persisted copy of the (single) reply turn while this
-  // session has a live or just-promoted reply — so the sub-agent sheet shows
+  // session has a live or just-promoted reply — so the sub-agent dialog shows
   // the kickoff + live/local reply exactly once, never a persisted partial
   // beside the live stream. Off for normal panels (which never set it), so
   // their multi-turn history is untouched. See `getTimelineTurns`.
@@ -120,7 +120,7 @@ type Action =
       /**
        * Keep `liveMessage` / `optimisticTurns` / `localTurns` across this
        * detail load even though `syncState` isn't "awaiting_persist". The
-       * sub-agent sheet sets this for a fetch issued while the child is
+       * sub-agent dialog sets this for a fetch issued while the child is
        * mid-stream: it loads the persisted detail to surface the user kickoff
        * turn, but the bridged/promoted reply must survive the fetch (otherwise
        * the streamed turn would blank until the next ContentDelta re-bridges
@@ -135,7 +135,7 @@ type Action =
       /**
        * Optional kickoff prompt text to store alongside the flag. `undefined`
        * leaves the existing `delegationKickoffText` untouched (e.g. a pure
-       * clear); a string (or null) overwrites it. The sub-agent sheet passes
+       * clear); a string (or null) overwrites it. The sub-agent dialog passes
        * the parent's known `delegate_to_agent` task so the kickoff user turn
        * can be synthesized before the async transcript catches up.
        */
@@ -786,7 +786,7 @@ function reducer(
       // in-flight buffers (localTurns/optimisticTurns/liveMessage). Preserve
       // them when the user actively sent a message and is awaiting the agent
       // response (awaiting_persist), OR the caller asked to keep the live state
-      // via `preserveLive` (the sub-agent sheet, folding the persisted user
+      // via `preserveLive` (the sub-agent dialog, folding the persisted user
       // kickoff in while the child still streams/just-finished its reply — the
       // bridged/promoted reply must outlive the fetch so a late partial can't
       // momentarily replace it).
@@ -878,9 +878,27 @@ function reducer(
           ).turns
         : []
 
-      // Promote: optimisticTurns + streamingTurns → localTurns
-      const promoted = [...current.localTurns, ...current.optimisticTurns]
-      promoted.push(...streamingTurns)
+      // Promote: optimisticTurns + streamingTurns → localTurns. Dedup by turn
+      // id (keep the latest copy) so a re-promotion of an already-promoted turn
+      // doesn't leave two same-id turns in `localTurns`. This happens when the
+      // background `turn_complete` listener races the panel's own promotion
+      // after the same liveMessage was re-bridged: the first COMPLETE_TURN puts
+      // a snapshot into localTurns, the live turn re-streams under the same id,
+      // and a second COMPLETE_TURN would append it again. Identical ids mean the
+      // same underlying turn, so the later (most complete) copy supersedes.
+      const promotedRaw = [
+        ...current.localTurns,
+        ...current.optimisticTurns,
+        ...streamingTurns,
+      ]
+      const promotedLastIndexById = new Map<string, number>()
+      promotedRaw.forEach((turn, i) => promotedLastIndexById.set(turn.id, i))
+      const promoted =
+        promotedLastIndexById.size === promotedRaw.length
+          ? promotedRaw
+          : promotedRaw.filter(
+              (turn, i) => promotedLastIndexById.get(turn.id) === i
+            )
 
       return updateSessionInState(state, action.conversationId, () => ({
         ...current,
@@ -1119,7 +1137,7 @@ interface ConversationRuntimeContextValue {
    * Re-fetch persisted detail, bypassing the active-data guard.
    * `options.preserveLive` (default false) keeps the current `liveMessage`,
    * `localTurns`, and `optimisticTurns` alive across the detail load — used by
-   * the sub-agent sheet when fetching while the child is mid-stream, so the
+   * the sub-agent dialog when fetching while the child is mid-stream, so the
    * bridged live reply survives and the just-fetched detail (which may include
    * a partial in-progress assistant turn from the DB) is rendered through the
    * `liveOwnsActiveTurn` filter instead of being blindly overwritten.
@@ -1158,7 +1176,7 @@ interface ConversationRuntimeContextValue {
   setPendingCleanup: (conversationId: number, pendingCleanup: boolean) => void
   setAcpLoadError: (conversationId: number, error: string | null) => void
   /**
-   * Mark this session's reply as live-owned (true = the sub-agent sheet is
+   * Mark this session's reply as live-owned (true = the sub-agent dialog is
    * viewing a child that owns its reply via the live bridge / localTurns).
    * While true, `getTimelineTurns` strips the persisted copy of the reply so
    * the live/local reply is shown exactly once. The optional `kickoffText`
@@ -1231,7 +1249,7 @@ export function ConversationRuntimeProvider({
       if (cached) return cached
 
       // Phase 1: DB historical turns.
-      // When liveOwnsActiveTurn is set (sub-agent sheet), the live/local reply
+      // When liveOwnsActiveTurn is set (sub-agent dialog), the live/local reply
       // is authoritative for the child's current (only) reply. Strip any
       // persisted assistant turns while there's a live or just-promoted local
       // reply in this session — only the kickoff prefix (everything before the
@@ -1265,7 +1283,7 @@ export function ConversationRuntimeProvider({
       // Synthetic delegation kickoff. The child agent CLI writes its JSONL
       // transcript asynchronously, so the persisted detail can lag the live
       // stream by up to seconds — during which `persistedTurns` carries no user
-      // turn and the sheet would show the streaming reply with no kickoff above
+      // turn and the dialog would show the streaming reply with no kickoff above
       // it. When this is a delegation-child viewer (`liveOwnsActiveTurn`) and no
       // persisted user turn has surfaced yet, synthesize the kickoff from the
       // known parent task text so it shows immediately. The moment the real
@@ -1333,8 +1351,31 @@ export function ConversationRuntimeProvider({
         }
       }
 
-      timelineCacheRef.current.set(session, result)
-      return result
+      // Invariant: the timeline never contains two turns with the same id. A
+      // premature/duplicate COMPLETE_TURN (e.g. the background `turn_complete`
+      // listener in ConversationDetailPanel racing the panel's own promotion)
+      // can leave the in-flight turn in BOTH `localTurns` (a promoted snapshot)
+      // and the still-streaming `liveMessage`, or — after a final re-promotion
+      // once the same liveMessage was re-bridged — twice in `localTurns`. All
+      // copies are built by `buildStreamingTurnsFromLiveMessage` from that one
+      // liveMessage, so they share `live-<cid>-<liveMessageId>[-i]` ids.
+      // Rendering both duplicates the whole assistant turn (visible doubling +
+      // React duplicate-key warnings once `mergeConsecutiveAssistantTurns`
+      // flat-maps their parts). Keep the LAST occurrence of each id: the live
+      // streaming copy (appended last) wins over an earlier promoted snapshot,
+      // and a re-promoted local turn wins over its stale earlier copy. Real
+      // turns always have distinct ids (liveMessage.id is minted fresh per
+      // prompt cycle, DB turn ids are unique), so a normal multi-turn timeline
+      // has no collisions and is returned untouched.
+      const lastIndexById = new Map<string, number>()
+      result.forEach((entry, i) => lastIndexById.set(entry.turn.id, i))
+      const deduped =
+        lastIndexById.size === result.length
+          ? result
+          : result.filter((entry, i) => lastIndexById.get(entry.turn.id) === i)
+
+      timelineCacheRef.current.set(session, deduped)
+      return deduped
     },
     [state.byConversationId]
   )

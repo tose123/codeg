@@ -9,7 +9,7 @@
  * The card is intentionally a status + navigation affordance ONLY: it does not
  * render the child's output inline and does not expand. The child's result is
  * delivered to the LLM via `get_delegation_status` and to the user by opening
- * the child session ("查看会话" → SubAgentSessionSheet, which also hosts the
+ * the child session ("查看会话" → SubAgentSessionDialog, which also hosts the
  * child's permission prompts). When the child is awaiting a permission decision
  * the status badge reflects it, cueing the user to open the session.
  */
@@ -29,7 +29,7 @@ import {
   type ConnectionState,
 } from "@/contexts/acp-connections-context"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
-import { SubAgentSessionSheet } from "@/components/message/sub-agent-session-sheet"
+import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
 
 interface Props {
   parentToolUseId: string
@@ -525,7 +525,7 @@ export function DelegatedSubThread({
   meta,
 }: Props) {
   const t = useTranslations("Folder.chat.delegation")
-  const [sheetOpen, setSheetOpen] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const parsed = useMemo(() => parseInput(input), [input])
   const parsedMeta = useMemo(() => parseDelegationMeta(meta), [meta])
   const taskId = useMemo(
@@ -552,7 +552,7 @@ export function DelegatedSubThread({
     return parseToolOutput(output)
   }, [output, errorText])
 
-  // The child id drives the "查看会话" button (and the sheet). Resolution order:
+  // The child id drives the "查看会话" button (and the dialog). Resolution order:
   // live binding → persisted snapshot meta → the broker's ack output (the
   // synthetic-id path that emits no binding/meta).
   const childConnectionId =
@@ -565,7 +565,7 @@ export function DelegatedSubThread({
 
   // Whether the child is blocked on a permission decision. The child is pulled
   // into the store by DelegationProvider (live or snapshot-seeded), so this is
-  // a status read only — the prompt itself is answered inside the sheet.
+  // a status read only — the prompt itself is answered inside the dialog.
   const childLive = useDelegationChildLive(childConnectionId)
   const childAwaitingPermission = childLive?.pendingPermission != null
 
@@ -635,7 +635,7 @@ export function DelegatedSubThread({
         {childConversationId != null && (
           <button
             type="button"
-            onClick={() => setSheetOpen(true)}
+            onClick={() => setDialogOpen(true)}
             className="shrink-0 flex items-center gap-1.5 px-3 border-l border-border text-xs font-medium text-foreground/80 hover:bg-muted/60 hover:text-foreground transition-colors"
             title={t("openDetail")}
             aria-label={t("openDetail")}
@@ -648,9 +648,9 @@ export function DelegatedSubThread({
         )}
       </div>
       {childConversationId != null && (
-        <SubAgentSessionSheet
-          open={sheetOpen}
-          onOpenChange={setSheetOpen}
+        <SubAgentSessionDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
           childConversationId={childConversationId}
           childConnectionId={childConnectionId}
           agentType={agentType}

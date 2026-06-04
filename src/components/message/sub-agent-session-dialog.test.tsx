@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { SubAgentSessionSheet } from "./sub-agent-session-sheet"
+import { SubAgentSessionDialog } from "./sub-agent-session-dialog"
 import enMessages from "@/i18n/messages/en.json"
 import type { ConnectionState } from "@/contexts/acp-connections-context"
 
@@ -77,7 +77,7 @@ vi.mock("@/contexts/acp-connections-context", async () => {
 
 // PermissionDialog has its own dependency graph (parsePermissionToolCall,
 // CodeBlock, UnifiedDiffPreview…). Stub it to a sentinel button that forwards
-// the response so we can assert the sheet surfaces + routes the child's prompt.
+// the response so we can assert the dialog surfaces + routes the child's prompt.
 vi.mock("@/components/chat/permission-dialog", () => ({
   PermissionDialog: ({
     permission,
@@ -173,7 +173,7 @@ function makeConnState(overrides: Partial<ConnectionState>): ConnectionState {
   }
 }
 
-describe("SubAgentSessionSheet", () => {
+describe("SubAgentSessionDialog", () => {
   beforeEach(() => {
     mockSetLiveMessage.mockReset()
     mockCompleteTurn.mockReset()
@@ -196,7 +196,7 @@ describe("SubAgentSessionSheet", () => {
 
   it("renders nothing while closed — the body and bridge stay dormant", () => {
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open={false}
         onOpenChange={() => {}}
         childConversationId={99}
@@ -218,7 +218,7 @@ describe("SubAgentSessionSheet", () => {
       } as unknown as ConnectionState["pendingPermission"],
     })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -236,7 +236,7 @@ describe("SubAgentSessionSheet", () => {
   it("renders no permission dialog when the child has no pending permission", () => {
     mockChildConnection = makeConnState({ pendingPermission: null })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -250,7 +250,7 @@ describe("SubAgentSessionSheet", () => {
   it("renders a strictly read-only MessageListView (no input/send/reload props)", () => {
     mockChildConnection = makeConnState({ status: "connected" })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -282,7 +282,7 @@ describe("SubAgentSessionSheet", () => {
       liveMessage,
     })
     const { unmount } = renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -294,7 +294,7 @@ describe("SubAgentSessionSheet", () => {
     // SET_LIVE_MESSAGE guard at acp-connections doesn't reject an active stream.
     expect(mockSetLiveMessage).toHaveBeenCalledWith(99, liveMessage, true)
 
-    // Closing the sheet (body unmount) must wipe the entire runtime session
+    // Closing the dialog (body unmount) must wipe the entire runtime session
     // so a later reopen starts from a fresh fetchDetail — otherwise a
     // close-mid-stream / reopen-after-complete leaks stale state.
     unmount()
@@ -304,7 +304,7 @@ describe("SubAgentSessionSheet", () => {
   it("marks the session as liveOwnsActiveTurn on open so getTimelineTurns filters persisted reply turns while a live reply is present", () => {
     mockChildConnection = makeConnState({ status: "prompting" })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -312,7 +312,7 @@ describe("SubAgentSessionSheet", () => {
         agentType="codex"
       />
     )
-    // The sheet always marks the session so the render-time projection can
+    // The dialog always marks the session so the render-time projection can
     // suppress the persisted copy of the reply while a live/local reply exists.
     // No kickoffTask prop → null kickoff text.
     expect(mockSetLiveOwnsActiveTurn).toHaveBeenCalledWith(99, true, null)
@@ -321,7 +321,7 @@ describe("SubAgentSessionSheet", () => {
   it("forwards the kickoff task text so the user turn can be synthesized before the transcript lands", () => {
     mockChildConnection = makeConnState({ status: "prompting" })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -351,7 +351,7 @@ describe("SubAgentSessionSheet", () => {
       liveMessage,
     })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -376,7 +376,7 @@ describe("SubAgentSessionSheet", () => {
     }
     mockChildConnection = makeConnState({ status: "prompting", liveMessage })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -410,7 +410,7 @@ describe("SubAgentSessionSheet", () => {
       liveMessage,
     })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -438,13 +438,13 @@ describe("SubAgentSessionSheet", () => {
       content: [],
       startedAt: Date.now(),
     }
-    // Child already finished while the sheet was closed: status is settled
+    // Child already finished while the dialog was closed: status is settled
     // (connected) but the connection still carries the final liveMessage for
     // its post-completion grace window. There is no streaming→settled edge to
     // promote it, and the persisted transcript may still lag.
     mockChildConnection = makeConnState({ status: "connected", liveMessage })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -467,7 +467,7 @@ describe("SubAgentSessionSheet", () => {
       liveMessage: null,
     })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -478,7 +478,7 @@ describe("SubAgentSessionSheet", () => {
     expect(mockCompleteTurn).not.toHaveBeenCalled()
   })
 
-  it("does not call setLiveMessage while the sheet is closed", () => {
+  it("does not call setLiveMessage while the dialog is closed", () => {
     mockChildConnection = makeConnState({
       status: "prompting",
       liveMessage: {
@@ -489,7 +489,7 @@ describe("SubAgentSessionSheet", () => {
       },
     })
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open={false}
         onOpenChange={() => {}}
         childConversationId={99}
@@ -501,9 +501,9 @@ describe("SubAgentSessionSheet", () => {
     expect(mockCompleteTurn).not.toHaveBeenCalled()
   })
 
-  it("does not duplicate the task body or a 'Read-only' badge in the sheet header — the outer card already shows them", () => {
+  it("does not duplicate the task body or a 'Read-only' badge in the dialog header — the outer card already shows them", () => {
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={() => {}}
         childConversationId={99}
@@ -517,7 +517,7 @@ describe("SubAgentSessionSheet", () => {
     expect(screen.queryByText("Read-only")).not.toBeInTheDocument()
   })
 
-  it("forces a fresh refetchDetail on every settled open so an in-flight fetch from a previous (now-closed) sheet can't surface stale state", () => {
+  it("forces a fresh refetchDetail on every settled open so an in-flight fetch from a previous (now-closed) dialog can't surface stale state", () => {
     // Child is idle (undefined connection ⇒ not "prompting"), so the gated
     // fetch effect runs. First open: the body mounts, refetchDetail must fire
     // even though no session exists yet.
@@ -528,11 +528,11 @@ describe("SubAgentSessionSheet", () => {
       childConnectionId: "c1",
       agentType: "codex" as const,
     }
-    const { unmount } = renderWithIntl(<SubAgentSessionSheet {...props} />)
+    const { unmount } = renderWithIntl(<SubAgentSessionDialog {...props} />)
     expect(mockRefetchDetail).toHaveBeenCalledWith(99, { preserveLive: true })
     const firstCallCount = mockRefetchDetail.mock.calls.length
 
-    // Close the sheet BEFORE any fetchDetail / refetchDetail response has
+    // Close the dialog BEFORE any fetchDetail / refetchDetail response has
     // resolved. The cleanup wipes the runtime session via
     // removeConversation, but the in-flight fetch is not cancelled — its
     // later success would resurrect the session with stale detail.
@@ -541,19 +541,19 @@ describe("SubAgentSessionSheet", () => {
 
     // Second open: body re-mounts. refetchDetail MUST fire again so the
     // resurrected stale session (if any) is overwritten with the latest DB
-    // state. The sheet disables useConversationDetail's auto-fetch, so this
+    // state. The dialog disables useConversationDetail's auto-fetch, so this
     // gated refetch is the sole fetch path.
-    renderWithIntl(<SubAgentSessionSheet {...props} />)
+    renderWithIntl(<SubAgentSessionDialog {...props} />)
     expect(mockRefetchDetail.mock.calls.length).toBeGreaterThan(firstCallCount)
     expect(mockRefetchDetail).toHaveBeenLastCalledWith(99, {
       preserveLive: true,
     })
   })
 
-  it("invokes onOpenChange when the user closes the sheet via the close button", () => {
+  it("invokes onOpenChange when the user closes the dialog via the close button", () => {
     const onOpenChange = vi.fn()
     renderWithIntl(
-      <SubAgentSessionSheet
+      <SubAgentSessionDialog
         open
         onOpenChange={onOpenChange}
         childConversationId={99}
@@ -561,7 +561,7 @@ describe("SubAgentSessionSheet", () => {
         agentType="codex"
       />
     )
-    // Radix Sheet's built-in close button is rendered with an accessible
+    // Radix Dialog's built-in close button is rendered with an accessible
     // "Close" label; clicking it should drive onOpenChange(false).
     const closeButton = screen.getByRole("button", { name: /close/i })
     fireEvent.click(closeButton)
