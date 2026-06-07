@@ -2075,7 +2075,6 @@
         "expand": "메시지 탐색 펼치기",
         "collapse": "메시지 탐색 접기",
         "jumpToMessage": "이동: {label}",
-        "noChanges": "파일 변경 없음",
         "fileCount": "{count, plural, one {#개 파일} other {#개 파일}}",
         "remove": "제거",
         "noDiffDataAvailable": "{filePath}에 대한 diff 데이터가 없습니다"
@@ -2216,6 +2215,9 @@
     "hide": "숨기기",
     "show": "표시",
     "copy": "복사",
+    "qrcode": "QR 코드",
+    "qrcodeTitle": "스캔하여 열기",
+    "qrcodeHint": "휴대폰으로 스캔하여 브라우저에서 Codeg를 엽니다",
     "addressLabel": "접속 주소",
     "tokenLabel": "접속 토큰",
     "tokenHint": "웹 클라이언트 첫 접속 시 이 토큰을 입력하세요",

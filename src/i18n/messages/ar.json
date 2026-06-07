@@ -2075,7 +2075,6 @@
         "expand": "توسيع تنقل الرسائل",
         "collapse": "طي تنقل الرسائل",
         "jumpToMessage": "الانتقال إلى: {label}",
-        "noChanges": "لا توجد تغييرات في الملفات",
         "fileCount": "{count, plural, one {# ملف} other {# ملفات}}",
         "remove": "إزالة",
         "noDiffDataAvailable": "لا توجد بيانات diff متاحة لـ {filePath}"
@@ -2216,6 +2215,9 @@
     "hide": "إخفاء",
     "show": "إظهار",
     "copy": "نسخ",
+    "qrcode": "رمز QR",
+    "qrcodeTitle": "امسح للفتح",
+    "qrcodeHint": "امسح بهاتفك لفتح Codeg في المتصفح",
     "addressLabel": "عنوان الوصول",
     "tokenLabel": "رمز الوصول",
     "tokenHint": "أدخل هذا الرمز عند الوصول إلى عميل الويب لأول مرة",

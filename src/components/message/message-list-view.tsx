@@ -58,6 +58,11 @@ import {
   type MessageNavEntry,
 } from "@/components/message/conversation-message-nav"
 import type { MessageScrollContextValue } from "@/components/message/message-scroll-context"
+import {
+  pickActiveThreadIndex,
+  reconcileActive,
+  type ActiveClickGuard,
+} from "@/lib/message-nav-active"
 import { extractSessionFilesGrouped } from "@/lib/session-files"
 import { useStickToBottomContext } from "use-stick-to-bottom"
 
@@ -133,6 +138,11 @@ const EMPTY_DELEGATIONS: DelegationCardSource[] = []
 // Stable empty reference so the navigator memo / equality checks don't churn
 // when a conversation has no user messages.
 const EMPTY_NAV_ENTRIES: MessageNavEntry[] = []
+
+// How long a marker click keeps its tick active while the smooth scroll
+// settles. Released early once the scroll arrives (see reconcileActive); this
+// is only the safety net for bottom-clamped targets that never reach the top.
+const ACTIVE_CLICK_GUARD_MS = 1000
 
 // Collect the `delegate_to_agent` tool calls within a turn's adapted parts,
 // recursing through tool-groups and goal-runs (a delegate call is normally a
@@ -740,6 +750,9 @@ export function MessageListView({
   const [activeThreadIndex, setActiveThreadIndex] = useState<number | null>(
     null
   )
+  // A marker click optimistically activates its tick; this guard stops the
+  // ensuing smooth-scroll readings from regressing it before the scroll lands.
+  const activeClickGuardRef = useRef<ActiveClickGuard | null>(null)
 
   // One entry per user message — including ones with no edits (placeholders).
   // `extractSessionFilesGrouped(..., {includeEmpty})` yields a group per user
@@ -782,18 +795,33 @@ export function MessageListView({
     return entries.length > 0 ? entries : EMPTY_NAV_ENTRIES
   }, [showMessageNav, timelineTurns, threadItems])
 
+  // Optimistically activate the clicked tick and arm a guard so the smooth
+  // scroll that follows can't regress the highlight to the previous tick
+  // before it lands (and so bottom-clamped targets, which never reach the top,
+  // still light up — see reconcileActive).
+  const handleMarkerActivate = useCallback((threadIndex: number) => {
+    activeClickGuardRef.current = {
+      target: threadIndex,
+      releaseAfter: performance.now() + ACTIVE_CLICK_GUARD_MS,
+    }
+    setActiveThreadIndex(threadIndex)
+  }, [])
+
   // navEntries is ascending by threadIndex; pick the last one at or above the
-  // viewport top and only setState when it changes (avoids a storm on every
-  // scroll frame). Depending on navEntries keeps this referentially stable
-  // while turns are unchanged, so the VirtualizedMessageThread memo still
-  // bails out on cross-tab broadcast re-renders.
+  // viewport top, reconcile it with any pending click guard, and only setState
+  // when it changes (avoids a storm on every scroll frame). Depending on
+  // navEntries keeps this referentially stable while turns are unchanged, so
+  // the VirtualizedMessageThread memo still bails out on cross-tab broadcast
+  // re-renders.
   const handleVisibleStartIndexChange = useCallback(
     (startIndex: number) => {
-      let active: number | null = null
-      for (const entry of navEntries) {
-        if (entry.threadIndex <= startIndex) active = entry.threadIndex
-        else break
-      }
+      const computed = pickActiveThreadIndex(navEntries, startIndex)
+      const { active, guard } = reconcileActive(
+        computed,
+        activeClickGuardRef.current,
+        performance.now()
+      )
+      activeClickGuardRef.current = guard
       setActiveThreadIndex((prev) => (prev === active ? prev : active))
     },
     [navEntries]
@@ -921,6 +949,7 @@ export function MessageListView({
           entries={navEntries}
           scrollApiRef={scrollApiRef}
           activeThreadIndex={activeThreadIndex}
+          onActivate={handleMarkerActivate}
         />
       )}
     </div>

@@ -28,7 +28,6 @@ import {
   useDelegationCardModel,
   type DelegationCardSource,
 } from "@/hooks/use-delegation-card-model"
-import { formatDuration } from "@/lib/delegation-status"
 import { AGENT_LABELS } from "@/lib/types"
 
 interface SubAgentOverlayProps {
@@ -132,7 +131,6 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
     errorCode,
     childConversationId,
     childConnectionId,
-    durationMs,
   } = useDelegationCardModel(source)
 
   // Unlike the inline DelegatedSubThread (which falls through to the generic
@@ -144,41 +142,33 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
   const clickable = childConversationId != null
 
   const rowBody = (
-    <>
-      <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground">
-        {agentType ? (
-          <AgentIcon agentType={agentType} className="h-4 w-4" />
-        ) : (
-          <span className="h-2 w-2 rounded-sm bg-muted-foreground/60" />
-        )}
-      </span>
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <div className="flex items-center gap-1.5">
-          <span className="truncate text-xs font-semibold text-foreground">
-            {agentType ? AGENT_LABELS[agentType] : t("unknownAgent")}
+    <div className="min-w-0 flex-1 space-y-1">
+      {/* Name line: small icon inline with the name, then task id + status. */}
+      <div className="flex items-center gap-1.5">
+        <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground">
+          {agentType ? (
+            <AgentIcon agentType={agentType} className="h-3.5 w-3.5" />
+          ) : (
+            <span className="h-1.5 w-1.5 rounded-sm bg-muted-foreground/60" />
+          )}
+        </span>
+        <span className="min-w-0 truncate text-xs font-semibold text-foreground">
+          {agentType ? AGENT_LABELS[agentType] : t("unknownAgent")}
+        </span>
+        {taskId && (
+          <span
+            className="shrink-0 font-mono text-[11px] text-muted-foreground"
+            title={taskId}
+          >
+            #{taskId.slice(0, 8)}
           </span>
-          {taskId && (
-            <span
-              className="shrink-0 font-mono text-[11px] text-muted-foreground"
-              title={taskId}
-            >
-              #{taskId.slice(0, 8)}
-            </span>
-          )}
-          {durationMs != null && (
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-              {formatDuration(durationMs)}
-            </span>
-          )}
-          <StatusBadge status={status} errorCode={errorCode} />
-        </div>
-        {task && (
-          <div className="line-clamp-1 break-words text-[11px] text-muted-foreground">
-            {task}
-          </div>
         )}
+        <StatusBadge status={status} errorCode={errorCode} />
       </div>
-    </>
+      {task && (
+        <div className="truncate text-[11px] text-muted-foreground">{task}</div>
+      )}
+    </div>
   )
 
   return (

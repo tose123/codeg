@@ -2075,7 +2075,6 @@
         "expand": "展开消息导航",
         "collapse": "收起消息导航",
         "jumpToMessage": "跳转到：{label}",
-        "noChanges": "无文件改动",
         "fileCount": "{count} 个文件",
         "remove": "移除",
         "noDiffDataAvailable": "未找到 {filePath} 的差异数据"
@@ -2216,6 +2215,9 @@
     "hide": "隐藏",
     "show": "显示",
     "copy": "复制",
+    "qrcode": "二维码",
+    "qrcodeTitle": "扫码打开",
+    "qrcodeHint": "用手机扫描，在浏览器中打开 Codeg",
     "addressLabel": "访问地址",
     "tokenLabel": "访问 Token",
     "tokenHint": "Web 客户端首次访问时需输入此 Token",

@@ -53,11 +53,6 @@ export interface DelegationCardModel {
   errorCode: string | undefined
   childConversationId: number | null
   childConnectionId: string | null
-  /** Broker-measured execution time (ms) for a terminal delegation. Comes from
-   *  the live `delegation_completed` binding (success path) and, after a
-   *  snapshot refresh, the persisted `meta["codeg.delegation"]`. Null while
-   *  running or when no timing is available. */
-  durationMs: number | null
   /** False when there's no live binding and the input parsed to neither an
    *  agent type nor a task — nothing useful to draw. Callers render null. */
   hasModel: boolean
@@ -151,9 +146,6 @@ export function useDelegationCardModel(
     errorCode,
     childConversationId,
     childConnectionId,
-    // Live binding wins (success path); persisted meta is the snapshot-refresh
-    // fallback (also covers canceled/failed, which the binding omits).
-    durationMs: binding?.durationMs ?? parsedMeta?.durationMs ?? null,
     hasModel: Boolean(binding || parsed.agentType || parsed.task),
   }
 }

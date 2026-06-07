@@ -215,53 +215,6 @@ describe("SubAgentOverlay", () => {
     expect(badge).toHaveAttribute("title", "abc12345def67890")
   })
 
-  it("shows the execution duration on a completed sub-agent row", () => {
-    bindings["pt-1"] = bindingOf({
-      parentToolUseId: "pt-1",
-      status: "ok",
-      durationMs: 2000,
-    })
-    const delegations = [
-      source("pt-1", { agent_type: "codex", task: "Investigate" }),
-    ]
-    renderWithIntl(
-      <SubAgentOverlay
-        delegations={delegations}
-        overlayKey="k-dur"
-        defaultExpanded
-      />
-    )
-    // formatDuration(2000) → "2.0s".
-    expect(screen.getByText("2.0s")).toBeInTheDocument()
-  })
-
-  it("recovers the duration from persisted delegation meta after a refresh", () => {
-    // No live binding (snapshot replay) — the duration comes from the
-    // broker-written `meta["codeg.delegation"].duration_ms`.
-    const delegations: DelegationCardSource[] = [
-      {
-        parentToolUseId: "pt-1",
-        input: JSON.stringify({ agent_type: "codex", task: "Investigate" }),
-        meta: {
-          "codeg.delegation": {
-            status: "completed",
-            child_conversation_id: 5,
-            duration_ms: 3200,
-          },
-        },
-      },
-    ]
-    renderWithIntl(
-      <SubAgentOverlay
-        delegations={delegations}
-        overlayKey="k-meta-dur"
-        defaultExpanded
-      />
-    )
-    // formatDuration(3200) → "3.2s".
-    expect(screen.getByText("3.2s")).toBeInTheDocument()
-  })
-
   it("omits the task id badge when no id has been minted yet", () => {
     const delegations = [
       source("pt-1", { agent_type: "codex", task: "Investigate" }),

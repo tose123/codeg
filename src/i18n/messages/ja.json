@@ -2075,7 +2075,6 @@
         "expand": "メッセージナビを開く",
         "collapse": "メッセージナビを閉じる",
         "jumpToMessage": "移動: {label}",
-        "noChanges": "ファイル変更なし",
         "fileCount": "{count, plural, one {# 個のファイル} other {# 個のファイル}}",
         "remove": "削除",
         "noDiffDataAvailable": "{filePath} の差分データがありません"
@@ -2216,6 +2215,9 @@
     "hide": "非表示",
     "show": "表示",
     "copy": "コピー",
+    "qrcode": "QRコード",
+    "qrcodeTitle": "スキャンして開く",
+    "qrcodeHint": "スマートフォンでスキャンして、ブラウザで Codeg を開きます",
     "addressLabel": "アクセスアドレス",
     "tokenLabel": "アクセストークン",
     "tokenHint": "Webクライアントの初回アクセス時にこのトークンを入力してください",

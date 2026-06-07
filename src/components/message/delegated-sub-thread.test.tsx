@@ -248,31 +248,6 @@ describe("DelegatedSubThread", () => {
     expect(screen.getByText("timeout")).toBeInTheDocument()
   })
 
-  it("shows the execution duration once the delegation completes", () => {
-    // duration_ms rides the live `delegation_completed` binding (success path).
-    mockedHook.mockReturnValue({
-      binding: bindingOf({ status: "ok", durationMs: 1500 }),
-      detail: null,
-      loading: false,
-      error: null,
-    })
-    renderWithIntl(<DelegatedSubThread parentToolUseId="pt-1" />)
-    // formatDuration(1500) → "1.5s".
-    expect(screen.getByText("1.5s")).toBeInTheDocument()
-  })
-
-  it("renders no duration while the delegation is still running", () => {
-    mockedHook.mockReturnValue({
-      binding: bindingOf({ status: "running" }),
-      detail: null,
-      loading: false,
-      error: null,
-    })
-    renderWithIntl(<DelegatedSubThread parentToolUseId="pt-1" />)
-    // No "<n>s" / "<n>ms" text node before the task resolves.
-    expect(screen.queryByText(/^\d+(\.\d+)?(ms|s)$/)).not.toBeInTheDocument()
-  })
-
   it("never renders the child's result text inline — only the badge + open-conversation button", () => {
     // The card is navigation-only: even a terminal `ok` binding with result
     // text in the output must NOT surface that text on the card. The user

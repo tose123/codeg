@@ -58,6 +58,16 @@ interface VirtualizedMessageThreadProps<T> {
   onVisibleStartIndexChange?: (index: number) => void
 }
 
+/**
+ * Small top tolerance (px) when mapping scroll offset → "active" item index.
+ * A click runs `scrollToIndex(N, {align: "start"})`, pinning message N to the
+ * top, but the browser floors `scrollTop` a sub-pixel below `offsetOf(N)`, so
+ * `findItemIndex` (largest i with `offsetOf(i) <= offset`) returns N-1. Because
+ * user-message nav ticks are sparse, N-1 lands on the *previous* tick. Nudging
+ * the query past that boundary maps the pinned message back to itself.
+ */
+const ACTIVE_TOP_EPSILON_PX = 2
+
 function VirtualizedMessageThreadImpl<T>({
   items,
   getItemKey,
@@ -101,7 +111,9 @@ function VirtualizedMessageThreadImpl<T>({
   const handleScroll = useCallback(
     (offset: number) => {
       if (!onVisibleStartIndexChange) return
-      const index = virtualizerHandleRef.current?.findItemIndex(offset)
+      const index = virtualizerHandleRef.current?.findItemIndex(
+        offset + ACTIVE_TOP_EPSILON_PX
+      )
       if (typeof index === "number") onVisibleStartIndexChange(index)
     },
     [onVisibleStartIndexChange]

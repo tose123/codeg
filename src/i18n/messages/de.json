@@ -2075,7 +2075,6 @@
         "expand": "Nachrichtennavigation einblenden",
         "collapse": "Nachrichtennavigation ausblenden",
         "jumpToMessage": "Springen zu: {label}",
-        "noChanges": "Keine Dateiänderungen",
         "fileCount": "{count, plural, one {# Datei} other {# Dateien}}",
         "remove": "Entfernen",
         "noDiffDataAvailable": "Keine Diff-Daten verfügbar für {filePath}"
@@ -2216,6 +2215,9 @@
     "hide": "Ausblenden",
     "show": "Einblenden",
     "copy": "Kopieren",
+    "qrcode": "QR-Code",
+    "qrcodeTitle": "Zum Öffnen scannen",
+    "qrcodeHint": "Scanne mit deinem Handy, um Codeg im Browser zu öffnen",
     "addressLabel": "Zugriffsadresse",
     "tokenLabel": "Zugriffstoken",
     "tokenHint": "Geben Sie dieses Token beim ersten Zugriff auf den Web-Client ein",

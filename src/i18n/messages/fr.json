@@ -2075,7 +2075,6 @@
         "expand": "Développer la navigation des messages",
         "collapse": "Réduire la navigation des messages",
         "jumpToMessage": "Aller à : {label}",
-        "noChanges": "Aucune modification de fichier",
         "fileCount": "{count, plural, one {# fichier} other {# fichiers}}",
         "remove": "Retirer",
         "noDiffDataAvailable": "Aucune donnée de diff disponible pour {filePath}"
@@ -2216,6 +2215,9 @@
     "hide": "Masquer",
     "show": "Afficher",
     "copy": "Copier",
+    "qrcode": "Code QR",
+    "qrcodeTitle": "Scanner pour ouvrir",
+    "qrcodeHint": "Scannez avec votre téléphone pour ouvrir Codeg dans un navigateur",
     "addressLabel": "Adresse d'accès",
     "tokenLabel": "Token d'accès",
     "tokenHint": "Entrez ce token lors du premier accès au client Web",

@@ -2075,7 +2075,6 @@
         "expand": "展開訊息導覽",
         "collapse": "收合訊息導覽",
         "jumpToMessage": "跳至：{label}",
-        "noChanges": "無檔案變更",
         "fileCount": "{count} 個檔案",
         "remove": "移除",
         "noDiffDataAvailable": "找不到 {filePath} 的差異資料"
@@ -2216,6 +2215,9 @@
     "hide": "隱藏",
     "show": "顯示",
     "copy": "複製",
+    "qrcode": "QR 碼",
+    "qrcodeTitle": "掃碼開啟",
+    "qrcodeHint": "用手機掃描，在瀏覽器中開啟 Codeg",
     "addressLabel": "存取位址",
     "tokenLabel": "存取 Token",
     "tokenHint": "Web 用戶端首次存取時需輸入此 Token",

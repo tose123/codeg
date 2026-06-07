@@ -116,6 +116,32 @@ describe("ConversationMessageNav", () => {
     })
   })
 
+  it("optimistically activates the clicked entry before scrolling", () => {
+    const onActivate = vi.fn()
+    const scrollToIndex = vi.fn()
+    const scrollApiRef = {
+      current: { scrollToIndex },
+    } as RefObject<MessageScrollContextValue | null>
+    render(
+      <ConversationMessageNav
+        entries={entries}
+        scrollApiRef={scrollApiRef}
+        activeThreadIndex={null}
+        onActivate={onActivate}
+      />
+    )
+    fireEvent.click(
+      screen.getByRole("button", { name: "jumpToMessage:edit something" })
+    )
+    // The parent gets the clicked threadIndex synchronously so it can highlight
+    // the tick before the (possibly clamped) smooth scroll settles.
+    expect(onActivate).toHaveBeenCalledWith(3)
+    expect(scrollToIndex).toHaveBeenCalledWith(3, {
+      align: "start",
+      smooth: true,
+    })
+  })
+
   it("always shows both +N and -N, including a zero side", () => {
     renderNav()
     fireEvent.click(screen.getByRole("button", { name: "expand" }))
@@ -125,8 +151,9 @@ describe("ConversationMessageNav", () => {
     // u3 added 0, deleted 4 — both rendered.
     expect(screen.getByText("+0")).toBeInTheDocument()
     expect(screen.getByText("-4")).toBeInTheDocument()
-    // Placeholder message shows the no-change label.
-    expect(screen.getByText("noChanges")).toBeInTheDocument()
+    // Placeholder message still renders (its label) but no "no changes" text.
+    expect(screen.getByText("first message")).toBeInTheDocument()
+    expect(screen.queryByText("noChanges")).not.toBeInTheDocument()
   })
 
   it("opens a file diff when a changed file is clicked", () => {
