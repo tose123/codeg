@@ -14,6 +14,7 @@ import {
   FileSearch,
   FolderSearch,
   GitFork,
+  MessageSquarePlus,
   MessageSquareText,
   Paperclip,
   Plus,
@@ -143,6 +144,12 @@ interface MessageInputProps {
    *  draft synchronously (clears on click); the parent re-queues it if the fork
    *  can't run, so it is never lost. */
   onForkSend?: (draft: PromptDraft, modeId?: string | null) => void
+  /** Open the live-feedback dialog (from the "+" menu). When omitted the entry
+   *  is hidden (feature off). */
+  onAddFeedback?: () => void
+  /** Grey out the live-feedback "+" entry when a note can't be sent right now
+   *  (no active turn / agent lacks the tool). */
+  feedbackAddDisabled?: boolean
 }
 
 interface ResourceInputAttachment {
@@ -365,6 +372,8 @@ export function MessageInput({
   onSaveQueueEdit,
   onCancelQueueEdit,
   onForkSend,
+  onAddFeedback,
+  feedbackAddDisabled,
 }: MessageInputProps) {
   const t = useTranslations("Folder.chat.messageInput")
   const tQueue = useTranslations("Folder.chat.messageQueue")
@@ -2531,6 +2540,20 @@ export function MessageInput({
                       )}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
+                  {onAddFeedback && (
+                    <DropdownMenuItem
+                      disabled={feedbackAddDisabled}
+                      onClick={onAddFeedback}
+                      title={
+                        feedbackAddDisabled
+                          ? t("liveFeedbackDisabledHint")
+                          : undefined
+                      }
+                    >
+                      <MessageSquarePlus className="size-4" />
+                      {t("liveFeedback")}
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger>
                       <Sparkles className="size-4" />

@@ -33,8 +33,10 @@ import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
 import { useMessageQueue, type QueuedMessage } from "@/hooks/use-message-queue"
 import { MessageListView } from "@/components/message/message-list-view"
 import { ConversationShell } from "@/components/chat/conversation-shell"
-import { LiveFeedbackBar } from "@/components/chat/live-feedback-bar"
+import { FeedbackNotesDisplay } from "@/components/chat/feedback-notes-display"
+import { FeedbackDialog } from "@/components/chat/feedback-dialog"
 import { useFeedbackEnabled } from "@/hooks/use-feedback-enabled"
+import { useSessionFeedback } from "@/hooks/use-session-feedback"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import { ChatInput } from "@/components/chat/chat-input"
 import { WelcomeHero, WelcomeTip } from "@/components/chat/welcome-hero"
@@ -1094,6 +1096,12 @@ const ConversationTabView = memo(function ConversationTabView({
     },
     [mqEnqueue, selectedModeId]
   )
+  const feedback = useSessionFeedback({
+    connectionId: conn.connectionId,
+    connStatus,
+    enabled: feedbackEnabled,
+    onResendAsPrompt: resendFeedbackAsPrompt,
+  })
 
   return (
     <ConversationShell
@@ -1123,15 +1131,13 @@ const ConversationTabView = memo(function ConversationTabView({
       attachmentTabId={tabId}
       draftStorageKey={draftStorageKey}
       hideInput={isWelcomeMode || Boolean(acpLoadError)}
-      feedbackBar={
-        <LiveFeedbackBar
-          connectionId={conn.connectionId}
-          connStatus={connStatus}
-          enabled={feedbackEnabled}
-          agentName={AGENT_LABELS[selectedAgent]}
-          onResendAsPrompt={resendFeedbackAsPrompt}
-        />
+      feedbackList={
+        feedback.showList ? (
+          <FeedbackNotesDisplay notes={feedback.notes} />
+        ) : null
       }
+      onAddFeedback={feedback.featureEnabled ? feedback.openDialog : undefined}
+      feedbackAddDisabled={!feedback.canSubmit}
       isActive={isActive}
       queue={msgQueue}
       onEnqueue={mqEnqueue}
@@ -1252,6 +1258,16 @@ const ConversationTabView = memo(function ConversationTabView({
       ) : (
         messageListNode
       )}
+      <FeedbackDialog
+        open={feedback.dialogOpen}
+        onOpenChange={(open) => {
+          if (open) feedback.openDialog()
+          else feedback.closeDialog()
+        }}
+        onSubmit={feedback.submit}
+        submitting={feedback.submitting}
+        agentName={AGENT_LABELS[selectedAgent]}
+      />
     </ConversationShell>
   )
 })
