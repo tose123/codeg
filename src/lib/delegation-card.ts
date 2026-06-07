@@ -51,6 +51,9 @@ export type ParsedMeta = {
   childConnectionId: string | null
   childConversationId: number | null
   errorCode: string | null
+  /** Broker-measured execution time, present on terminal writes (the
+   *  live-snapshot survival path; absent on the DB-derived historical meta). */
+  durationMs: number | null
 }
 
 /**
@@ -90,6 +93,7 @@ export function parseDelegationMeta(
   const child_connection_id = obj["child_connection_id"]
   const child_conversation_id = obj["child_conversation_id"]
   const error_code = obj["error_code"]
+  const duration_ms = obj["duration_ms"]
   return {
     status,
     childConnectionId:
@@ -97,6 +101,7 @@ export function parseDelegationMeta(
     childConversationId:
       typeof child_conversation_id === "number" ? child_conversation_id : null,
     errorCode: typeof error_code === "string" ? error_code : null,
+    durationMs: typeof duration_ms === "number" ? duration_ms : null,
   }
 }
 

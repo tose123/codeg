@@ -638,13 +638,20 @@ fn canceled_outcome(child_conversation_id: i32, reason: &str) -> DelegationOutco
 
 /// Remove `keys` from `running`, recording each as a `Canceled` completed entry
 /// (so a `get_delegation_status` still answers) and returning the drained tasks
-/// for I/O teardown. MUST be called with the pending lock held so the running →
+/// — each paired with the `duration_ms` captured at this drain point — for I/O
+/// teardown. MUST be called with the pending lock held so the running →
 /// completed migration is atomic.
+///
+/// The duration is captured ONCE here and returned so the slow teardown
+/// (parent-card meta, report) reuses the exact value recorded into the
+/// completed-cache, rather than recomputing `started_at.elapsed()` later — which
+/// would inflate it for the backgrounded `cancel_by_parent_turn` teardown and
+/// disagree with the `get_delegation_status` / `cancel_delegation` cards.
 fn drain_and_record_canceled(
     inner: &mut PendingInner,
     keys: Vec<String>,
     reason: &str,
-) -> Vec<RunningTask> {
+) -> Vec<(RunningTask, u64)> {
     let mut out = Vec::with_capacity(keys.len());
     for k in keys {
         let task = inner.running.remove(&k).expect("key just observed");
@@ -660,7 +667,7 @@ fn drain_and_record_canceled(
                 &outcome,
             ),
         );
-        out.push(task);
+        out.push((task, duration_ms));
     }
     out
 }
@@ -2102,6 +2109,8 @@ impl DelegationBroker {
                 Some(child_conversation_id),
                 None,
                 None,
+                // No meaningful elapsed yet — the child just started.
+                None,
             ),
         )
         .await;
@@ -2282,6 +2291,7 @@ impl DelegationBroker {
                         Some(child_conversation_id),
                         Some("canceled"),
                         None,
+                        Some(setup_duration_ms),
                     ),
                 )
                 .await;
@@ -2318,27 +2328,32 @@ impl DelegationBroker {
         // canceled report instead of the Running ack.
         if let Some(handle) = req.external_handle.as_deref() {
             if self.take_pre_canceled_handle(handle).await {
-                let canceled = {
+                // Capture the elapsed ONCE at terminalization (under the lock,
+                // when the running task is removed) so the completed-cache, the
+                // parent-card meta, and the returned report all report the same
+                // duration. `None` when nothing was drained.
+                let canceled_duration_ms = {
                     let mut inner = self.pending.inner.lock().await;
                     if inner.running.remove(&call_id).is_some() {
                         let outcome =
                             canceled_outcome(child_conversation_id, "canceled before await");
+                        let duration_ms = started_at.elapsed().as_millis() as u64;
                         inner.insert_completed(
                             &call_id,
                             build_completed(
                                 &req.parent_connection_id,
                                 child_conversation_id,
                                 req.agent_type,
-                                started_at.elapsed().as_millis() as u64,
+                                duration_ms,
                                 &outcome,
                             ),
                         );
-                        true
+                        Some(duration_ms)
                     } else {
-                        false
+                        None
                     }
                 };
-                if canceled {
+                if let Some(duration_ms) = canceled_duration_ms {
                     self.write_meta_if_real(
                         &req.parent_connection_id,
                         &req.parent_tool_use_id,
@@ -2348,6 +2363,7 @@ impl DelegationBroker {
                             Some(child_conversation_id),
                             Some("canceled"),
                             None,
+                            Some(duration_ms),
                         ),
                     )
                     .await;
@@ -2369,7 +2385,7 @@ impl DelegationBroker {
                         Some(call_id),
                         Some(req.agent_type),
                         &canceled_outcome(child_conversation_id, "canceled before await"),
-                        Some(started_at.elapsed().as_millis() as u64),
+                        Some(duration_ms),
                     );
                 }
             }
@@ -2469,6 +2485,7 @@ impl DelegationBroker {
                 Some(child_conversation_id),
                 None,
                 build_text_preview(&ok.text).as_deref(),
+                Some(duration_ms),
             ),
             DelegationOutcome::Err { code, .. } => build_delegation_meta(
                 "failed",
@@ -2476,6 +2493,7 @@ impl DelegationBroker {
                 Some(child_conversation_id),
                 Some(code),
                 None,
+                Some(duration_ms),
             ),
         };
         self.write_meta_if_real(parent_connection_id, parent_tool_use_id, meta)
@@ -2596,9 +2614,9 @@ impl DelegationBroker {
                 .await;
             return;
         }
-        for task in drained {
+        for (task, duration_ms) in drained {
             // A turn is in flight, so cancel + disconnect.
-            self.teardown_canceled_child(&task, true).await;
+            self.teardown_canceled_child(&task, duration_ms, true).await;
         }
         self.result_notify.notify_waiters();
     }
@@ -2646,10 +2664,10 @@ impl DelegationBroker {
                 drain_and_record_canceled(&mut inner, keys, &reason)
             }
         };
-        for task in drained {
+        for (task, duration_ms) in drained {
             // The child already disconnected/errored — disconnect-only teardown
             // (no spawner `cancel`, there's no live turn to interrupt).
-            self.teardown_canceled_child(&task, false).await;
+            self.teardown_canceled_child(&task, duration_ms, false).await;
         }
         self.result_notify.notify_waiters();
     }
@@ -2712,7 +2730,7 @@ impl DelegationBroker {
         &self,
         parent_connection_id: &str,
         keep_consumed: bool,
-    ) -> Vec<RunningTask> {
+    ) -> Vec<(RunningTask, u64)> {
         // Also drain any tool_call ids captured ahead of an MCP round-trip that
         // never arrived — keeps the map bounded across parent reconnects.
         // Teardown drops the whole bucket; a turn cancel keeps `consumed` so a
@@ -2739,10 +2757,16 @@ impl DelegationBroker {
                 drain_and_record_canceled(&mut inner, keys, "parent canceled")
             } else {
                 // Connection teardown: just remove the running tasks and drop the
-                // whole completed-cache for this parent.
-                let drained: Vec<RunningTask> = keys
+                // whole completed-cache for this parent. No completed entry to
+                // match, but still capture the elapsed once (at drain time) so
+                // the teardown meta doesn't recompute it later.
+                let drained: Vec<(RunningTask, u64)> = keys
                     .into_iter()
-                    .map(|k| inner.running.remove(&k).expect("key just observed"))
+                    .map(|k| {
+                        let task = inner.running.remove(&k).expect("key just observed");
+                        let duration_ms = task.started_at.elapsed().as_millis() as u64;
+                        (task, duration_ms)
+                    })
                     .collect();
                 inner.drop_completed_for_parent(parent_connection_id);
                 drained
@@ -2758,10 +2782,10 @@ impl DelegationBroker {
     /// `drain_for_parent_cancel` under the lock, so this is pure I/O. Split out
     /// so a turn cancel can background it without delaying the fast, turn-scoped
     /// drain.
-    async fn finalize_parent_cancel(&self, drained: Vec<RunningTask>) {
-        for task in drained {
+    async fn finalize_parent_cancel(&self, drained: Vec<(RunningTask, u64)>) {
+        for (task, duration_ms) in drained {
             // A turn was in flight → cancel + disconnect.
-            self.teardown_canceled_child(&task, true).await;
+            self.teardown_canceled_child(&task, duration_ms, true).await;
         }
     }
 
@@ -2772,7 +2796,17 @@ impl DelegationBroker {
     /// flight (cancel + disconnect) and `false` when the child already
     /// disconnected/errored (disconnect only). Does NOT touch the pending maps —
     /// the caller already migrated the task into `completed`.
-    async fn teardown_canceled_child(&self, task: &RunningTask, cancel_turn: bool) {
+    ///
+    /// `duration_ms` is the elapsed captured by `drain_and_record_canceled` at
+    /// drain time — reused here (not recomputed) so the parent-card meta matches
+    /// the completed-cache duration the status/cancel cards report, even when
+    /// this teardown is backgrounded.
+    async fn teardown_canceled_child(
+        &self,
+        task: &RunningTask,
+        duration_ms: u64,
+        cancel_turn: bool,
+    ) {
         self.write_meta_if_real(
             &task.parent_connection_id,
             &task.parent_tool_use_id,
@@ -2782,6 +2816,7 @@ impl DelegationBroker {
                 Some(task.child_conversation_id),
                 Some("canceled"),
                 None,
+                Some(duration_ms),
             ),
         )
         .await;
@@ -3010,15 +3045,17 @@ impl DelegationBroker {
             }
         };
         match drained {
-            Some(task) => {
-                // A turn is in flight → cancel + disconnect.
-                self.teardown_canceled_child(&task, true).await;
+            Some((task, duration_ms)) => {
+                // A turn is in flight → cancel + disconnect. Reuse the duration
+                // captured at drain time for both the teardown meta and the
+                // report, so all three (completed-cache, meta, report) agree.
+                self.teardown_canceled_child(&task, duration_ms, true).await;
                 self.result_notify.notify_waiters();
                 report_from_outcome(
                     Some(task_id.to_string()),
                     Some(task.agent_type),
                     &canceled_outcome(task.child_conversation_id, "canceled by request"),
-                    Some(task.started_at.elapsed().as_millis() as u64),
+                    Some(duration_ms),
                 )
             }
             None => self.status_from_db(parent_conversation_id, task_id).await,

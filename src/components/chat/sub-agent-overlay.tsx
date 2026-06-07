@@ -28,6 +28,7 @@ import {
   useDelegationCardModel,
   type DelegationCardSource,
 } from "@/hooks/use-delegation-card-model"
+import { formatDuration } from "@/lib/delegation-status"
 import { AGENT_LABELS } from "@/lib/types"
 
 interface SubAgentOverlayProps {
@@ -131,6 +132,7 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
     errorCode,
     childConversationId,
     childConnectionId,
+    durationMs,
   } = useDelegationCardModel(source)
 
   // Unlike the inline DelegatedSubThread (which falls through to the generic
@@ -161,6 +163,11 @@ const SubAgentOverlayRow = memo(function SubAgentOverlayRow({
               title={taskId}
             >
               #{taskId.slice(0, 8)}
+            </span>
+          )}
+          {durationMs != null && (
+            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+              {formatDuration(durationMs)}
             </span>
           )}
           <StatusBadge status={status} errorCode={errorCode} />

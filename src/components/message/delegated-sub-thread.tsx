@@ -25,6 +25,7 @@ import { useTranslations } from "next-intl"
 import { AgentIcon } from "@/components/agent-icon"
 import { AGENT_LABELS } from "@/lib/types"
 import type { ToolCallState } from "@/lib/adapters/ai-elements-adapter"
+import { formatDuration } from "@/lib/delegation-status"
 import { StatusBadge } from "@/components/message/delegation-status-badge"
 import { SubAgentSessionDialog } from "@/components/message/sub-agent-session-dialog"
 import { useDelegationCardModel } from "@/hooks/use-delegation-card-model"
@@ -68,6 +69,7 @@ export function DelegatedSubThread({
     errorCode,
     childConversationId,
     childConnectionId,
+    durationMs,
     hasModel,
   } = useDelegationCardModel({
     parentToolUseId,
@@ -110,6 +112,11 @@ export function DelegatedSubThread({
                   title={taskId}
                 >
                   #{taskId.slice(0, 8)}
+                </span>
+              )}
+              {durationMs != null && (
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {formatDuration(durationMs)}
                 </span>
               )}
               <StatusBadge status={status} errorCode={errorCode} />
