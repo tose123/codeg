@@ -277,6 +277,31 @@ pub enum AcpEvent {
         ids: Vec<String>,
         delivered_at: chrono::DateTime<chrono::Utc>,
     },
+    /// The agent's effective settings (env vars / model provider / native config
+    /// files) changed AFTER this connection was spawned, so the running process
+    /// is still using its launch-time config. Emitted by
+    /// `ConnectionManager::refresh_connection_staleness` when a settings save
+    /// drifts a running session's freshly-recomputed config fingerprint away
+    /// from its spawn-time snapshot. `stale = false` means a prior drift was
+    /// reverted (the user changed the setting back) and the frontend should
+    /// clear its "restart to apply" banner. Carried into `SessionState` so a
+    /// snapshot attach (web reconnect, window refresh, new tile) recovers the
+    /// staleness the one-shot event won't replay for it.
+    SessionConfigStale {
+        stale: bool,
+        kind: ConfigStaleKind,
+    },
+}
+
+/// Which settings surface drifted, so the frontend can word the
+/// "restart to apply" banner precisely ("agent config" vs "model provider").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigStaleKind {
+    /// Agent env vars / enabled / model-provider binding / native config file.
+    AgentConfig,
+    /// A model provider row this agent is bound to (url / key / model) changed.
+    ModelProvider,
 }
 
 /// A block of the user's submitted prompt, broadcast via [`AcpEvent::UserMessage`]

@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "Failed to save config management",
       "clineSaved": "Cline config saved",
       "saveClineFailed": "Failed to save Cline config",
-      "modelProviderRequired": "Please select a model provider before saving."
+      "modelProviderRequired": "Please select a model provider before saving.",
+      "affectedRunningSessions": "{count, plural, one {# running session needs a restart to apply the change} other {# running sessions need a restart to apply the change}}"
     },
     "version": {
       "statusLabel": "Version Status",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# file} other {# files}}",
         "remove": "Remove",
         "noDiffDataAvailable": "No diff data available for {filePath}"
+      },
+      "configStale": {
+        "agentConfigTitle": "Agent settings updated",
+        "modelProviderTitle": "Model provider updated",
+        "description": "This session is still using its previous configuration. Restart to apply — your conversation history is kept.",
+        "restart": "Restart to apply",
+        "restarting": "Restarting…",
+        "restartDisabledDuringTurn": "Available once the current turn finishes",
+        "dismiss": "Dismiss",
+        "restartFailed": "Failed to restart session",
+        "applied": "New configuration applied"
       }
     },
     "diffPreview": {
@@ -2427,7 +2439,8 @@
     "cancel": "Cancel",
     "delete": "Delete",
     "create": "Create",
-    "save": "Save"
+    "save": "Save",
+    "affectedRunningSessions": "{count, plural, one {# running session needs a restart to apply the change} other {# running sessions need a restart to apply the change}}"
   },
   "ExpertsSettings": {
     "title": "Expert Skills",

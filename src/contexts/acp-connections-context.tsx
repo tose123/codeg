@@ -38,6 +38,7 @@ import type {
   AcpEvent,
   ActiveDelegationState,
   AvailableCommandInfo,
+  ConfigStaleKind,
   ConnectionStatus,
   ConversationConnectionInfo,
   EventEnvelope,
@@ -225,6 +226,25 @@ export interface ConnectionState {
    * a plain viewer is the lighter cousin with no delegation state.
    */
   isViewer: boolean
+  /**
+   * True when the agent's effective settings changed after this session was
+   * spawned, so the running process is still on its launch-time config (env
+   * vars / model provider / native config). Set from a `session_config_stale`
+   * event or a hydrated snapshot; cleared when the user reverts the setting or
+   * restarts the session via `reapplyConfig`. Drives the per-conversation
+   * "restart to apply" banner.
+   */
+  configStale: boolean
+  /** Which settings surface drifted, for the banner's wording. `null` when not stale. */
+  configStaleKind: ConfigStaleKind | null
+  /**
+   * Client-local: the user dismissed (X) the stale banner for the CURRENT
+   * drift. Hides the banner without touching the underlying `configStale`
+   * state. Reset to `false` whenever a fresh `session_config_stale` arrives (a
+   * new change re-shows the banner) and on a new connection. Never sourced from
+   * the snapshot — dismissal is per-client UI state.
+   */
+  configStaleDismissed: boolean
 }
 
 type ConnectRequest = {
@@ -366,6 +386,16 @@ type Action =
       type: "SESSION_CONFIG_OPTIONS"
       contextKey: string
       configOptions: SessionConfigOptionInfo[]
+    }
+  | {
+      type: "CONFIG_STALE_CHANGED"
+      contextKey: string
+      stale: boolean
+      kind: ConfigStaleKind
+    }
+  | {
+      type: "DISMISS_CONFIG_STALE"
+      contextKey: string
     }
   | {
       type: "SELECTORS_READY"
@@ -856,6 +886,9 @@ function connectionsReducer(
         parentToolUseId: null,
         parentConnectionId: null,
         isViewer: action.isViewer ?? false,
+        configStale: false,
+        configStaleKind: null,
+        configStaleDismissed: false,
       })
       return next
     }
@@ -905,6 +938,9 @@ function connectionsReducer(
         parentToolUseId: action.parentToolUseId,
         parentConnectionId: action.parentConnectionId,
         isViewer: false,
+        configStale: false,
+        configStaleKind: null,
+        configStaleDismissed: false,
       })
       return next
     }
@@ -995,6 +1031,11 @@ function connectionsReducer(
         promptCapabilities: mergedPromptCapabilities,
         selectorsReady: mergedSelectorsReady,
         supportsFork: mergedSupportsFork,
+        // Staleness is a current-state field (like status): apply the snapshot's
+        // value on the fresh path. `configStaleDismissed` is client-local and
+        // preserved via `...current`.
+        configStale: action.patch.configStale,
+        configStaleKind: action.patch.configStaleKind,
         lastAppliedSeq: action.patch.eventSeq,
       })
       return next
@@ -1449,6 +1490,41 @@ function connectionsReducer(
       return next
     }
 
+    case "CONFIG_STALE_CHANGED": {
+      const conn = state.get(action.contextKey)
+      if (!conn) return state
+      const kind = action.stale ? action.kind : null
+      // A fresh stale=true is a NEW drift → un-dismiss so the banner reappears
+      // even if the user had dismissed a previous one. stale=false clears it.
+      const dismissed = action.stale ? false : conn.configStaleDismissed
+      if (
+        conn.configStale === action.stale &&
+        conn.configStaleKind === kind &&
+        conn.configStaleDismissed === dismissed
+      ) {
+        return state
+      }
+      const next = new Map(state)
+      next.set(action.contextKey, {
+        ...conn,
+        configStale: action.stale,
+        configStaleKind: kind,
+        configStaleDismissed: dismissed,
+      })
+      return next
+    }
+
+    case "DISMISS_CONFIG_STALE": {
+      const conn = state.get(action.contextKey)
+      if (!conn || conn.configStaleDismissed) return state
+      const next = new Map(state)
+      next.set(action.contextKey, {
+        ...conn,
+        configStaleDismissed: true,
+      })
+      return next
+    }
+
     case "SELECTORS_READY": {
       const conn = state.get(action.contextKey)
       if (!conn || conn.selectorsReady) return state
@@ -1762,6 +1838,23 @@ export interface AcpActionsValue {
    * lifecycle. No-op when the child isn't attached.
    */
   detachDelegationChild(connectionId: string): void
+  /**
+   * Restart the session at `contextKey` so it picks up the latest agent/model
+   * settings: disconnect the running process, then reconnect with the same
+   * `sessionId` (the agent resumes the conversation — history is preserved).
+   * The freshly spawned process reads current config, so its recomputed
+   * fingerprint matches and `configStale` clears. Wired to the "restart to
+   * apply" banner button. Returns `true` if it actually restarted, `false` if
+   * it was a no-op (no connection, or a viewer / delegation child that doesn't
+   * own the backend process) — callers gate their "applied" confirmation on it.
+   */
+  reapplyConfig(contextKey: string): Promise<boolean>
+  /**
+   * Dismiss the "restart to apply" banner for the current drift WITHOUT
+   * restarting (client-local; the underlying `configStale` is untouched). A
+   * subsequent settings change re-shows it. Wired to the banner's X button.
+   */
+  dismissConfigStale(contextKey: string): void
 }
 
 const AcpActionsContext = createContext<AcpActionsValue | null>(null)
@@ -2382,6 +2475,16 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             entry.configOptions = e.config_options
             selectorsCache.set(cfgConn.agentType, entry)
           }
+          break
+        }
+        case "session_config_stale": {
+          flushStreamingQueue()
+          dispatch({
+            type: "CONFIG_STALE_CHANGED",
+            contextKey,
+            stale: e.stale,
+            kind: e.kind,
+          })
           break
         }
         case "selectors_ready": {
@@ -3527,6 +3630,36 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     [dispatch, teardownAttachSubscription]
   )
 
+  const reapplyConfig = useCallback(
+    async (contextKey: string): Promise<boolean> => {
+      const conn = storeRef.current.connections.get(contextKey)
+      // Viewers / delegation children don't own the backend process — restarting
+      // would kill another client's (or the broker's) agent. The banner hides
+      // its restart button for them, but guard here too. Return false so the
+      // caller doesn't show a false "applied" confirmation on this no-op.
+      if (!conn || conn.isViewer || conn.isDelegationChild) return false
+      // Capture identity BEFORE teardown. `sessionId` is what makes the new
+      // process resume this conversation (session/load) rather than start fresh.
+      const { agentType, workingDir, sessionId } = conn
+      await disconnect(contextKey)
+      await connect(
+        contextKey,
+        agentType,
+        workingDir ?? undefined,
+        sessionId ?? undefined
+      )
+      return true
+    },
+    [connect, disconnect]
+  )
+
+  const dismissConfigStale = useCallback(
+    (contextKey: string) => {
+      dispatch({ type: "DISMISS_CONFIG_STALE", contextKey })
+    },
+    [dispatch]
+  )
+
   const disconnectAll = useCallback(async () => {
     const promises: Promise<void>[] = []
     pendingConnectRequestsRef.current.clear()
@@ -3719,6 +3852,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       clearAcpLoadError,
       attachDelegationChild,
       detachDelegationChild,
+      reapplyConfig,
+      dismissConfigStale,
     }),
     [
       connect,
@@ -3735,6 +3870,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       clearAcpLoadError,
       attachDelegationChild,
       detachDelegationChild,
+      reapplyConfig,
+      dismissConfigStale,
     ]
   )
 

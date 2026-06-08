@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use crate::acp::manager::ConnectionManager;
+use crate::acp::types::ConfigStaleKind;
 use crate::app_error::AppCommandError;
 use crate::commands::acp;
 use crate::db::service::{agent_setting_service, model_provider_service};
@@ -202,6 +206,62 @@ pub async fn update_model_provider_core(
     Ok(ModelProviderInfo::from(model_row))
 }
 
+/// Result of `update_model_provider`: the updated provider row plus how many
+/// running sessions the cascade left on stale (launch-time) config — for the
+/// settings-side "N sessions need restart" toast.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelProviderResult {
+    pub provider: ModelProviderInfo,
+    pub affected_running_sessions: usize,
+}
+
+/// `update_model_provider_core` followed by a staleness refresh for every agent
+/// bound to this provider. Shared by the Tauri command and the web handler so
+/// both surface how many running sessions need a restart to pick up the new
+/// credentials/model. If the save didn't actually change url/key/model, the
+/// cascade is skipped, fingerprints are unchanged, and the refresh is a silent
+/// no-op returning 0.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_model_provider_and_refresh(
+    db: &AppDatabase,
+    manager: &ConnectionManager,
+    data_dir: &Path,
+    id: i32,
+    name: Option<String>,
+    api_url: Option<String>,
+    api_key: Option<String>,
+    agent_type: Option<String>,
+    model: Option<String>,
+    emitter: &EventEmitter,
+) -> Result<UpdateModelProviderResult, AppCommandError> {
+    let provider =
+        update_model_provider_core(db, id, name, api_url, api_key, agent_type, model, emitter)
+            .await?;
+
+    // Every agent bound to this provider may now be on stale config (the cascade
+    // rewrote their env_json + native config files). Recompute and notify.
+    let agent_types: Vec<AgentType> = agent_setting_service::find_by_model_provider_id(&db.conn, id)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|setting| serde_json::from_str(&setting.agent_type).ok())
+        .collect();
+    let affected_running_sessions = acp::refresh_config_staleness(
+        manager,
+        db,
+        data_dir,
+        &agent_types,
+        ConfigStaleKind::ModelProvider,
+    )
+    .await;
+
+    Ok(UpdateModelProviderResult {
+        provider,
+        affected_running_sessions,
+    })
+}
+
 pub async fn delete_model_provider_core(db: &AppDatabase, id: i32) -> Result<(), AppCommandError> {
     // Check if any agent settings reference this provider.
     let dependents = agent_setting_service::find_by_model_provider_id(&db.conn, id)
@@ -259,6 +319,7 @@ pub async fn create_model_provider(
 #[allow(clippy::too_many_arguments)]
 pub async fn update_model_provider(
     db: tauri::State<'_, AppDatabase>,
+    manager: tauri::State<'_, ConnectionManager>,
     id: i32,
     name: Option<String>,
     api_url: Option<String>,
@@ -266,9 +327,27 @@ pub async fn update_model_provider(
     agent_type: Option<String>,
     model: Option<String>,
     app: tauri::AppHandle,
-) -> Result<ModelProviderInfo, AppCommandError> {
+) -> Result<UpdateModelProviderResult, AppCommandError> {
+    use tauri::Manager;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| crate::paths::resolve_effective_data_dir(&p))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let emitter = EventEmitter::Tauri(app);
-    update_model_provider_core(&db, id, name, api_url, api_key, agent_type, model, &emitter).await
+    update_model_provider_and_refresh(
+        &db,
+        &manager,
+        &app_data_dir,
+        id,
+        name,
+        api_url,
+        api_key,
+        agent_type,
+        model,
+        &emitter,
+    )
+    .await
 }
 
 #[cfg(feature = "tauri-runtime")]

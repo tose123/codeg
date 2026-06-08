@@ -15,7 +15,7 @@ use crate::acp::preflight::{self, PreflightResult};
 use crate::acp::registry;
 use crate::acp::types::{
     AcpAgentInfo, AgentSkillContent, AgentSkillItem, AgentSkillLayout, AgentSkillLocation,
-    AgentSkillScope, AgentSkillsListResult, ConnectionStatus,
+    AgentSkillScope, AgentSkillsListResult, ConfigStaleKind, ConnectionStatus,
 };
 #[cfg(feature = "tauri-runtime")]
 use crate::acp::types::{ConnectionInfo, ForkResultInfo, PromptInputBlock};
@@ -2506,6 +2506,140 @@ pub(crate) async fn build_session_runtime_env(
     Ok(runtime_env)
 }
 
+/// Per-launch env keys that vary by session/run but don't represent user
+/// config, so they're excluded from the config fingerprint. Without this, a
+/// session-id-derived value would flip the fingerprint the moment a real
+/// session id is assigned and make every session look "stale". Currently only
+/// OpenClaw's reset flag (set iff `session_id` is None at spawn).
+fn is_volatile_fingerprint_key(key: &str) -> bool {
+    key == "OPENCLAW_RESET_SESSION"
+}
+
+/// Fingerprint the effective config a spawned agent process is locked to: the
+/// resolved `runtime_env` (minus per-launch volatile keys) plus the raw content
+/// of the agent's native config file(s). Both surfaces only take effect at
+/// process start, so a change to either is exactly what "this running session is
+/// stale" means. The digest is process-local — never persisted, never sent on
+/// the wire (only the resulting `stale` bool reaches the frontend) — so a
+/// non-cryptographic hash would do; SHA-256 keeps it deterministic and matches
+/// the rest of the codebase.
+pub(crate) fn fingerprint_config(
+    agent_type: AgentType,
+    runtime_env: &BTreeMap<String, String>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // BTreeMap iterates in sorted key order → deterministic across calls.
+    for (k, v) in runtime_env {
+        if is_volatile_fingerprint_key(k) {
+            continue;
+        }
+        hasher.update(k.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(v.as_bytes());
+        hasher.update([0u8]);
+    }
+    hasher.update(b"\x01native\x01");
+    if let Some(native) = load_agent_local_config_json(agent_type) {
+        hasher.update(native.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Recompute the canonical config fingerprint for `agent_type` from current
+/// settings (DB + native config files), independent of any running session.
+/// Passes `session_id = None` so the result is session-independent (the only
+/// session-derived key is excluded anyway), making it directly comparable to
+/// the fingerprint `fingerprint_config` produced at spawn time. Propagates the
+/// agent's "disabled in settings" error verbatim.
+pub(crate) async fn compute_session_config_fingerprint(
+    db: &AppDatabase,
+    agent_type: AgentType,
+    data_dir: &Path,
+) -> Result<String, AcpError> {
+    let runtime_env = build_session_runtime_env(db, agent_type, None, data_dir).await?;
+    Ok(fingerprint_config(agent_type, &runtime_env))
+}
+
+/// After a settings save, recompute the effective config fingerprint for each of
+/// `agent_types` and tell every running connection of those agents whether it
+/// has drifted onto stale (launch-time) config. Best-effort: an agent whose
+/// fingerprint can't be recomputed (e.g. it was just disabled) is skipped, not
+/// fatal. Returns the number of running connections currently on stale config
+/// across the affected agents — for the settings-side "N sessions need restart"
+/// toast.
+pub(crate) async fn refresh_config_staleness(
+    manager: &ConnectionManager,
+    db: &AppDatabase,
+    data_dir: &Path,
+    agent_types: &[AgentType],
+    kind: ConfigStaleKind,
+) -> usize {
+    let mut fresh: HashMap<AgentType, String> = HashMap::new();
+    for &agent_type in agent_types {
+        if fresh.contains_key(&agent_type) {
+            continue;
+        }
+        if let Ok(fp) = compute_session_config_fingerprint(db, agent_type, data_dir).await {
+            fresh.insert(agent_type, fp);
+        }
+    }
+    if fresh.is_empty() {
+        return 0;
+    }
+    manager.refresh_connection_staleness(&fresh, kind).await
+}
+
+/// `acp_update_agent_env_core` followed by a staleness refresh. Shared by the
+/// Tauri command and the web handler so both report how many running sessions
+/// the save left on stale config. Returns that count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acp_update_agent_env_and_refresh(
+    agent_type: AgentType,
+    enabled: bool,
+    env: BTreeMap<String, String>,
+    model_provider_id: Option<i32>,
+    db: &AppDatabase,
+    manager: &ConnectionManager,
+    data_dir: &Path,
+    emitter: &EventEmitter,
+) -> Result<usize, AcpError> {
+    acp_update_agent_env_core(agent_type, enabled, env, model_provider_id, db, emitter).await?;
+    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+}
+
+/// `acp_update_agent_preferences_core` followed by a staleness refresh. Shared
+/// by the Tauri command and the web handler; returns the count of running
+/// sessions left on stale config.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acp_update_agent_preferences_and_refresh(
+    agent_type: AgentType,
+    enabled: bool,
+    env: BTreeMap<String, String>,
+    config_json: Option<String>,
+    opencode_auth_json: Option<String>,
+    codex_auth_json: Option<String>,
+    codex_config_toml: Option<String>,
+    db: &AppDatabase,
+    manager: &ConnectionManager,
+    data_dir: &Path,
+    emitter: &EventEmitter,
+) -> Result<usize, AcpError> {
+    acp_update_agent_preferences_core(
+        agent_type,
+        enabled,
+        env,
+        config_json,
+        opencode_auth_json,
+        codex_auth_json,
+        codex_config_toml,
+        db,
+        emitter,
+    )
+    .await?;
+    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+}
+
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 #[allow(clippy::too_many_arguments)]
@@ -3153,11 +3287,17 @@ pub async fn acp_update_agent_preferences(
     opencode_auth_json: Option<String>,
     codex_auth_json: Option<String>,
     codex_config_toml: Option<String>,
+    manager: State<'_, ConnectionManager>,
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
-) -> Result<(), AcpError> {
+) -> Result<usize, AcpError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| crate::paths::resolve_effective_data_dir(&p))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let emitter = EventEmitter::Tauri(app);
-    acp_update_agent_preferences_core(
+    acp_update_agent_preferences_and_refresh(
         agent_type,
         enabled,
         env,
@@ -3166,6 +3306,8 @@ pub async fn acp_update_agent_preferences(
         codex_auth_json,
         codex_config_toml,
         &db,
+        &manager,
+        &app_data_dir,
         &emitter,
     )
     .await
@@ -3291,11 +3433,27 @@ pub async fn acp_update_agent_env(
     enabled: bool,
     env: BTreeMap<String, String>,
     model_provider_id: Option<i32>,
+    manager: State<'_, ConnectionManager>,
     db: State<'_, AppDatabase>,
     app: tauri::AppHandle,
-) -> Result<(), AcpError> {
+) -> Result<usize, AcpError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| crate::paths::resolve_effective_data_dir(&p))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let emitter = EventEmitter::Tauri(app);
-    acp_update_agent_env_core(agent_type, enabled, env, model_provider_id, &db, &emitter).await
+    acp_update_agent_env_and_refresh(
+        agent_type,
+        enabled,
+        env,
+        model_provider_id,
+        &db,
+        &manager,
+        &app_data_dir,
+        &emitter,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3376,23 +3534,61 @@ pub(crate) async fn acp_update_agent_config_core(
     Ok(())
 }
 
-#[cfg(feature = "tauri-runtime")]
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
-pub async fn acp_update_agent_config(
+/// `acp_update_agent_config_core` (native config file write) followed by a
+/// staleness refresh. Shared by the Tauri command and the web handler; returns
+/// the count of running sessions left on stale config.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acp_update_agent_config_and_refresh(
     agent_type: AgentType,
     config_json: Option<String>,
     opencode_auth_json: Option<String>,
     codex_auth_json: Option<String>,
     codex_config_toml: Option<String>,
-    app: tauri::AppHandle,
-) -> Result<(), AcpError> {
-    let emitter = EventEmitter::Tauri(app);
+    db: &AppDatabase,
+    manager: &ConnectionManager,
+    data_dir: &Path,
+    emitter: &EventEmitter,
+) -> Result<usize, AcpError> {
     acp_update_agent_config_core(
         agent_type,
         config_json,
         opencode_auth_json,
         codex_auth_json,
         codex_config_toml,
+        emitter,
+    )
+    .await?;
+    Ok(refresh_config_staleness(manager, db, data_dir, &[agent_type], ConfigStaleKind::AgentConfig).await)
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[allow(clippy::too_many_arguments)]
+pub async fn acp_update_agent_config(
+    agent_type: AgentType,
+    config_json: Option<String>,
+    opencode_auth_json: Option<String>,
+    codex_auth_json: Option<String>,
+    codex_config_toml: Option<String>,
+    manager: State<'_, ConnectionManager>,
+    db: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
+) -> Result<usize, AcpError> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map(|p| crate::paths::resolve_effective_data_dir(&p))
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let emitter = EventEmitter::Tauri(app);
+    acp_update_agent_config_and_refresh(
+        agent_type,
+        config_json,
+        opencode_auth_json,
+        codex_auth_json,
+        codex_config_toml,
+        &db,
+        &manager,
+        &app_data_dir,
         &emitter,
     )
     .await
@@ -4278,6 +4474,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("codeg-acp-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create test directory");
         dir
+    }
+
+    #[test]
+    fn fingerprint_config_is_deterministic_and_excludes_volatile_keys() {
+        let agent = AgentType::Codex;
+        let mut env = BTreeMap::new();
+        env.insert("OPENAI_BASE_URL".to_string(), "https://a".to_string());
+        env.insert("OPENAI_API_KEY".to_string(), "k1".to_string());
+
+        // Same inputs → same fingerprint (the native-config read is identical
+        // across all calls in this test, so only the env varies).
+        let fp1 = fingerprint_config(agent, &env);
+        assert_eq!(fp1, fingerprint_config(agent, &env));
+
+        // Changing a real config value changes the fingerprint.
+        let mut env_changed = env.clone();
+        env_changed.insert("OPENAI_API_KEY".to_string(), "k2".to_string());
+        assert_ne!(fp1, fingerprint_config(agent, &env_changed));
+
+        // The per-launch volatile key is excluded — adding it must NOT change
+        // the fingerprint (otherwise OpenClaw would look stale once a real
+        // session id is assigned and the reset flag drops).
+        let mut env_volatile = env.clone();
+        env_volatile.insert("OPENCLAW_RESET_SESSION".to_string(), "1".to_string());
+        assert_eq!(fp1, fingerprint_config(agent, &env_volatile));
     }
 
     #[tokio::test]

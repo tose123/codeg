@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "Falha ao salvar o gerenciamento de configuração",
       "clineSaved": "Configuração do Cline salva",
       "saveClineFailed": "Falha ao salvar a configuração do Cline",
-      "modelProviderRequired": "Selecione um provedor de modelo antes de salvar."
+      "modelProviderRequired": "Selecione um provedor de modelo antes de salvar.",
+      "affectedRunningSessions": "{count, plural, one {# sessão ativa precisa reiniciar para aplicar a alteração} other {# sessões ativas precisam reiniciar para aplicar a alteração}}"
     },
     "version": {
       "statusLabel": "Status da versão",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# arquivo} other {# arquivos}}",
         "remove": "Remover",
         "noDiffDataAvailable": "Nenhum dado de diff disponível para {filePath}"
+      },
+      "configStale": {
+        "agentConfigTitle": "Configurações do agente atualizadas",
+        "modelProviderTitle": "Provedor de modelo atualizado",
+        "description": "Esta sessão ainda está usando a configuração anterior. Reinicie para aplicar (o histórico da conversa é mantido).",
+        "restart": "Reiniciar para aplicar",
+        "restarting": "Reiniciando…",
+        "restartDisabledDuringTurn": "Disponível quando o turno atual terminar",
+        "dismiss": "Dispensar",
+        "restartFailed": "Falha ao reiniciar a sessão",
+        "applied": "Nova configuração aplicada"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "Cancelar",
     "delete": "Excluir",
     "create": "Criar",
-    "save": "Salvar"
+    "save": "Salvar",
+    "affectedRunningSessions": "{count, plural, one {# sessão ativa precisa reiniciar para aplicar a alteração} other {# sessões ativas precisam reiniciar para aplicar a alteração}}"
   },
   "ExpertsSettings": {
     "title": "Habilidades de Especialista",

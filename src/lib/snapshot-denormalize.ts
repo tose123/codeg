@@ -1,6 +1,7 @@
 import type {
   ActiveDelegationState,
   AvailableCommandInfo,
+  ConfigStaleKind,
   ConnectionStatus,
   LiveContentBlock as WireLiveContentBlock,
   LiveMessage as WireLiveMessage,
@@ -49,6 +50,11 @@ export interface SnapshotPatch {
   promptCapabilities: PromptCapabilitiesInfo | null
   selectorsReady: boolean
   supportsFork: boolean
+  /** Whether the running session is on stale (launch-time) config — recovered
+   *  from the snapshot so a reconnect/refresh/new tile sees the banner state
+   *  that the one-shot `session_config_stale` event won't replay. */
+  configStale: boolean
+  configStaleKind: ConfigStaleKind | null
   eventSeq: number
   /** Live sub-agent delegations carried by the snapshot. Consumed directly at
    *  the attach call sites to re-seed `DelegationProvider` bindings (see
@@ -101,6 +107,8 @@ export function denormalizeSnapshot(wire: LiveSessionSnapshot): SnapshotPatch {
     promptCapabilities: wire.prompt_capabilities ?? DEFAULT_PROMPT_CAPS,
     selectorsReady: wire.selectors_ready,
     supportsFork: wire.fork_supported,
+    configStale: wire.config_stale ?? false,
+    configStaleKind: wire.config_stale_kind ?? null,
     eventSeq: wire.event_seq,
     activeDelegations: wire.active_delegations ?? [],
   }

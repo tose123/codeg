@@ -159,6 +159,19 @@ pub struct AgentConnection {
     /// conversation rows or a confused agent that received two prompts
     /// in the same turn.
     pub prompt_lock: Arc<tokio::sync::Mutex<()>>,
+
+    /// Canonical fingerprint of the agent's effective config (env vars + model
+    /// provider creds + native config file content) captured at spawn. The
+    /// running process is locked to THIS config; comparing it against a freshly
+    /// recomputed fingerprint after a settings save tells us whether the session
+    /// has drifted onto stale config. Immutable for the connection's lifetime.
+    pub config_fingerprint: String,
+    /// The most recent fingerprint seen by `refresh_connection_staleness`.
+    /// Tracks "did anything change since we last looked" so a second settings
+    /// save re-emits `SessionConfigStale` (re-showing a dismissed banner) while a
+    /// no-op save (identical values) stays silent. Starts equal to
+    /// `config_fingerprint`.
+    pub last_observed_fingerprint: String,
 }
 
 impl AgentConnection {
@@ -437,6 +450,13 @@ pub async fn spawn_agent_connection(
     let cleanup_connection_id = connection_id.clone();
     let state_clone = Arc::clone(&session_state);
 
+    // Canonical config fingerprint of what this process is launching with.
+    // Derived from the same `runtime_env` we hand the agent (minus per-launch
+    // volatile keys) plus the agent's native config file content, so a later
+    // settings save can be compared against it to detect a stale running session.
+    let config_fingerprint =
+        crate::commands::acp::fingerprint_config(agent_type, &runtime_env);
+
     // Insert the entry BEFORE spawning the background task so that a
     // fast-failing `run_connection` can never remove it before it was
     // inserted (would otherwise leak the entry).
@@ -451,6 +471,8 @@ pub async fn spawn_agent_connection(
             state: Arc::clone(&session_state),
             emitter: emitter.clone(),
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            last_observed_fingerprint: config_fingerprint.clone(),
+            config_fingerprint,
         },
     );
 

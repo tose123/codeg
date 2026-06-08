@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "Échec de l’enregistrement de la gestion de configuration",
       "clineSaved": "Configuration Cline enregistrée",
       "saveClineFailed": "Échec de l'enregistrement de la configuration Cline",
-      "modelProviderRequired": "Veuillez sélectionner un fournisseur de modèle avant d'enregistrer."
+      "modelProviderRequired": "Veuillez sélectionner un fournisseur de modèle avant d'enregistrer.",
+      "affectedRunningSessions": "{count, plural, one {# session active doit redémarrer pour appliquer la modification} other {# sessions actives doivent redémarrer pour appliquer la modification}}"
     },
     "version": {
       "statusLabel": "Statut de version",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# fichier} other {# fichiers}}",
         "remove": "Retirer",
         "noDiffDataAvailable": "Aucune donnée de diff disponible pour {filePath}"
+      },
+      "configStale": {
+        "agentConfigTitle": "Paramètres de l'agent mis à jour",
+        "modelProviderTitle": "Fournisseur de modèle mis à jour",
+        "description": "Cette session utilise encore son ancienne configuration. Redémarrez pour l'appliquer (l'historique de conversation est conservé).",
+        "restart": "Redémarrer pour appliquer",
+        "restarting": "Redémarrage…",
+        "restartDisabledDuringTurn": "Disponible une fois le tour en cours terminé",
+        "dismiss": "Ignorer",
+        "restartFailed": "Échec du redémarrage de la session",
+        "applied": "Nouvelle configuration appliquée"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "Annuler",
     "delete": "Supprimer",
     "create": "Créer",
-    "save": "Enregistrer"
+    "save": "Enregistrer",
+    "affectedRunningSessions": "{count, plural, one {# session active doit redémarrer pour appliquer la modification} other {# sessions actives doivent redémarrer pour appliquer la modification}}"
   },
   "ExpertsSettings": {
     "title": "Compétences d'experts",

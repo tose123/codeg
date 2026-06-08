@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "儲存配置管理失敗",
       "clineSaved": "Cline 配置已儲存",
       "saveClineFailed": "儲存 Cline 配置失敗",
-      "modelProviderRequired": "請先選擇一個模型供應商再儲存。"
+      "modelProviderRequired": "請先選擇一個模型供應商再儲存。",
+      "affectedRunningSessions": "{count} 個進行中的工作階段需重新啟動以套用變更"
     },
     "version": {
       "statusLabel": "版本狀態",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count} 個檔案",
         "remove": "移除",
         "noDiffDataAvailable": "找不到 {filePath} 的差異資料"
+      },
+      "configStale": {
+        "agentConfigTitle": "智能體設定已更新",
+        "modelProviderTitle": "模型供應商已更新",
+        "description": "目前的工作階段仍在使用舊設定，重新啟動後生效（對話紀錄不會遺失）。",
+        "restart": "重新啟動以套用",
+        "restarting": "正在重新啟動…",
+        "restartDisabledDuringTurn": "目前回合結束後可重新啟動",
+        "dismiss": "忽略",
+        "restartFailed": "重新啟動工作階段失敗",
+        "applied": "已套用新設定"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "取消",
     "delete": "刪除",
     "create": "建立",
-    "save": "儲存"
+    "save": "儲存",
+    "affectedRunningSessions": "{count} 個進行中的工作階段需重新啟動以套用變更"
   },
   "ExpertsSettings": {
     "title": "專家技能",

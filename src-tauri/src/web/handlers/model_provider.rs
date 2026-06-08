@@ -69,9 +69,11 @@ pub async fn create_model_provider(
 pub async fn update_model_provider(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<UpdateModelProviderParams>,
-) -> Result<Json<ModelProviderInfo>, AppCommandError> {
-    let result = mp_commands::update_model_provider_core(
+) -> Result<Json<mp_commands::UpdateModelProviderResult>, AppCommandError> {
+    let result = mp_commands::update_model_provider_and_refresh(
         &state.db,
+        &state.connection_manager,
+        &state.data_dir,
         params.id,
         params.name,
         params.api_url,

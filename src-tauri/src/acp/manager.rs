@@ -17,8 +17,8 @@ use crate::acp::feedback::{
     SessionFeedbackAccess, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_RESPONSE_BYTES,
 };
 use crate::acp::types::{
-    AcpEvent, AgentOptionsSnapshot, ConnectionInfo, ConnectionStatus, ForkResultInfo,
-    PromptInputBlock,
+    AcpEvent, AgentOptionsSnapshot, ConfigStaleKind, ConnectionInfo, ConnectionStatus,
+    ForkResultInfo, PromptInputBlock,
 };
 use crate::db::entities::conversation::{self, ConversationStatus};
 use crate::db::service::conversation_service;
@@ -260,6 +260,8 @@ impl ConnectionManager {
             state: Arc::new(tokio::sync::RwLock::new(state)),
             emitter,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         };
         let mut map = self.connections.lock().await;
         map.insert(id.to_string(), conn);
@@ -300,6 +302,8 @@ impl ConnectionManager {
             state: Arc::new(tokio::sync::RwLock::new(state)),
             emitter,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         };
         self.connections.lock().await.insert(id.to_string(), conn);
         rx
@@ -485,6 +489,55 @@ impl ConnectionManager {
             }
         }
         disconnected
+    }
+
+    /// Compare each running connection's spawn-time config fingerprint against a
+    /// freshly recomputed one (keyed by agent type in `fresh`) and notify those
+    /// that drifted. Drives the conversation-side "restart to apply" banner after
+    /// a settings save.
+    ///
+    /// Emit policy, per connection:
+    /// - emit `SessionConfigStale { stale }` only when the current fingerprint
+    ///   differs from the one we last observed for it — a no-op save (identical
+    ///   values) stays silent, while a second real change re-emits so a dismissed
+    ///   banner reappears.
+    /// - `stale = (current != spawn)`, so reverting a setting back to its
+    ///   launch-time value emits `stale = false` and clears the banner.
+    ///
+    /// Returns the count of running connections currently on stale config across
+    /// the affected agents (for the settings-side "N sessions need restart"
+    /// toast). Connections whose agent type isn't in `fresh` are left untouched.
+    ///
+    /// `emit_with_state` is deferred until AFTER the connections-map lock is
+    /// released (we collect targets first) so the SessionState write lock is
+    /// never taken while holding the map lock.
+    pub async fn refresh_connection_staleness(
+        &self,
+        fresh: &HashMap<AgentType, String>,
+        kind: ConfigStaleKind,
+    ) -> usize {
+        let mut targets = Vec::new();
+        let mut stale_count = 0usize;
+        {
+            let mut connections = self.connections.lock().await;
+            for conn in connections.values_mut() {
+                let Some(current) = fresh.get(&conn.agent_type) else {
+                    continue;
+                };
+                let stale = *current != conn.config_fingerprint;
+                if stale {
+                    stale_count += 1;
+                }
+                if *current != conn.last_observed_fingerprint {
+                    conn.last_observed_fingerprint = current.clone();
+                    targets.push((Arc::clone(&conn.state), conn.emitter.clone(), stale));
+                }
+            }
+        }
+        for (state, emitter, stale) in targets {
+            emit_with_state(&state, &emitter, AcpEvent::SessionConfigStale { stale, kind }).await;
+        }
+        stale_count
     }
 
     /// Look up an existing live connection that we can reuse instead of
@@ -2135,6 +2188,8 @@ mod tests {
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         }
     }
 
@@ -2159,6 +2214,49 @@ mod tests {
     ) {
         mgr.insert_test_connection(id, agent_type, working_dir, emitter)
             .await;
+    }
+
+    #[tokio::test]
+    async fn refresh_connection_staleness_flags_only_drifted_running_sessions() {
+        let mgr = ConnectionManager::new();
+        // Test connections spawn with an empty fingerprint (insert_test_connection).
+        insert_fake_connection(&mgr, "c1", AgentType::Codex, None, EventEmitter::Noop).await;
+        // A different agent type that must stay untouched.
+        insert_fake_connection(&mgr, "c2", AgentType::ClaudeCode, None, EventEmitter::Noop).await;
+
+        // A real config change for Codex (fresh fp differs from the "" spawn fp).
+        let mut fresh = HashMap::new();
+        fresh.insert(AgentType::Codex, "codex-v2".to_string());
+        let n = mgr
+            .refresh_connection_staleness(&fresh, ConfigStaleKind::AgentConfig)
+            .await;
+        assert_eq!(n, 1, "only the Codex session is stale");
+        assert!(
+            mgr.get_state("c1").await.unwrap().read().await.config_stale,
+            "Codex session flagged stale"
+        );
+        assert!(
+            !mgr.get_state("c2").await.unwrap().read().await.config_stale,
+            "ClaudeCode session untouched (agent not in the fresh set)"
+        );
+
+        // Re-running with the SAME fingerprint keeps it stale but is idempotent.
+        let n2 = mgr
+            .refresh_connection_staleness(&fresh, ConfigStaleKind::AgentConfig)
+            .await;
+        assert_eq!(n2, 1);
+
+        // Reverting Codex back to its spawn fingerprint ("") clears staleness.
+        let mut reverted = HashMap::new();
+        reverted.insert(AgentType::Codex, String::new());
+        let n3 = mgr
+            .refresh_connection_staleness(&reverted, ConfigStaleKind::AgentConfig)
+            .await;
+        assert_eq!(n3, 0, "reverted config is no longer stale");
+        assert!(
+            !mgr.get_state("c1").await.unwrap().read().await.config_stale,
+            "staleness cleared after revert"
+        );
     }
 
     /// Subscribe directly to the per-connection event stream. Phase 4b
@@ -2262,6 +2360,8 @@ mod tests {
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         };
         mgr.connections
             .lock()
@@ -2593,6 +2693,8 @@ mod tests {
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         };
         let mgr = ConnectionManager::new();
         mgr.connections
@@ -4083,6 +4185,8 @@ mod tests {
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         };
         let mgr = Arc::new(ConnectionManager::new());
         {

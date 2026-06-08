@@ -175,6 +175,9 @@ function makeConnState(overrides: Partial<ConnectionState>): ConnectionState {
     parentConnectionId: "p1",
     isViewer: false,
     pendingUserMessage: null,
+    configStale: false,
+    configStaleKind: null,
+    configStaleDismissed: false,
     ...overrides,
   }
 }

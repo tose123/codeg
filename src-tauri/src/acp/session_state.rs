@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::acp::event_stream::{ConnectionEventStream, RecentEventsBuffer};
 use crate::acp::feedback::{FeedbackItem, FeedbackStatus};
 use crate::acp::types::{
-    AcpEvent, AvailableCommandInfo, ConnectionStatus, EventEnvelope, PromptCapabilitiesInfo,
-    SessionConfigOptionInfo, SessionModeStateInfo, ToolCallImageInfo,
+    AcpEvent, AvailableCommandInfo, ConfigStaleKind, ConnectionStatus, EventEnvelope,
+    PromptCapabilitiesInfo, SessionConfigOptionInfo, SessionModeStateInfo, ToolCallImageInfo,
 };
 use crate::models::agent::AgentType;
 use crate::models::message::MessageRole;
@@ -345,6 +345,19 @@ pub struct SessionState {
     /// seeing success. Not serialized: it is a connection-loop liveness flag,
     /// not part of the client-visible snapshot.
     pub turn_in_flight: bool,
+
+    /// True when the agent's effective settings changed after this connection
+    /// was spawned — the running process is still on its launch-time config and
+    /// needs a restart to pick up the change. Set/cleared by
+    /// `AcpEvent::SessionConfigStale` (emitted from
+    /// `ConnectionManager::refresh_connection_staleness` after a settings save).
+    /// Carried on `to_snapshot()` so a client attaching via the snapshot path
+    /// (web reconnect, window refresh, a newly-tiled panel) sees the staleness
+    /// the transient event won't replay for it.
+    pub config_stale: bool,
+    /// Which settings surface drifted, for the banner's wording. `Some` iff
+    /// `config_stale`; reset to `None` when staleness clears.
+    pub config_stale_kind: Option<ConfigStaleKind>,
 }
 
 impl SessionState {
@@ -389,6 +402,8 @@ impl SessionState {
             pending_user_message: None,
             pending_user_message_started_at: None,
             turn_in_flight: false,
+            config_stale: false,
+            config_stale_kind: None,
         }
     }
 
@@ -469,6 +484,10 @@ impl SessionState {
             }
             AcpEvent::SessionConfigOptions { config_options } => {
                 self.config_options = Some(config_options.clone());
+            }
+            AcpEvent::SessionConfigStale { stale, kind } => {
+                self.config_stale = *stale;
+                self.config_stale_kind = if *stale { Some(*kind) } else { None };
             }
             AcpEvent::PromptCapabilities {
                 prompt_capabilities,
@@ -1025,6 +1044,8 @@ impl SessionState {
             fork_supported: self.fork_supported,
             available_commands: self.available_commands.clone(),
             selectors_ready: self.selectors_ready,
+            config_stale: self.config_stale,
+            config_stale_kind: self.config_stale_kind,
             event_seq: self.event_seq,
         }
     }
@@ -1074,6 +1095,17 @@ pub struct LiveSessionSnapshot {
     pub fork_supported: bool,
     pub available_commands: Vec<AvailableCommandInfo>,
     pub selectors_ready: bool,
+    /// Whether the running session is on stale (launch-time) config after a
+    /// later settings save (see `SessionState.config_stale`). `#[serde(default)]`
+    /// so older server payloads without the field deserialize to `false`; always
+    /// serialized so the frontend can rely on it from the snapshot path.
+    #[serde(default)]
+    pub config_stale: bool,
+    /// Which settings surface drifted (see `SessionState.config_stale_kind`).
+    /// `#[serde(default)]` + `skip_serializing_if` keep the common not-stale case
+    /// byte-identical with the pre-feature wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_stale_kind: Option<ConfigStaleKind>,
     pub event_seq: u64,
 }
 

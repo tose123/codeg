@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "فشل حفظ إدارة الإعدادات",
       "clineSaved": "تم حفظ تكوين Cline",
       "saveClineFailed": "فشل في حفظ تكوين Cline",
-      "modelProviderRequired": "يرجى اختيار مزود نموذج قبل الحفظ."
+      "modelProviderRequired": "يرجى اختيار مزود نموذج قبل الحفظ.",
+      "affectedRunningSessions": "{count} جلسة نشطة تحتاج إلى إعادة تشغيل لتطبيق التغيير"
     },
     "version": {
       "statusLabel": "حالة الإصدار",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# ملف} other {# ملفات}}",
         "remove": "إزالة",
         "noDiffDataAvailable": "لا توجد بيانات diff متاحة لـ {filePath}"
+      },
+      "configStale": {
+        "agentConfigTitle": "تم تحديث إعدادات الوكيل",
+        "modelProviderTitle": "تم تحديث مزوّد النموذج",
+        "description": "لا تزال هذه الجلسة تستخدم الإعدادات السابقة. أعد التشغيل لتطبيقها (سيتم الاحتفاظ بسجل المحادثة).",
+        "restart": "أعد التشغيل للتطبيق",
+        "restarting": "جارٍ إعادة التشغيل…",
+        "restartDisabledDuringTurn": "متاح بعد انتهاء الدور الحالي",
+        "dismiss": "تجاهل",
+        "restartFailed": "فشل في إعادة تشغيل الجلسة",
+        "applied": "تم تطبيق الإعدادات الجديدة"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "إلغاء",
     "delete": "حذف",
     "create": "إنشاء",
-    "save": "حفظ"
+    "save": "حفظ",
+    "affectedRunningSessions": "{count} جلسة نشطة تحتاج إلى إعادة تشغيل لتطبيق التغيير"
   },
   "ExpertsSettings": {
     "title": "مهارات الخبراء",

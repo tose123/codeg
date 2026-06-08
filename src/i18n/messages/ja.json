@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "設定管理の保存に失敗しました",
       "clineSaved": "Cline設定を保存しました",
       "saveClineFailed": "Cline設定の保存に失敗しました",
-      "modelProviderRequired": "保存する前にモデルプロバイダーを選択してください。"
+      "modelProviderRequired": "保存する前にモデルプロバイダーを選択してください。",
+      "affectedRunningSessions": "{count} 件の実行中セッションは再起動すると変更が適用されます"
     },
     "version": {
       "statusLabel": "バージョン状態",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# 個のファイル} other {# 個のファイル}}",
         "remove": "削除",
         "noDiffDataAvailable": "{filePath} の差分データがありません"
+      },
+      "configStale": {
+        "agentConfigTitle": "エージェント設定が更新されました",
+        "modelProviderTitle": "モデルプロバイダーが更新されました",
+        "description": "このセッションは以前の設定のままです。再起動すると適用されます（会話履歴は保持されます）。",
+        "restart": "再起動して適用",
+        "restarting": "再起動中…",
+        "restartDisabledDuringTurn": "現在のターンが完了すると再起動できます",
+        "dismiss": "閉じる",
+        "restartFailed": "セッションの再起動に失敗しました",
+        "applied": "新しい設定を適用しました"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "キャンセル",
     "delete": "削除",
     "create": "作成",
-    "save": "保存"
+    "save": "保存",
+    "affectedRunningSessions": "{count} 件の実行中セッションは再起動すると変更が適用されます"
   },
   "ExpertsSettings": {
     "title": "エキスパートスキル",

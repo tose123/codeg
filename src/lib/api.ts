@@ -88,6 +88,7 @@ import type {
   ChatChannelMessageLog,
   WebhookConfig,
   ModelProviderInfo,
+  UpdateModelProviderResult,
   PluginCheckSummary,
   QuickMessage,
 } from "./types"
@@ -322,7 +323,7 @@ export async function acpUpdateAgentPreferences(
     codex_auth_json?: string | null
     codex_config_toml?: string | null
   }
-): Promise<void> {
+): Promise<number> {
   return getTransport().call("acp_update_agent_preferences", {
     agentType,
     enabled: params.enabled,
@@ -334,6 +335,8 @@ export async function acpUpdateAgentPreferences(
   })
 }
 
+/** Returns the number of running sessions left on stale config by this save
+ *  (for the settings-side "N sessions need restart" toast). */
 export async function acpUpdateAgentEnv(
   agentType: AgentType,
   params: {
@@ -341,7 +344,7 @@ export async function acpUpdateAgentEnv(
     env: Record<string, string>
     modelProviderId?: number | null
   }
-): Promise<void> {
+): Promise<number> {
   return getTransport().call("acp_update_agent_env", {
     agentType,
     enabled: params.enabled,
@@ -350,6 +353,8 @@ export async function acpUpdateAgentEnv(
   })
 }
 
+/** Returns the number of running sessions left on stale config by this save
+ *  (for the settings-side "N sessions need restart" toast). */
 export async function acpUpdateAgentConfig(
   agentType: AgentType,
   params: {
@@ -358,7 +363,7 @@ export async function acpUpdateAgentConfig(
     codex_auth_json?: string | null
     codex_config_toml?: string | null
   }
-): Promise<void> {
+): Promise<number> {
   return getTransport().call("acp_update_agent_config", {
     agentType,
     configJson: params.config_json ?? null,
@@ -2560,7 +2565,7 @@ export async function updateModelProvider(params: {
   apiKey?: string | null
   agentType?: string | null
   model?: string | null
-}): Promise<ModelProviderInfo> {
+}): Promise<UpdateModelProviderResult> {
   return getTransport().call("update_model_provider", {
     id: params.id,
     name: params.name ?? null,

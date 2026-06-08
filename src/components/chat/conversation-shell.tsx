@@ -69,6 +69,10 @@ interface ConversationShellProps {
   onSaveQueueEdit?: (draft: PromptDraft) => void
   onCancelQueueEdit?: () => void
   onForkSend?: (draft: PromptDraft, modeId?: string | null) => void
+  /** Optional banner pinned to the top of the panel, above the message area
+   *  (e.g. the "restart to apply" config-stale banner). Renders nothing when
+   *  omitted. */
+  topBanner?: ReactNode
 }
 
 export function ConversationShell({
@@ -114,6 +118,7 @@ export function ConversationShell({
   onSaveQueueEdit,
   onCancelQueueEdit,
   onForkSend,
+  topBanner,
 }: ConversationShellProps) {
   const tAcp = useTranslations("Folder.chat.acpConnections")
   const retryLineText = useMemo(() => {
@@ -173,6 +178,7 @@ export function ConversationShell({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {topBanner}
       <div className="flex-1 min-h-0">{children}</div>
 
       <PermissionDialog

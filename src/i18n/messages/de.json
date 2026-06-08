@@ -734,7 +734,8 @@
       "saveConfigManagementFailed": "Speichern der Konfigurationsverwaltung fehlgeschlagen",
       "clineSaved": "Cline-Konfiguration gespeichert",
       "saveClineFailed": "Cline-Konfiguration konnte nicht gespeichert werden",
-      "modelProviderRequired": "Bitte wählen Sie vor dem Speichern einen Modellanbieter aus."
+      "modelProviderRequired": "Bitte wählen Sie vor dem Speichern einen Modellanbieter aus.",
+      "affectedRunningSessions": "{count, plural, one {# laufende Sitzung muss zum Anwenden neu gestartet werden} other {# laufende Sitzungen müssen zum Anwenden neu gestartet werden}}"
     },
     "version": {
       "statusLabel": "Versionsstatus",
@@ -2078,6 +2079,17 @@
         "fileCount": "{count, plural, one {# Datei} other {# Dateien}}",
         "remove": "Entfernen",
         "noDiffDataAvailable": "Keine Diff-Daten verfügbar für {filePath}"
+      },
+      "configStale": {
+        "agentConfigTitle": "Agent-Einstellungen aktualisiert",
+        "modelProviderTitle": "Modellanbieter aktualisiert",
+        "description": "Diese Sitzung verwendet weiterhin die bisherige Konfiguration. Zum Anwenden neu starten (der Gesprächsverlauf bleibt erhalten).",
+        "restart": "Zum Anwenden neu starten",
+        "restarting": "Wird neu gestartet…",
+        "restartDisabledDuringTurn": "Verfügbar, sobald die aktuelle Runde abgeschlossen ist",
+        "dismiss": "Schließen",
+        "restartFailed": "Sitzung konnte nicht neu gestartet werden",
+        "applied": "Neue Konfiguration angewendet"
       }
     },
     "diffPreview": {
@@ -2415,7 +2427,8 @@
     "cancel": "Abbrechen",
     "delete": "Löschen",
     "create": "Erstellen",
-    "save": "Speichern"
+    "save": "Speichern",
+    "affectedRunningSessions": "{count, plural, one {# laufende Sitzung muss zum Anwenden neu gestartet werden} other {# laufende Sitzungen müssen zum Anwenden neu gestartet werden}}"
   },
   "ExpertsSettings": {
     "title": "Experten-Skills",

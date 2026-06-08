@@ -55,3 +55,22 @@ describe("denormalizeSnapshot — active_delegations", () => {
     expect(patch.activeDelegations).toEqual([])
   })
 })
+
+describe("denormalizeSnapshot — config staleness", () => {
+  it("carries config_stale / config_stale_kind into the patch", () => {
+    const patch = denormalizeSnapshot(
+      baseSnapshot({ config_stale: true, config_stale_kind: "model_provider" })
+    )
+    expect(patch.configStale).toBe(true)
+    expect(patch.configStaleKind).toBe("model_provider")
+  })
+
+  it("defaults to not-stale when the fields are absent (older server payload)", () => {
+    const snap = baseSnapshot()
+    delete (snap as { config_stale?: unknown }).config_stale
+    delete (snap as { config_stale_kind?: unknown }).config_stale_kind
+    const patch = denormalizeSnapshot(snap)
+    expect(patch.configStale).toBe(false)
+    expect(patch.configStaleKind).toBeNull()
+  })
+})

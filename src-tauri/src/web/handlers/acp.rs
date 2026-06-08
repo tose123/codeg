@@ -502,10 +502,10 @@ pub struct AcpUpdateAgentPreferencesParams {
 pub async fn acp_update_agent_preferences(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentPreferencesParams>,
-) -> Result<Json<()>, AppCommandError> {
+) -> Result<Json<usize>, AppCommandError> {
     let db = &state.db;
     let emitter = state.emitter.clone();
-    acp_commands::acp_update_agent_preferences_core(
+    let affected = acp_commands::acp_update_agent_preferences_and_refresh(
         params.agent_type,
         params.enabled,
         params.env,
@@ -514,11 +514,13 @@ pub async fn acp_update_agent_preferences(
         params.codex_auth_json,
         params.codex_config_toml,
         db,
+        &state.connection_manager,
+        &state.data_dir,
         &emitter,
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
-    Ok(Json(()))
+    Ok(Json(affected))
 }
 
 #[derive(Deserialize)]
@@ -533,20 +535,22 @@ pub struct AcpUpdateAgentEnvParams {
 pub async fn acp_update_agent_env(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentEnvParams>,
-) -> Result<Json<()>, AppCommandError> {
+) -> Result<Json<usize>, AppCommandError> {
     let db = &state.db;
     let emitter = state.emitter.clone();
-    acp_commands::acp_update_agent_env_core(
+    let affected = acp_commands::acp_update_agent_env_and_refresh(
         params.agent_type,
         params.enabled,
         params.env,
         params.model_provider_id,
         db,
+        &state.connection_manager,
+        &state.data_dir,
         &emitter,
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
-    Ok(Json(()))
+    Ok(Json(affected))
 }
 
 #[derive(Deserialize)]
@@ -562,19 +566,22 @@ pub struct AcpUpdateAgentConfigParams {
 pub async fn acp_update_agent_config(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpUpdateAgentConfigParams>,
-) -> Result<Json<()>, AppCommandError> {
+) -> Result<Json<usize>, AppCommandError> {
     let emitter = state.emitter.clone();
-    acp_commands::acp_update_agent_config_core(
+    let affected = acp_commands::acp_update_agent_config_and_refresh(
         params.agent_type,
         params.config_json,
         params.opencode_auth_json,
         params.codex_auth_json,
         params.codex_config_toml,
+        &state.db,
+        &state.connection_manager,
+        &state.data_dir,
         &emitter,
     )
     .await
     .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
-    Ok(Json(()))
+    Ok(Json(affected))
 }
 
 #[derive(Deserialize)]

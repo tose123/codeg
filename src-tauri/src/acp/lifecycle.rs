@@ -1523,6 +1523,8 @@ mod tests {
             state: Arc::new(RwLock::new(state)),
             emitter: EventEmitter::Noop,
             prompt_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_fingerprint: String::new(),
+            last_observed_fingerprint: String::new(),
         }
     }
 

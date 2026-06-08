@@ -117,7 +117,7 @@ export function EditModelProviderDialog({
     setLoading(true)
     setError(null)
     try {
-      await updateModelProvider({
+      const { affectedRunningSessions } = await updateModelProvider({
         id: provider.id,
         name: name.trim() !== provider.name ? name.trim() : undefined,
         apiUrl: apiUrl.trim() !== provider.api_url ? apiUrl.trim() : undefined,
@@ -126,6 +126,13 @@ export function EditModelProviderDialog({
         model: modelChanged ? nextModel : undefined,
       })
       toast.success(t("editSuccess"))
+      // Bound agents' running sessions stay on the old credentials until
+      // restarted — tell the user how many need a restart to pick up the change.
+      if (affectedRunningSessions > 0) {
+        toast.info(
+          t("affectedRunningSessions", { count: affectedRunningSessions })
+        )
+      }
       handleOpenChange(false)
       onProviderUpdated()
     } catch (err: unknown) {
