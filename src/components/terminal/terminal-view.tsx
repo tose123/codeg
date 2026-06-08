@@ -8,6 +8,7 @@ import {
   terminalResize,
   terminalKill,
 } from "@/lib/api"
+import { createWriteQueue } from "@/lib/terminal/write-queue"
 import { useZoomLevel, useTerminalFont } from "@/hooks/use-appearance"
 import { detectPlatform } from "@/hooks/use-platform"
 import type { TerminalEvent } from "@/lib/types"
@@ -218,6 +219,15 @@ export function TerminalView({
         )
       }
 
+      // Ordered single-flight pump for terminal input. Both onData (typed
+      // bytes) and the custom-key escape sequences below feed this one queue,
+      // so input reaches the PTY in exact type order regardless of transport
+      // reordering, and fast bursts coalesce into fewer round-trips. A failed
+      // send is dropped, not retried — re-sending an ambiguous write could
+      // duplicate already-delivered bytes, worse than a drop in a shell. See
+      // lib/terminal/write-queue.ts.
+      const writeQueue = createWriteQueue((d) => terminalWrite(terminalId, d))
+
       // Shell line-editing shortcuts. Sends readline/zle bindings so they
       // work regardless of terminfo.
       //   Alt/Option + ←/→ / Backspace: word-level moves & delete
@@ -235,7 +245,7 @@ export function TerminalView({
         const { code, altKey, metaKey, ctrlKey, shiftKey } = e
 
         const writeSeq = (seq: string) => {
-          terminalWrite(terminalId, seq).catch(() => {})
+          writeQueue.enqueue(seq)
           e.preventDefault()
           return false
         }
@@ -269,7 +279,7 @@ export function TerminalView({
         // Some apps toggle focus reporting; don't leak focus in/out sequences
         // into the shell prompt when tabs are switched.
         if (data === "\x1b[I" || data === "\x1b[O") return
-        terminalWrite(terminalId, data).catch(() => {})
+        writeQueue.enqueue(data)
       })
 
       // Debounced resize — avoid flooding IPC during drag
@@ -297,12 +307,16 @@ export function TerminalView({
       const unlistenExit = await subscribe<TerminalEvent>(
         `terminal://exit/${terminalId}`,
         () => {
+          // PTY is gone — stop the input pump (the reliable terminal-gone
+          // signal; the queue's error-string match is only a fast-path).
+          writeQueue.dispose()
           onProcessExitedRef.current?.(terminalId)
           term.write("\r\n\x1b[90m[Process exited]\x1b[0m\r\n")
         }
       )
 
       if (cancelled) {
+        writeQueue.dispose()
         themeObserver.disconnect()
         onDataDisposable.dispose()
         onResizeDisposable.dispose()
@@ -324,6 +338,7 @@ export function TerminalView({
 
       // If unmounted while spawn was in flight, clean up the spawned PTY
       if (cancelled) {
+        writeQueue.dispose()
         terminalKill(terminalId).catch(() => {})
         themeObserver.disconnect()
         onDataDisposable.dispose()
@@ -358,6 +373,7 @@ export function TerminalView({
       resizeObserver.observe(containerRef.current)
 
       cleanup = () => {
+        writeQueue.dispose()
         if (resizeTimer) clearTimeout(resizeTimer)
         if (fitTimer) clearTimeout(fitTimer)
         themeObserver.disconnect()
