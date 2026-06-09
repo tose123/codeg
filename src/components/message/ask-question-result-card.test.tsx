@@ -1,5 +1,5 @@
 import { type ReactElement } from "react"
-import { render, screen, within } from "@testing-library/react"
+import { fireEvent, render, screen, within } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { describe, expect, it } from "vitest"
 
@@ -12,6 +12,11 @@ function renderWithIntl(ui: ReactElement) {
       {ui}
     </NextIntlClientProvider>
   )
+}
+
+/** Expand the collapsed capsule so the read-only card is in the DOM. */
+function expand() {
+  fireEvent.click(screen.getByTestId("ask-question-result-card"))
 }
 
 const SINGLE_INPUT = JSON.stringify({
@@ -28,20 +33,45 @@ const SINGLE_INPUT = JSON.stringify({
   ],
 })
 
+// The real on-disk tool result: the structured envelope, `selected` an array.
+const SINGLE_OUTPUT = JSON.stringify({
+  answers: [
+    {
+      header: "Approach",
+      question: "Which approach?",
+      selected: ["Incremental (Recommended)"],
+    },
+  ],
+  declined: false,
+})
+
 const result = enMessages.Folder.chat.askQuestionResult
 
 describe("AskQuestionResultCard", () => {
-  it("renders the answered single-select choice as a checked, read-only radio", () => {
+  it("is collapsed by default into a capsule summarizing the picks", () => {
     renderWithIntl(
       <AskQuestionResultCard
         input={SINGLE_INPUT}
-        output={
-          "The user answered your question(s):\n" +
-          "1. [Approach] Which approach?\n   → Incremental (Recommended)\n"
-        }
+        output={SINGLE_OUTPUT}
         state="output-available"
       />
     )
+
+    // Capsule shows the chosen value; the full option controls stay hidden.
+    expect(screen.getByText("Incremental (Recommended)")).toBeInTheDocument()
+    expect(screen.queryByRole("radio")).toBeNull()
+    expect(screen.queryByText("Which approach?")).toBeNull()
+  })
+
+  it("expands to the read-only card, with the choice checked and disabled", () => {
+    renderWithIntl(
+      <AskQuestionResultCard
+        input={SINGLE_INPUT}
+        output={SINGLE_OUTPUT}
+        state="output-available"
+      />
+    )
+    expand()
 
     expect(screen.getByText("Which approach?")).toBeInTheDocument()
     const chosen = screen.getByRole("radio", { name: /Incremental/ })
@@ -70,22 +100,33 @@ describe("AskQuestionResultCard", () => {
         },
       ],
     })
+    const output = JSON.stringify({
+      answers: [
+        {
+          header: "Pick",
+          question: "Pick any",
+          selected: ["Alpha", "Custom thing"],
+        },
+      ],
+      declined: false,
+    })
     renderWithIntl(
       <AskQuestionResultCard
         input={input}
-        output={"1. [Pick] Pick any\n   → Alpha, Custom thing\n"}
+        output={output}
         state="output-available"
       />
     )
+    expand()
 
     expect(screen.getByRole("checkbox", { name: "Alpha" })).toBeChecked()
     expect(screen.getByRole("checkbox", { name: "Beta" })).not.toBeChecked()
-    // The label that isn't an option is the free-text "Other" answer.
+    // The pick that isn't an option is the free-text "Other" answer.
     expect(screen.getByRole("checkbox", { name: "Other" })).toBeChecked()
     expect(screen.getByDisplayValue("Custom thing")).toBeInTheDocument()
   })
 
-  it("recovers an option label that itself contains a comma", () => {
+  it("matches an option label that itself contains a comma", () => {
     const input = JSON.stringify({
       questions: [
         {
@@ -99,16 +140,23 @@ describe("AskQuestionResultCard", () => {
         },
       ],
     })
+    const output = JSON.stringify({
+      answers: [
+        { header: "Pick", question: "Pick", selected: ["Rewrite, then test"] },
+      ],
+      declined: false,
+    })
     renderWithIntl(
       <AskQuestionResultCard
         input={input}
-        output={"1. [Pick] Pick\n   → Rewrite, then test\n"}
+        output={output}
         state="output-available"
       />
     )
+    expand()
 
-    // Naive ", " splitting would have left this unmatched; option-aware
-    // matching checks the real option and leaves "Incremental" unchosen.
+    // The pick is one whole array entry, so the comma is no obstacle: the real
+    // option is checked and "Incremental" stays unchosen.
     expect(
       screen.getByRole("checkbox", { name: "Rewrite, then test" })
     ).toBeChecked()
@@ -121,22 +169,21 @@ describe("AskQuestionResultCard", () => {
     renderWithIntl(
       <AskQuestionResultCard
         input={SINGLE_INPUT}
-        output={
-          "The user dismissed the question(s) without choosing an answer. " +
-          "Proceed using your best judgment and reasonable defaults."
-        }
+        output={JSON.stringify({ answers: [], declined: true })}
         state="output-available"
       />
     )
 
+    // Collapsed capsule carries the dismissed note.
     expect(screen.getByText(result.declined)).toBeInTheDocument()
+    expand()
     for (const radio of screen.getAllByRole("radio")) {
       expect(radio).not.toBeChecked()
     }
     expect(screen.queryByRole("button", { name: "Submit" })).toBeNull()
   })
 
-  it("lays multiple questions out as tabs", () => {
+  it("lays multiple questions out as tabs once expanded", () => {
     const input = JSON.stringify({
       questions: [
         {
@@ -153,13 +200,21 @@ describe("AskQuestionResultCard", () => {
         },
       ],
     })
+    const output = JSON.stringify({
+      answers: [
+        { header: "First", question: "First?", selected: ["X"] },
+        { header: "Second", question: "Second?", selected: ["Q"] },
+      ],
+      declined: false,
+    })
     renderWithIntl(
       <AskQuestionResultCard
         input={input}
-        output={"1. [First] First?\n   → X\n2. [Second] Second?\n   → Q\n"}
+        output={output}
         state="output-available"
       />
     )
+    expand()
 
     const tabs = screen.getAllByRole("tab")
     expect(tabs).toHaveLength(2)

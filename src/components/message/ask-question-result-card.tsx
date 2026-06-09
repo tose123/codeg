@@ -4,18 +4,24 @@
  * Read-only inline view of the codeg-mcp `ask_user_question` tool in the message
  * stream (historical transcripts + the in-flight tool marker).
  *
- * The answered / declined record reuses the live `AskQuestionCard` in its
+ * The answered / declined record is collapsed by default into a capsule that
+ * summarizes the picks; expanding it reveals the live `AskQuestionCard` in its
  * `readOnly` mode, so the layout (tabs, headers, option cards) stays identical
  * to the interactive card the user actually answered — it just renders the
  * selection as disabled and drops the footer. The Q&A is reconstructed from the
- * tool's raw input JSON + the companion's rendered result text (see
- * `@/lib/ask-question`). Error and in-flight states fall back to a compact
+ * tool's raw input JSON + the persisted `{ answers, declined }` result envelope
+ * (see `@/lib/ask-question`). Error and in-flight states fall back to a compact
  * header card, since there is no answered selection to show yet.
  */
 
-import { useMemo, type ReactNode } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import { useTranslations } from "next-intl"
-import { Loader2, MessageCircleQuestionMark } from "lucide-react"
+import {
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  MessageCircleQuestionMark,
+} from "lucide-react"
 
 import { AskQuestionCard } from "@/components/chat/ask-question-card"
 import { Badge } from "@/components/ui/badge"
@@ -47,6 +53,7 @@ export function AskQuestionResultCard({
   state,
 }: Props) {
   const t = useTranslations("Folder.chat.askQuestionResult")
+  const [expanded, setExpanded] = useState(false)
 
   const questions = useMemo(() => parseAskQuestionInput(input), [input])
   const outcome = useMemo(() => parseAskQuestionOutcome(output), [output])
@@ -84,9 +91,9 @@ export function AskQuestionResultCard({
       ])
     )
     pending.questions.forEach((q) => {
-      const joined = bySig.get(`${q.header}${KEY_SEP}${q.question}`) ?? ""
+      const values = bySig.get(`${q.header}${KEY_SEP}${q.question}`) ?? []
       const { selected, other } = matchSelections(
-        joined,
+        values,
         q.options.map((o) => o.label)
       )
       sel[q.id] = { chosen: selected, otherText: other.join(", ") }
@@ -182,15 +189,53 @@ export function AskQuestionResultCard({
     )
   }
 
-  // Answered / declined: reuse the live card so the layout matches exactly.
+  // Answered / declined. Collapsed by default into a capsule that summarizes the
+  // picks; expanding reveals the live card (so the layout matches exactly).
+  const picks = (outcome?.answers ?? [])
+    .flatMap((a) => a.selected)
+    .filter(Boolean)
+  const summary = outcome?.declined
+    ? t("declined")
+    : picks.length > 0
+      ? picks.join(", ")
+      : t("noSelection")
+
+  const capsule = (
+    <button
+      type="button"
+      onClick={() => setExpanded((v) => !v)}
+      aria-expanded={expanded}
+      data-testid="ask-question-result-card"
+      className={cn(
+        "flex w-full items-center gap-2 rounded-full border border-primary/30 bg-card px-3 py-1.5 text-left transition-colors hover:bg-muted/40",
+        !expanded && "mb-2"
+      )}
+    >
+      <MessageCircleQuestionMark className="size-4 shrink-0 text-primary" />
+      <span className="min-w-0 flex-1 truncate text-xs text-foreground/90">
+        {summary}
+      </span>
+      {expanded ? (
+        <ChevronUp className="size-3.5 shrink-0 text-muted-foreground" />
+      ) : (
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
+    </button>
+  )
+
+  if (!expanded) return capsule
+
   return (
-    <AskQuestionCard
-      readOnly
-      question={pending}
-      onAnswer={NOOP}
-      initialSelections={initialSelections}
-      title={t("title")}
-      subtitle={outcome?.declined ? t("declined") : ""}
-    />
+    <div className="mb-2 space-y-1.5">
+      {capsule}
+      <AskQuestionCard
+        readOnly
+        question={pending}
+        onAnswer={NOOP}
+        initialSelections={initialSelections}
+        title={t("title")}
+        subtitle={outcome?.declined ? t("declined") : ""}
+      />
+    </div>
   )
 }

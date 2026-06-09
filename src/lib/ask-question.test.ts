@@ -121,17 +121,62 @@ describe("parseAskQuestionOutcome", () => {
     expect(parseAskQuestionOutcome("   ")).toBeNull()
   })
 
-  it("detects a declined / dismissed outcome", () => {
-    const output =
-      "The user dismissed the question(s) without choosing an answer. " +
-      "Proceed using your best judgment and reasonable defaults."
+  it("parses the structured JSON envelope the CLI persists", () => {
+    // The real on-disk shape: each answer's `selected` is already an array.
+    const output = JSON.stringify({
+      answers: [
+        {
+          header: "Approach",
+          question: "Which approach?",
+          selected: ["Incremental", "Rewrite"],
+        },
+        { header: "Format", question: "Output format?", selected: [] },
+      ],
+      declined: false,
+    })
     expect(parseAskQuestionOutcome(output)).toEqual({
-      declined: true,
-      answers: [],
+      declined: false,
+      answers: [
+        {
+          header: "Approach",
+          question: "Which approach?",
+          selected: ["Incremental", "Rewrite"],
+        },
+        { header: "Format", question: "Output format?", selected: [] },
+      ],
     })
   })
 
-  it("parses answered questions with their selected labels in order", () => {
+  it("reads a declined envelope from the JSON", () => {
+    expect(
+      parseAskQuestionOutcome(JSON.stringify({ answers: [], declined: true }))
+    ).toEqual({ declined: true, answers: [] })
+  })
+
+  it("unwraps the envelope when nested under structuredContent", () => {
+    const output = JSON.stringify({
+      content: [{ type: "text", text: "…" }],
+      structuredContent: {
+        answers: [{ header: "H", question: "Q", selected: ["A"] }],
+        declined: false,
+      },
+    })
+    expect(parseAskQuestionOutcome(output)?.answers[0].selected).toEqual(["A"])
+  })
+
+  it("keeps an option label containing a comma intact as one entry", () => {
+    const output = JSON.stringify({
+      answers: [
+        { header: "H", question: "Q", selected: ["Rewrite, then test"] },
+      ],
+      declined: false,
+    })
+    expect(parseAskQuestionOutcome(output)?.answers[0].selected).toEqual([
+      "Rewrite, then test",
+    ])
+  })
+
+  it("falls back to the human-readable text when there is no JSON", () => {
     const output =
       "The user answered your question(s):\n" +
       "1. [Approach] Which approach?\n" +
@@ -144,54 +189,57 @@ describe("parseAskQuestionOutcome", () => {
         {
           header: "Approach",
           question: "Which approach?",
-          selected: "Incremental, Rewrite",
+          selected: ["Incremental", "Rewrite"],
         },
-        { header: "Format", question: "Output format?", selected: "" },
+        { header: "Format", question: "Output format?", selected: [] },
       ],
     })
   })
 
-  it("treats (no selection) as an empty selection", () => {
-    const output = "1. [H] Q\n   → (no selection)\n"
-    expect(parseAskQuestionOutcome(output)?.answers[0].selected).toBe("")
+  it("detects a declined / dismissed outcome from the text fallback", () => {
+    const output =
+      "The user dismissed the question(s) without choosing an answer. " +
+      "Proceed using your best judgment and reasonable defaults."
+    expect(parseAskQuestionOutcome(output)).toEqual({
+      declined: true,
+      answers: [],
+    })
   })
 })
 
 describe("matchSelections", () => {
-  it("splits plain selections against the option labels", () => {
+  it("partitions picks into chosen options and free-text Other answers", () => {
     expect(
-      matchSelections("Incremental, Rewrite", ["Incremental", "Rewrite"])
+      matchSelections(["Incremental", "Rewrite"], ["Incremental", "Rewrite"])
     ).toEqual({ selected: ["Incremental", "Rewrite"], other: [] })
   })
 
-  it("recovers an option label that itself contains a comma", () => {
-    // Naive ", " splitting would break "Rewrite, then test" into two tokens;
-    // matching whole option labels first keeps it intact.
+  it("matches an option label that itself contains a comma", () => {
+    // The pick arrives as one whole array entry, so the comma is no obstacle.
     expect(
-      matchSelections("Rewrite, then test, Incremental", [
-        "Incremental",
-        "Rewrite, then test",
-      ])
+      matchSelections(
+        ["Rewrite, then test", "Incremental"],
+        ["Incremental", "Rewrite, then test"]
+      )
     ).toEqual({ selected: ["Rewrite, then test", "Incremental"], other: [] })
   })
 
-  it("returns unmatched tokens as free-text Other answers", () => {
-    expect(matchSelections("Alpha, Custom thing", ["Alpha", "Beta"])).toEqual({
-      selected: ["Alpha"],
-      other: ["Custom thing"],
-    })
+  it("returns unmatched picks as free-text Other answers", () => {
+    expect(
+      matchSelections(["Alpha", "Custom thing"], ["Alpha", "Beta"])
+    ).toEqual({ selected: ["Alpha"], other: ["Custom thing"] })
   })
 
-  it("treats empty / (no selection) text as nothing chosen", () => {
-    expect(matchSelections("", ["A"])).toEqual({ selected: [], other: [] })
-    expect(matchSelections("(no selection)", ["A"])).toEqual({
+  it("ignores empty / (no selection) entries", () => {
+    expect(matchSelections([], ["A"])).toEqual({ selected: [], other: [] })
+    expect(matchSelections(["(no selection)"], ["A"])).toEqual({
       selected: [],
       other: [],
     })
   })
 
-  it("with no options, every token is an Other answer", () => {
-    expect(matchSelections("foo, bar", [])).toEqual({
+  it("with no options, every pick is an Other answer", () => {
+    expect(matchSelections(["foo", "bar"], [])).toEqual({
       selected: [],
       other: ["foo", "bar"],
     })

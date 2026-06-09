@@ -3,11 +3,13 @@
  * historical `AskQuestionResultCard` (read-only, in the message stream).
  *
  * The codeg-mcp `ask_user_question` tool serializes into a session transcript
- * as a generic tool call: the input is the raw `{ questions: [...] }` JSON the
- * agent sent, and the output is the human-readable text the companion renders
- * back (`render_ask_result` in `src-tauri/src/acp/delegation/companion.rs`).
- * Neither carries the structured `{ answers, declined }` envelope once
- * persisted, so the read-only card reconstructs the Q&A from these two strings.
+ * as a generic tool call. The input is the raw `{ questions: [...] }` JSON the
+ * agent sent. The output is the tool result the agent CLI persisted: in
+ * practice that is the companion's structured `{ answers, declined }` envelope
+ * (each answer's `selected` is already a string array — see `render_ask_result`
+ * in `src-tauri/src/acp/delegation/companion.rs`), which is what we parse first.
+ * We also fall back to the companion's human-readable result text for any CLI
+ * that persists `content` instead of `structuredContent`.
  */
 
 export interface AskQuestionOption {
@@ -26,9 +28,10 @@ export interface AskQuestion {
 export interface AskQuestionAnswer {
   header: string
   question: string
-  /** Raw joined selection text from the result line ("" when nothing was
-   *  chosen); split against the offered options via `matchSelections`. */
-  selected: string
+  /** The user's raw picks: each entry is one offered option label or a free-text
+   *  "Other" answer (empty when nothing was chosen). Partition against the
+   *  question's options with `matchSelections`. */
+  selected: string[]
 }
 
 export interface AskQuestionOutcome {
@@ -56,6 +59,12 @@ export function splitRecommended(label: string): {
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : ""
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null
 }
 
 function parseOptions(raw: unknown): AskQuestionOption[] {
@@ -114,22 +123,74 @@ const NO_SELECTION = "(no selection)"
 const HEADER_LINE_RE = /^\s*\d+\.\s*\[([^\]]*)\]\s*(.*)$/
 const SELECTED_LINE_RE = /^\s*→\s*(.*)$/
 
+function parseAnswers(raw: unknown): AskQuestionAnswer[] {
+  if (!Array.isArray(raw)) return []
+  const out: AskQuestionAnswer[] = []
+  for (const item of raw) {
+    const obj = asRecord(item)
+    if (!obj) continue
+    const selected = Array.isArray(obj.selected)
+      ? obj.selected.filter((x): x is string => typeof x === "string")
+      : []
+    out.push({
+      header: asString(obj.header),
+      question: asString(obj.question),
+      selected,
+    })
+  }
+  return out
+}
+
 /**
- * Parse the companion's human-readable result text back into a structured
- * outcome. Two shapes (see `render_ask_result`):
+ * Parse the structured `{ answers, declined }` envelope the agent CLI persists
+ * for the tool result (the companion's `structuredContent`). It may sit at the
+ * top level or nested under `structuredContent`. Returns `null` when `output`
+ * is not that envelope, so the text fallback can take over.
+ */
+function parseOutcomeJson(output: string): AskQuestionOutcome | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(output)
+  } catch {
+    return null
+  }
+  const top = asRecord(parsed)
+  if (!top) return null
+  const env =
+    Array.isArray(top.answers) || typeof top.declined === "boolean"
+      ? top
+      : asRecord(top.structuredContent)
+  if (!env) return null
+  if (!Array.isArray(env.answers) && typeof env.declined !== "boolean") {
+    return null
+  }
+  if (env.declined === true) return { declined: true, answers: [] }
+  return { declined: false, answers: parseAnswers(env.answers) }
+}
+
+/**
+ * Reconstruct the answered/declined outcome from the persisted tool result.
  *
- *   - declined: "The user dismissed the question(s) …"
- *   - answered: "The user answered your question(s):\n1. [Header] Question\n   → a, b\n…"
+ * Primary shape — the structured envelope the CLI stores verbatim:
+ *   {"answers":[{"header":"…","question":"…","selected":["A","B"]}],"declined":false}
  *
- * Returns `null` when there is no output yet (the call is still in flight).
- * Selections are split on ", "; a label that itself contains ", " may
- * over-split, but the card matches tokens against the known option labels so
- * such a token simply surfaces as an "Other" chip rather than a wrong highlight.
+ * Fallback shape — the companion's human-readable text, for any CLI that keeps
+ * `content` instead of `structuredContent` (see `render_ask_result`):
+ *   "The user dismissed the question(s) …"  (declined)
+ *   "The user answered your question(s):\n1. [Header] Question\n   → a, b\n…"
+ *
+ * Returns `null` when there is no output yet (the call is still in flight). In
+ * the fallback, selections are split on ", " (lossy for a label containing a
+ * comma — the structured envelope keeps such a label intact as one array entry).
  */
 export function parseAskQuestionOutcome(
   output: string | null | undefined
 ): AskQuestionOutcome | null {
   if (!output || !output.trim()) return null
+
+  const fromJson = parseOutcomeJson(output)
+  if (fromJson) return fromJson
+
   if (/\bdismissed the question/i.test(output)) {
     return { declined: true, answers: [] }
   }
@@ -142,7 +203,7 @@ export function parseAskQuestionOutcome(
       current = {
         header: header[1].trim(),
         question: header[2].trim(),
-        selected: "",
+        selected: [],
       }
       answers.push(current)
       continue
@@ -150,7 +211,8 @@ export function parseAskQuestionOutcome(
     const selectedLine = line.match(SELECTED_LINE_RE)
     if (selectedLine && current) {
       const joined = selectedLine[1].trim()
-      current.selected = joined === NO_SELECTION ? "" : joined
+      current.selected =
+        joined && joined !== NO_SELECTION ? joined.split(", ") : []
       current = null
     }
   }
@@ -158,40 +220,23 @@ export function parseAskQuestionOutcome(
 }
 
 /**
- * Split a result line's joined selection text against the question's offered
- * option labels. Returns the matched option labels (`selected`) and any
- * free-text "Other" answers (`other`), order-preserving. Matching whole option
- * labels first means a label that itself contains ", " is recovered intact
- * rather than mis-split — the naive `", "` split alone can't do that.
+ * Partition the user's raw picks into the offered option labels they chose
+ * (`selected`) and any free-text "Other" answers (`other`), order-preserving.
+ * Each pick is already a whole value (one array entry), so a label that itself
+ * contains a comma matches cleanly — no fragile text splitting required.
  */
 export function matchSelections(
-  joined: string,
+  values: string[],
   optionLabels: string[]
 ): { selected: string[]; other: string[] } {
-  const text = joined.trim()
-  if (!text || text === NO_SELECTION) return { selected: [], other: [] }
-  // Longest option first so an option that is a prefix of another can't shadow it.
-  const labels = optionLabels
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length)
+  const labels = new Set(optionLabels.filter(Boolean))
   const selected: string[] = []
   const other: string[] = []
-  let rest = text
-  while (rest.length > 0) {
-    const hit = labels.find((l) => rest === l || rest.startsWith(`${l}, `))
-    if (hit) {
-      selected.push(hit)
-      rest = rest === hit ? "" : rest.slice(hit.length + 2)
-      continue
-    }
-    const idx = rest.indexOf(", ")
-    if (idx === -1) {
-      other.push(rest)
-      rest = ""
-    } else {
-      other.push(rest.slice(0, idx))
-      rest = rest.slice(idx + 2)
-    }
+  for (const raw of values) {
+    const value = raw.trim()
+    if (!value || value === NO_SELECTION) continue
+    if (labels.has(value)) selected.push(value)
+    else other.push(value)
   }
   return { selected, other }
 }
