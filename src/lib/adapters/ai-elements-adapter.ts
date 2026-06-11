@@ -712,6 +712,16 @@ export function extractUserResourcesFromText(text: string): {
     (match: string, label: string, uri: string) => {
       const normalizedLabel = label.trim()
       const normalizedUri = uri.trim()
+      // A `codeg://` reference (session / commit / agent) renders as an inline
+      // badge in the transcript (markdown-link → ReferenceBadge); never lift it
+      // to the bottom resource-chip row. The guard mirrors markdown-link's
+      // interception (`href.startsWith("codeg:")`): an unrecognized codeg path
+      // is parsed back to null there and degrades to a plain inline link — still
+      // in-flow, never a chip. (The `@`-prefixed agent link `[@label](codeg://
+      // agent/…)` would otherwise be caught by `hasMentionLabel` below.)
+      if (normalizedUri.toLowerCase().startsWith("codeg:")) {
+        return match
+      }
       const hasMentionLabel = normalizedLabel.startsWith("@")
       const isFileUri = normalizedUri.toLowerCase().startsWith("file://")
       if (!hasMentionLabel && !isFileUri) {

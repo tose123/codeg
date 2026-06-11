@@ -4,6 +4,7 @@ import {
   adaptMessageTurn,
   createMessageTurnAdapter,
   dropHiddenFeedbackChecks,
+  extractUserResourcesFromText,
   groupConsecutiveDelegationStatus,
   groupGoalRuns,
   groupConsecutiveToolCalls,
@@ -720,5 +721,124 @@ describe("adaptMessageTurn plan handling", () => {
     )
 
     expect(adapted.content.every((p) => p.type !== "plan")).toBe(true)
+  })
+})
+
+describe("extractUserResourcesFromText — codeg references stay inline", () => {
+  it("keeps a codeg://agent link inline (the @-prefixed label no longer lifts it to a chip)", () => {
+    const input = "ask [@Codex](codeg://agent/codex) to review"
+    const { text, resources } = extractUserResourcesFromText(input)
+    expect(resources).toEqual([])
+    expect(text).toBe(input)
+  })
+
+  it("keeps codeg://session and codeg://commit links inline", () => {
+    const session = extractUserResourcesFromText(
+      "see [#42](codeg://session/claude_code_abc)"
+    )
+    expect(session.resources).toEqual([])
+    expect(session.text).toBe("see [#42](codeg://session/claude_code_abc)")
+
+    const commit = extractUserResourcesFromText(
+      "from [a1b2c3d](codeg://commit/%2Frepo@a1b2c3ddeadbeef)"
+    )
+    expect(commit.resources).toEqual([])
+    expect(commit.text).toBe(
+      "from [a1b2c3d](codeg://commit/%2Frepo@a1b2c3ddeadbeef)"
+    )
+  })
+
+  it("keeps a codeg://session link inline even when its label starts with @ (a session titled '@…')", () => {
+    const input = "ping [@周报](codeg://session/codex_99)"
+    const { text, resources } = extractUserResourcesFromText(input)
+    expect(resources).toEqual([])
+    expect(text).toBe(input)
+  })
+
+  it("still lifts file:// links to the resource list (files unchanged this round)", () => {
+    const { text, resources } = extractUserResourcesFromText(
+      "look at [foo.ts](file:///x/foo.ts) here"
+    )
+    expect(resources).toEqual([
+      { name: "foo.ts", uri: "file:///x/foo.ts", mime_type: null },
+    ])
+    expect(text).toBe("look at here")
+  })
+
+  it("still lifts blocked @-mentions to the resource list", () => {
+    const { resources } = extractUserResourcesFromText(
+      "@secret.txt [blocked: outside workspace]"
+    )
+    expect(resources).toEqual([
+      { name: "secret.txt", uri: "secret.txt", mime_type: null },
+    ])
+  })
+
+  it("splits a mixed message: file → chip, session → inline", () => {
+    const { text, resources } = extractUserResourcesFromText(
+      "compare [foo.ts](file:///x/foo.ts) with [#42](codeg://session/codex_abc)"
+    )
+    expect(resources).toEqual([
+      { name: "foo.ts", uri: "file:///x/foo.ts", mime_type: null },
+    ])
+    expect(text).toContain("[#42](codeg://session/codex_abc)")
+    expect(text).not.toContain("file://")
+  })
+})
+
+describe("adaptMessageTurn — user reference resources", () => {
+  const msgText = {
+    attachedResources: "Attached resources",
+    toolCallFailed: "Tool failed",
+  }
+
+  it("keeps an agent reference inline in the user turn (no chip row)", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "u1",
+        role: "user",
+        timestamp: "2026-06-11T00:00:00.000Z",
+        blocks: [
+          { type: "text", text: "ask [@Codex](codeg://agent/codex) to review" },
+        ],
+      },
+      msgText
+    )
+
+    expect(adapted.userResources).toBeUndefined()
+    expect(adapted.content).toHaveLength(1)
+    const part = adapted.content[0]
+    if (part.type !== "text") throw new Error("expected a text part")
+    expect(part.text).toContain("[@Codex](codeg://agent/codex)")
+  })
+
+  it("routes a file to the chip row while keeping a session reference inline", () => {
+    // Mirrors the backend fold: prose+session in one text block, the file
+    // resource_link folded to a trailing `[name](uri)` text block.
+    const adapted = adaptMessageTurn(
+      {
+        id: "u2",
+        role: "user",
+        timestamp: "2026-06-11T00:00:00.000Z",
+        blocks: [
+          {
+            type: "text",
+            text: "compare these [#42](codeg://session/codex_abc)",
+          },
+          { type: "text", text: "[foo.ts](file:///x/foo.ts)" },
+        ],
+      },
+      msgText
+    )
+
+    expect(adapted.userResources).toEqual([
+      { name: "foo.ts", uri: "file:///x/foo.ts", mime_type: null },
+    ])
+    const textParts = adapted.content.filter((p) => p.type === "text")
+    expect(textParts).toHaveLength(1)
+    const part = textParts[0]
+    if (part.type !== "text") throw new Error("expected a text part")
+    expect(part.text).toContain("[#42](codeg://session/codex_abc)")
+    expect(part.text).not.toContain("file://")
   })
 })
