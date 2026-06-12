@@ -194,6 +194,28 @@ async fn async_main() {
     // config at build time, so this must run before the first one is constructed.
     codeg_lib::init_proxy_from_db(&db.conn).await;
 
+    // Reclaim orphaned chat scratch dirs (pre-send drafts that never bound to a
+    // conversation, plus dirs left behind by deleted chat conversations).
+    // Background, non-blocking; failures are logged but non-fatal.
+    {
+        let gc_conn = db.conn.clone();
+        let gc_data_dir = data_dir.clone();
+        tokio::spawn(async move {
+            match codeg_lib::commands::conversations::gc_orphan_chat_dirs_core(
+                &gc_conn,
+                &gc_data_dir,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => {
+                    eprintln!("[SERVER] chat-dir GC: reclaimed {n} orphan scratch dir(s)")
+                }
+                Ok(_) => {}
+                Err(err) => eprintln!("[SERVER] chat-dir GC failed: {err}"),
+            }
+        });
+    }
+
     // Create shared broadcaster + internal ACP event bus.
     let broadcaster = Arc::new(WebEventBroadcaster::new());
     let event_bus_metrics = Arc::new(codeg_lib::acp::EventBusMetrics::default());

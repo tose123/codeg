@@ -993,6 +993,146 @@ pub fn create_chat_dir_core(data_dir: &std::path::Path) -> Result<String, AppCom
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// How long a scratch dir must have sat untouched before the GC may reclaim it.
+/// Spares a directory that an in-flight chat draft in another window just minted
+/// (it has no conversation row yet, so it would otherwise look orphaned).
+const CHAT_SCRATCH_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Layout-invariant key for a chat scratch dir: its trailing `(<date>, <uuid>)`
+/// path components. The GC matches live dirs by this tail rather than the full
+/// path string, so a different *spelling* of the same data_dir (e.g. a symlinked
+/// vs canonical `CODEG_DATA_DIR` naming the same storage) still matches — a live
+/// dir must never be misclassified as an orphan and deleted. `<uuid>` is a v4
+/// UUID (globally unique), so the tail is collision-free in practice. Returns
+/// `None` if the path lacks a leaf or parent component.
+fn chat_dir_key(path: &std::path::Path) -> Option<(String, String)> {
+    let uuid = path.file_name()?.to_string_lossy().to_string();
+    let date = path.parent()?.file_name()?.to_string_lossy().to_string();
+    Some((date, uuid))
+}
+
+/// Reclaim orphaned chat scratch directories under
+/// `<data_dir>/chat-sessions/<date>/<uuid>/`. A chat draft eagerly mints a
+/// scratch dir (see [`create_chat_dir_core`]) the moment "no-folder mode" is
+/// picked, *before* any DB row exists; quitting before the first send — or
+/// deleting a chat conversation, which intentionally leaves the dir on disk —
+/// orphans it forever. This startup sweep removes the leak.
+///
+/// A `<uuid>` dir is reclaimed iff it is NOT bound to a live chat folder AND it
+/// is older than [`CHAT_SCRATCH_STALE`]. "Live" excludes both pre-send drafts
+/// (no row) and post-delete dirs (soft-deleted row), so both are reclaimed while
+/// bound chats are spared. Returns the number of `<uuid>` dirs removed. Never
+/// fatal: every filesystem error is logged and skipped.
+pub async fn gc_orphan_chat_dirs_core(
+    conn: &sea_orm::DatabaseConnection,
+    data_dir: &std::path::Path,
+) -> Result<usize, AppCommandError> {
+    gc_orphan_chat_dirs_core_with_threshold(conn, data_dir, CHAT_SCRATCH_STALE).await
+}
+
+/// [`gc_orphan_chat_dirs_core`] with the staleness threshold injected, for tests.
+/// A zero `stale` forces every dir to count as stale (deterministic, independent
+/// of clock/mtime resolution); the production entry point always passes
+/// [`CHAT_SCRATCH_STALE`].
+pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
+    conn: &sea_orm::DatabaseConnection,
+    data_dir: &std::path::Path,
+    stale: std::time::Duration,
+) -> Result<usize, AppCommandError> {
+    let root = data_dir.join("chat-sessions");
+    if !root.is_dir() {
+        return Ok(0);
+    }
+
+    // Dirs bound to a live chat conversation, keyed by their layout-invariant
+    // `(<date>, <uuid>)` tail (see `chat_dir_key`) rather than the full path
+    // string. This survives a data_dir spelled differently across runs (e.g. a
+    // symlinked vs canonical `CODEG_DATA_DIR` pointing at the same storage),
+    // which a full-string compare would miss — misclassifying the live dir as an
+    // orphan and deleting it. We deliberately do NOT canonicalize (it fails on
+    // missing paths and could itself alias two distinct dirs); keying by the tail
+    // makes the worst case a missed deletion (a leak), never data loss.
+    let live: HashSet<(String, String)> = folder_service::list_live_chat_folder_paths(conn)
+        .await
+        .map_err(AppCommandError::from)?
+        .iter()
+        .filter_map(|p| chat_dir_key(std::path::Path::new(p)))
+        .collect();
+
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+
+    let date_dirs = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(err) => {
+            eprintln!(
+                "[conversations] chat-dir GC: read {} failed: {err}",
+                root.display()
+            );
+            return Ok(0);
+        }
+    };
+
+    for date_entry in date_dirs.filter_map(Result::ok) {
+        let date_path = date_entry.path();
+        if !date_path.is_dir() {
+            continue;
+        }
+        let date_key = match date_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let uuid_dirs = match std::fs::read_dir(&date_path) {
+            Ok(rd) => rd,
+            Err(err) => {
+                eprintln!(
+                    "[conversations] chat-dir GC: read {} failed: {err}",
+                    date_path.display()
+                );
+                continue;
+            }
+        };
+        for uuid_entry in uuid_dirs.filter_map(Result::ok) {
+            let uuid_path = uuid_entry.path();
+            if !uuid_path.is_dir() {
+                continue;
+            }
+            // Match by the layout-invariant `(<date>, <uuid>)` tail, not the full
+            // path — see the `live` set above.
+            let uuid_key = uuid_entry.file_name().to_string_lossy().to_string();
+            if live.contains(&(date_key.clone(), uuid_key)) {
+                continue;
+            }
+            // Old enough to reclaim? Unknown age (mtime unreadable / in the
+            // future) → treat as fresh and spare it (a GC should leak before it
+            // deletes something possibly in use). A zero threshold short-circuits
+            // to "always stale" so tests don't race the filesystem clock.
+            let stale_enough = stale.is_zero()
+                || uuid_path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|m| now.duration_since(m).ok())
+                    .is_some_and(|age| age >= stale);
+            if !stale_enough {
+                continue;
+            }
+            match std::fs::remove_dir_all(&uuid_path) {
+                Ok(()) => removed += 1,
+                Err(err) => eprintln!(
+                    "[conversations] chat-dir GC: remove {} failed: {err}",
+                    uuid_path.display()
+                ),
+            }
+        }
+        // Best-effort: drop the date bucket if it is now empty (`remove_dir` only
+        // succeeds on an empty dir, so this never touches a bucket with survivors).
+        let _ = std::fs::remove_dir(&date_path);
+    }
+
+    Ok(removed)
+}
+
 /// Core logic for creating a folderless "chat mode" conversation. Mirrors
 /// Codex's date-grouped session dirs: each chat conversation gets its own
 /// scratch directory under `<data_dir>/chat-sessions/<YYYY-MM-DD>/<uuid>/` plus a
@@ -2020,6 +2160,204 @@ mod tests {
         assert!(
             std::path::Path::new(&res.folder.path).is_dir(),
             "scratch dir is intentionally retained on delete"
+        );
+    }
+
+    // ── Orphan chat scratch-dir GC ────────────────────────────────────────────
+    // The GC walks the real `chat-sessions` tree under a tempdir; the in-memory
+    // DB only supplies the live-chat-folder path set (matching the chat tests
+    // above). `Duration::ZERO` forces "always stale" so removal is deterministic.
+
+    #[tokio::test]
+    async fn gc_removes_pre_send_orphan_scratch_dir() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // Eager pre-send dir: minted, but never bound to a conversation/folder.
+        let orphan = create_chat_dir_core(data_dir.path()).expect("prepare dir");
+        assert!(std::path::Path::new(&orphan).is_dir());
+
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 1, "the unbound pre-send dir is reclaimed");
+        assert!(
+            !std::path::Path::new(&orphan).exists(),
+            "orphan scratch dir removed"
+        );
+        // Emptied date bucket is cleaned up too.
+        let date_dir = std::path::Path::new(&orphan).parent().expect("date dir");
+        assert!(!date_dir.exists(), "emptied date bucket removed");
+    }
+
+    #[tokio::test]
+    async fn gc_spares_live_chat_dir() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let res =
+            create_chat_conversation_core(&db.conn, data_dir.path(), AgentType::Codex, None, None)
+                .await
+                .expect("create");
+
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 0, "a dir bound to a live chat folder is spared");
+        assert!(
+            std::path::Path::new(&res.folder.path).is_dir(),
+            "live chat dir retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_reclaims_soft_deleted_chat_dir() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let res =
+            create_chat_conversation_core(&db.conn, data_dir.path(), AgentType::Codex, None, None)
+                .await
+                .expect("create");
+        delete_conversation_core(&db.conn, res.conversation_id)
+            .await
+            .expect("delete conversation");
+        cleanup_chat_folder_for_deleted_conversation(&db.conn, res.folder_id).await;
+        // Cleanup soft-deletes the folder row but intentionally leaves the dir.
+        assert!(std::path::Path::new(&res.folder.path).is_dir());
+
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 1, "the soft-deleted (not live) dir is reclaimed");
+        assert!(
+            !std::path::Path::new(&res.folder.path).exists(),
+            "post-delete scratch dir removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_spares_fresh_dir_below_threshold() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let fresh = create_chat_dir_core(data_dir.path()).expect("prepare dir");
+
+        // A 10-minute threshold spares a dir an in-flight draft just minted.
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::from_secs(600),
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 0, "a fresh dir below the staleness threshold is spared");
+        assert!(
+            std::path::Path::new(&fresh).is_dir(),
+            "fresh dir retained (anti-race)"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_missing_root_is_noop() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // No `chat-sessions` dir exists at all.
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 0, "absent chat-sessions root is a no-op");
+    }
+
+    #[tokio::test]
+    async fn gc_removes_orphan_but_spares_live_dir_in_same_bucket() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // A live chat conversation — its scratch path is recorded in the DB via
+        // the real create path (`add_chat_folder`), the exact string the GC
+        // compares against ...
+        let live =
+            create_chat_conversation_core(&db.conn, data_dir.path(), AgentType::Codex, None, None)
+                .await
+                .expect("create live");
+        // ... alongside an unbound orphan dir in the same `chat-sessions` tree
+        // (same day → same date bucket).
+        let orphan = create_chat_dir_core(data_dir.path()).expect("orphan dir");
+        assert_ne!(live.folder.path, orphan);
+
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        // The predicate discriminates by exact stored path: only the orphan goes.
+        assert_eq!(removed, 1, "only the orphan is reclaimed");
+        assert!(
+            std::path::Path::new(&live.folder.path).is_dir(),
+            "the live chat dir is spared even with an orphan beside it"
+        );
+        assert!(
+            !std::path::Path::new(&orphan).exists(),
+            "the orphan is removed"
+        );
+    }
+
+    // A live dir must survive even when this GC run's data_dir is a different
+    // *spelling* (here a symlink) of the storage that created it — full-path
+    // matching would misclassify it as an orphan and delete it (data loss). The
+    // layout-invariant `(<date>, <uuid>)` keying is what prevents that.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gc_spares_live_dir_under_aliased_data_dir() {
+        use std::os::unix::fs::symlink;
+        let db = fresh_in_memory_db().await;
+        let real = tempfile::tempdir().expect("tempdir");
+        // DB records the live path under the REAL data_dir spelling.
+        let live =
+            create_chat_conversation_core(&db.conn, real.path(), AgentType::Codex, None, None)
+                .await
+                .expect("create live");
+        // A second spelling of the same storage: a symlink pointing at it.
+        let link_parent = tempfile::tempdir().expect("link parent");
+        let link = link_parent.path().join("data-link");
+        symlink(real.path(), &link).expect("symlink");
+
+        // GC runs under the symlinked spelling; the live dir must still be spared.
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            &link,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(
+            removed, 0,
+            "live dir spared despite an aliased data_dir spelling"
+        );
+        assert!(
+            std::path::Path::new(&live.folder.path).is_dir(),
+            "live chat dir retained under data_dir aliasing"
         );
     }
 

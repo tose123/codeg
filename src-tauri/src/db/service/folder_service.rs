@@ -328,6 +328,22 @@ pub async fn list_all_folder_details(
     Ok(rows.into_iter().map(to_detail).collect())
 }
 
+/// Paths of all *live* (non-deleted) chat scratch folders. Consumed by the
+/// startup orphan-scratch-dir GC to spare directories still bound to a chat
+/// conversation, while reclaiming pre-send drafts (no row at all) and
+/// post-delete dirs (soft-deleted row → `DeletedAt` set → excluded here).
+pub async fn list_live_chat_folder_paths(
+    conn: &DatabaseConnection,
+) -> Result<Vec<String>, DbError> {
+    let rows = folder::Entity::find()
+        .filter(folder::Column::DeletedAt.is_null())
+        .filter(folder::Column::IsChat.eq(true))
+        .all(conn)
+        .await?;
+
+    Ok(rows.into_iter().map(|m| m.path).collect())
+}
+
 pub async fn reorder_folders(conn: &DatabaseConnection, ids: Vec<i32>) -> Result<(), DbError> {
     if ids.is_empty() {
         return Ok(());

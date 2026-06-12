@@ -323,6 +323,31 @@ mod tauri_app {
                     }
                 });
 
+                // Reclaim orphaned chat scratch dirs (pre-send drafts that never
+                // bound to a conversation, plus dirs left behind by deleted chat
+                // conversations). Background, non-blocking; failures are logged
+                // but non-fatal — anything still in use is left for next startup.
+                {
+                    let gc_conn = app.state::<db::AppDatabase>().conn.clone();
+                    let gc_data_dir = effective_data_dir.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::commands::conversations::gc_orphan_chat_dirs_core(
+                            &gc_conn,
+                            &gc_data_dir,
+                        )
+                        .await
+                        {
+                            Ok(n) if n > 0 => eprintln!(
+                                "[conversations] chat-dir GC: reclaimed {n} orphan scratch dir(s)"
+                            ),
+                            Ok(_) => {}
+                            Err(err) => {
+                                eprintln!("[conversations] chat-dir GC failed: {err}")
+                            }
+                        }
+                    });
+                }
+
                 // Start chat channel background tasks
                 {
                     let ccm = app.state::<ChatChannelManager>();
