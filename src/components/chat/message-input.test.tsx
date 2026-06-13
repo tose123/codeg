@@ -91,6 +91,9 @@ describe("MessageInput (RichComposer integration)", () => {
     // false when the event was canceled) avoids relying on jsdom focus.
     const card = container.querySelector('[class~="@container"]') as HTMLElement
     expect(card).not.toBeNull()
+    // The same box paints the text I-beam across its blank chrome (see the
+    // `.codeg-composer-chrome` rule in globals.css).
+    expect(card.className).toContain("codeg-composer-chrome")
     expect(fireEvent.mouseDown(card)).toBe(false)
   })
 })

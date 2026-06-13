@@ -2147,13 +2147,16 @@ export function MessageInput({
   // short message, the gaps in the action bar) focuses the editor — previously
   // only the editor surface itself was clickable. Interactive controls, inline
   // badges and the editor surface handle their own clicks, so they're excluded;
-  // `preventDefault` keeps the editor from blurring before we refocus it.
+  // `preventDefault` keeps the editor from blurring before we refocus it. We
+  // focus *at the click point* (not the end of the document) so clicking the
+  // left/top padding next to existing text lands the caret there, like a native
+  // textarea, instead of always jumping to the end.
   const handleChromeMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (disabled || !isComposerChromeClick(e.target)) return
       // Keep the editor from blurring before we refocus it.
       e.preventDefault()
-      editorRef.current?.focus()
+      editorRef.current?.focusAtCoords(e.clientX, e.clientY)
     },
     [disabled]
   )
@@ -2410,7 +2413,11 @@ export function MessageInput({
         <div
           onMouseDown={handleChromeMouseDown}
           className={cn(
-            "@container relative flex flex-col bg-transparent transition-colors",
+            // `codeg-composer-chrome` paints the text I-beam across the box's
+            // blank areas (padding, the dead space below a short message, the
+            // action-bar gaps) so the whole input reads as clickable-to-type;
+            // interactive controls re-assert their own cursor (see globals.css).
+            "codeg-composer-chrome @container relative flex flex-col bg-transparent transition-colors",
             folderBranchPickerAttached
               ? "rounded-xl border border-input bg-background focus-within:border-ring focus-within:ring-[3px] focus-within:ring-inset focus-within:ring-ring/50"
               : "rounded-xl border border-input focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/50",

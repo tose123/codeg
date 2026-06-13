@@ -1461,6 +1461,21 @@
 /* ───────────────── Rich-text composer (Tiptap) ─────────────────
    Live WYSIWYG Markdown styling for the message composer. Scoped to
    `.codeg-composer` so it never leaks into Streamdown message rendering. */
+
+/* The composer box reads as one editable surface: clicking its blank chrome
+   (padding, the dead space below a short message, the action-bar gaps) focuses
+   the editor, so the I-beam should show across all of it. `cursor` inherits, so
+   the contenteditable already gets `text`; interactive controls inside the box
+   re-assert a pointer (buttons carry no explicit cursor of their own). Disabled
+   buttons keep `pointer-events: none`, so the box's I-beam shows through them —
+   intended: clicking a disabled control still focuses the editor. */
+.codeg-composer-chrome {
+  cursor: text;
+}
+.codeg-composer-chrome :is(button, a[href], [role="button"], [role="menuitem"], [role="combobox"]) {
+  cursor: pointer;
+}
+
 .codeg-composer .ProseMirror {
   outline: none;
   white-space: pre-wrap;

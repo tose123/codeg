@@ -53,6 +53,14 @@ export interface RichComposerHandle {
   clear: () => void
   /** Focus the editor at the end of the document. */
   focus: () => void
+  /**
+   * Focus the editor and place the caret at the document position nearest the
+   * given viewport coordinates (native-textarea behavior). Falls back to the
+   * end of the document when the point can't be mapped (e.g. it lands outside
+   * the editing surface). Used by the host to honor where a user clicks in the
+   * composer's blank chrome instead of always jumping to the end.
+   */
+  focusAtCoords: (clientX: number, clientY: number) => void
   /** Whether the document is empty (no text, no nodes). */
   isEmpty: () => boolean
   /** Serialize the current document to Tiptap JSON (for draft persistence). */
@@ -377,6 +385,37 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
         setDoc: (doc) => editor?.commands.setContent(doc),
         clear: () => editor?.commands.clearContent(true),
         focus: () => editor?.commands.focus("end"),
+        focusAtCoords: (clientX, clientY) => {
+          if (!editor) return
+          const view = editor.view
+          // Map the click point to a document position. Chrome clicks land on
+          // the composer's padding/dead space, which is *outside* the
+          // contenteditable (`view.dom` is the inner `.ProseMirror`; the
+          // `px-3 py-2` padding lives on the EditorContent wrapper), so
+          // `posAtCoords` returns null there. Clamp the point onto the editor's
+          // own box and retry, so left/top/bottom-padding clicks snap to the
+          // nearest in-text position (native-textarea feel) instead of jumping
+          // to the end. Only a point that maps nowhere even when clamped (e.g.
+          // an empty editor edge case) falls through to end-of-doc.
+          let hit = view.posAtCoords({ left: clientX, top: clientY })
+          if (!hit) {
+            const rect = view.dom.getBoundingClientRect()
+            const left = Math.min(
+              Math.max(clientX, rect.left + 1),
+              rect.right - 1
+            )
+            const top = Math.min(
+              Math.max(clientY, rect.top + 1),
+              rect.bottom - 1
+            )
+            hit = view.posAtCoords({ left, top })
+          }
+          if (hit) {
+            editor.chain().focus().setTextSelection(hit.pos).run()
+          } else {
+            editor.commands.focus("end")
+          }
+        },
         isEmpty: () => editor?.isEmpty ?? true,
         getJSON: () => editor?.getJSON() ?? { type: "doc", content: [] },
         insertMarkdownAtCursor: (markdown) => {
