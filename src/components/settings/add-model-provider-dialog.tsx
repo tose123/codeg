@@ -287,6 +287,54 @@ export function AddModelProviderDialog({
                   placeholder="claude-opus-4-8"
                 />
               </div>
+              <div className="space-y-1.5 md:col-span-2">
+                <label className="text-xs font-medium">
+                  {t("claudeCustomModelOption")}
+                </label>
+                <Input
+                  value={claudeModel.customOption ?? ""}
+                  onChange={(e) =>
+                    setClaudeModel((prev) => ({
+                      ...prev,
+                      customOption: e.target.value,
+                    }))
+                  }
+                  placeholder="my-gateway/claude-opus-4-8"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">
+                  {t("claudeCustomModelOptionName")}
+                </label>
+                <Input
+                  value={claudeModel.customOptionName ?? ""}
+                  onChange={(e) =>
+                    setClaudeModel((prev) => ({
+                      ...prev,
+                      customOptionName: e.target.value,
+                    }))
+                  }
+                  placeholder="Gateway Opus"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">
+                  {t("claudeCustomModelOptionDescription")}
+                </label>
+                <Input
+                  value={claudeModel.customOptionDescription ?? ""}
+                  onChange={(e) =>
+                    setClaudeModel((prev) => ({
+                      ...prev,
+                      customOptionDescription: e.target.value,
+                    }))
+                  }
+                  placeholder="Routed via custom gateway"
+                />
+              </div>
+              <p className="text-[11px] text-muted-foreground md:col-span-2">
+                {t("claudeCustomModelOptionHint")}
+              </p>
             </div>
           ) : (
             <div className="space-y-1.5">

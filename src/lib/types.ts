@@ -1989,6 +1989,13 @@ export interface ClaudeProviderModel {
   haiku?: string
   sonnet?: string
   opus?: string
+  /** ANTHROPIC_CUSTOM_MODEL_OPTION — id of a custom entry appended to the
+   *  in-session /model picker (e.g. a model the gateway serves). */
+  customOption?: string
+  /** ANTHROPIC_CUSTOM_MODEL_OPTION_NAME — display name for that entry. */
+  customOptionName?: string
+  /** ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION — description for that entry. */
+  customOptionDescription?: string
 }
 
 export function parseClaudeProviderModel(
@@ -2005,6 +2012,9 @@ export function parseClaudeProviderModel(
       "haiku",
       "sonnet",
       "opus",
+      "customOption",
+      "customOptionName",
+      "customOptionDescription",
     ]
     for (const k of keys) {
       const v = (parsed as Record<string, unknown>)[k]
@@ -2025,5 +2035,10 @@ export function serializeClaudeProviderModel(
   if (obj.haiku?.trim()) cleaned.haiku = obj.haiku.trim()
   if (obj.sonnet?.trim()) cleaned.sonnet = obj.sonnet.trim()
   if (obj.opus?.trim()) cleaned.opus = obj.opus.trim()
+  if (obj.customOption?.trim()) cleaned.customOption = obj.customOption.trim()
+  if (obj.customOptionName?.trim())
+    cleaned.customOptionName = obj.customOptionName.trim()
+  if (obj.customOptionDescription?.trim())
+    cleaned.customOptionDescription = obj.customOptionDescription.trim()
   return Object.keys(cleaned).length === 0 ? null : JSON.stringify(cleaned)
 }

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 
-import { buildVersionCheck, getAgentChecks } from "./acp-agent-settings"
+import {
+  applyClaudeProviderToConfigText,
+  buildVersionCheck,
+  configTextForClaudeSave,
+  getAgentChecks,
+  patchImportantConfigText,
+} from "./acp-agent-settings"
 import type { AcpAgentInfo, AgentType, PreflightResult } from "@/lib/types"
 
 function makeAgent(overrides: Partial<AcpAgentInfo>): AcpAgentInfo {
@@ -185,5 +191,182 @@ describe("getAgentChecks uv gating", () => {
     )
     expect(installFix).toBeDefined()
     expect(fixDisabled(installFix!)).toBe(false)
+  })
+})
+
+describe("patchImportantConfigText — Claude custom model option", () => {
+  const CLAUDE = "claude_code" as AgentType
+
+  function envOf(configText: string): Record<string, string> {
+    if (!configText.trim()) return {}
+    const parsed = JSON.parse(configText) as { env?: Record<string, string> }
+    return parsed.env ?? {}
+  }
+
+  // Binding a Model Provider writes the provider's custom model option into
+  // config.env. handleModelProviderSelect forwards the provider's trio values
+  // through the patch (authoritative like the five model fields): a defined
+  // value is written, an empty/omitted one clears the key.
+  it("writes the provider's custom model option trio carried in the bind patch", () => {
+    const configText = JSON.stringify({
+      env: {
+        ANTHROPIC_CUSTOM_MODEL_OPTION: "old/opus",
+        ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Old Opus",
+        ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: "stale",
+      },
+    })
+
+    const { configText: next } = patchImportantConfigText(CLAUDE, configText, {
+      // The provider supplies both the model fields and the custom option's
+      // trio; the bind path forwards them so they overwrite config.env.
+      claudeMainModel: "provider-main",
+      claudeCustomModelOption: "gw/opus",
+      claudeCustomModelOptionName: "GW Opus",
+      claudeCustomModelOptionDescription: "via gateway",
+    })
+
+    const env = envOf(next)
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION).toBe("gw/opus")
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME).toBe("GW Opus")
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION).toBe("via gateway")
+    expect(env.ANTHROPIC_MODEL).toBe("provider-main")
+  })
+
+  // Binding a provider that defines no custom option must clear a stale one.
+  // handleModelProviderSelect forwards empty strings in that case; both empty
+  // and omitted patch values delete the key from config.env.
+  it("clears the custom model option when the provider defines none", () => {
+    const configText = JSON.stringify({
+      env: { ANTHROPIC_CUSTOM_MODEL_OPTION: "gw/opus" },
+    })
+
+    // Empty string => authoritative clear (what the bind path sends when
+    // claudeModel.customOption is absent).
+    const { configText: viaEmpty } = patchImportantConfigText(
+      CLAUDE,
+      configText,
+      {
+        claudeMainModel: "provider-main",
+        claudeCustomModelOption: "",
+        claudeCustomModelOptionName: "",
+        claudeCustomModelOptionDescription: "",
+      }
+    )
+    expect(viaEmpty).not.toContain("ANTHROPIC_CUSTOM_MODEL_OPTION")
+    expect(envOf(viaEmpty).ANTHROPIC_MODEL).toBe("provider-main")
+
+    // Omitted (undefined) likewise deletes the key.
+    const { configText: viaOmit } = patchImportantConfigText(
+      CLAUDE,
+      configText,
+      { claudeMainModel: "provider-main" }
+    )
+    expect(viaOmit).not.toContain("ANTHROPIC_CUSTOM_MODEL_OPTION")
+  })
+})
+
+describe("applyClaudeProviderToConfigText — provider-bound stale config", () => {
+  function envOf(configText: string): Record<string, string> {
+    const parsed = JSON.parse(configText) as { env?: Record<string, string> }
+    return parsed.env ?? {}
+  }
+
+  // Regression for the config-management save path: a provider bound in an
+  // earlier session can leave ANTHROPIC_CUSTOM_MODEL_OPTION* in the on-disk
+  // config loaded into configText (handleModelProviderSelect only rewrites it on
+  // dropdown change, not on reload). Saving must not persist that stale value —
+  // re-deriving from the provider (which omits the custom option) clears it while
+  // keeping the provider's model and unrelated keys.
+  it("clears a stale custom model option absent from the bound provider", () => {
+    const staleConfig = JSON.stringify({
+      env: {
+        ANTHROPIC_CUSTOM_MODEL_OPTION: "gw/opus-stale",
+        ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "Stale",
+        ANTHROPIC_MODEL: "old-main",
+        CUSTOM_KEY: "keep-me",
+      },
+    })
+
+    const next = applyClaudeProviderToConfigText(staleConfig, {
+      api_url: "https://gw.example/v1",
+      api_key: "sk-x",
+      model: JSON.stringify({ main: "prov-main" }), // provider omits the trio
+    })
+
+    const env = envOf(next)
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION).toBeUndefined()
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME).toBeUndefined()
+    expect(env.ANTHROPIC_MODEL).toBe("prov-main") // provider authoritative
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://gw.example/v1")
+    expect(env.CUSTOM_KEY).toBe("keep-me") // unrelated key preserved
+  })
+
+  // When the provider DOES define a custom option, it is written through.
+  it("writes the provider's custom model option through", () => {
+    const next = applyClaudeProviderToConfigText("", {
+      api_url: "https://gw.example/v1",
+      api_key: "sk-x",
+      model: JSON.stringify({
+        main: "prov-main",
+        customOption: "gw/opus-preview",
+        customOptionName: "GW Opus",
+        customOptionDescription: "via gateway",
+      }),
+    })
+
+    const env = envOf(next)
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION).toBe("gw/opus-preview")
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME).toBe("GW Opus")
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION).toBe("via gateway")
+  })
+})
+
+describe("configTextForClaudeSave — bound-Claude save payload", () => {
+  const provider = {
+    api_url: "https://gw.example/v1",
+    api_key: "sk-x",
+    model: JSON.stringify({ main: "prov-main" }), // provider omits the trio
+  }
+
+  // Bound Claude + valid config: rewrite to provider-authoritative, clearing a
+  // stale custom option loaded from disk.
+  it("rewrites valid bound-Claude config to be provider-authoritative", () => {
+    const stale = JSON.stringify({
+      env: {
+        ANTHROPIC_CUSTOM_MODEL_OPTION: "gw/stale",
+        ANTHROPIC_MODEL: "old-main",
+      },
+    })
+    const next = configTextForClaudeSave(
+      stale,
+      "claude_code" as AgentType,
+      7,
+      provider
+    )
+    const env = (JSON.parse(next) as { env: Record<string, string> }).env
+    expect(env.ANTHROPIC_CUSTOM_MODEL_OPTION).toBeUndefined()
+    expect(env.ANTHROPIC_MODEL).toBe("prov-main")
+  })
+
+  // Regression (round 4): INVALID config JSON must pass through UNCHANGED so
+  // persistConfig surfaces the parse error — otherwise patchImportantConfigText
+  // would silently recover it to `{}` and persist provider-derived config over
+  // the user's broken edits.
+  it("passes invalid config through unchanged so the save surfaces the error", () => {
+    const invalid = "{ not valid json"
+    expect(
+      configTextForClaudeSave(invalid, "claude_code" as AgentType, 7, provider)
+    ).toBe(invalid)
+  })
+
+  // Non-Claude or unbound agents are never rewritten.
+  it("leaves config untouched for unbound or non-Claude agents", () => {
+    const cfg = JSON.stringify({ env: { FOO: "bar" } })
+    expect(
+      configTextForClaudeSave(cfg, "claude_code" as AgentType, null, undefined)
+    ).toBe(cfg)
+    expect(
+      configTextForClaudeSave(cfg, "codex" as AgentType, 7, provider)
+    ).toBe(cfg)
   })
 })

@@ -3450,6 +3450,15 @@ const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
     ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
     ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
     ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    // The custom model option trio appends one entry to the in-session /model
+    // picker (a model the provider's gateway serves). Carried by the provider's
+    // model JSON like the five model fields, so binding/cascade pushes it too.
+    ("customOption", "ANTHROPIC_CUSTOM_MODEL_OPTION"),
+    ("customOptionName", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"),
+    (
+        "customOptionDescription",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+    ),
 ];
 
 /// Parse the model field stored on a model_provider into the env-var actions to
@@ -3460,8 +3469,10 @@ const CLAUDE_MODEL_KEY_MAP: &[(&str, &str)] = &[
 /// "clear". This lets the caller overwrite even when the provider's value is
 /// empty.
 ///
-/// - Claude: returns 5 entries (one per ANTHROPIC_*_MODEL). Each entry is `None`
-///   when the provider's JSON omits that key or has an empty value.
+/// - Claude: returns one entry per `CLAUDE_MODEL_KEY_MAP` row — the five
+///   ANTHROPIC_*_MODEL fields plus the ANTHROPIC_CUSTOM_MODEL_OPTION trio. Each
+///   entry is `None` when the provider's JSON omits that key or has an empty
+///   value.
 /// - Gemini: returns `GEMINI_MODEL`.
 /// - Codex: returns `OPENAI_MODEL` so the provider can override env_json (the
 ///   root `model` in `config.toml` is handled separately by
@@ -4702,6 +4713,14 @@ pub(crate) async fn acp_update_agent_env_core(
     // same way.
     let mut merged_env = env;
     let mut codex_action = CodexModelAction::NoOp;
+    // When a Claude provider is bound, capture the inputs to also rewrite the
+    // on-disk config.env below. Claude's model fields live in config.env, which
+    // the runtime overlays OVER db env_json (see `build_runtime_env_from_setting`),
+    // so clearing a key from db env alone is not enough — a stale value left in
+    // `~/.claude/settings.json` (e.g. ANTHROPIC_CUSTOM_MODEL_OPTION) would win at
+    // launch. Binding must therefore be authoritative on disk too, matching the
+    // provider-edit cascade.
+    let mut claude_local_cascade: Option<(String, String, BTreeMap<String, Option<String>>)> = None;
     if let Some(pid) = model_provider_id {
         let provider = crate::db::service::model_provider_service::get_by_id(&db.conn, pid)
             .await
@@ -4727,17 +4746,23 @@ pub(crate) async fn acp_update_agent_env_core(
         }
 
         let model_env = parse_provider_model(agent_type, provider.model.as_deref());
-        for (k, v) in model_env {
+        for (k, v) in &model_env {
             match v {
                 Some(value) => {
-                    merged_env.insert(k, value);
+                    merged_env.insert(k.clone(), value.clone());
                 }
                 None => {
-                    merged_env.remove(&k);
+                    merged_env.remove(k);
                 }
             }
         }
         codex_action = provider_codex_model_action(agent_type, provider.model.as_deref());
+        // Codex's on-disk config is handled by `apply_codex_root_model_action`
+        // below; Gemini's analogous config.env gap is pre-existing and out of
+        // scope here. Only Claude needs the local-config cascade on bind.
+        if agent_type == AgentType::ClaudeCode {
+            claude_local_cascade = Some((provider.api_url.clone(), provider.api_key.clone(), model_env));
+        }
     }
 
     let patch = agent_setting_service::AgentSettingsUpdate {
@@ -4748,6 +4773,21 @@ pub(crate) async fn acp_update_agent_env_core(
     agent_setting_service::update(&db.conn, agent_type, patch)
         .await
         .map_err(|e| AcpError::protocol(e.to_string()))?;
+
+    // Authoritatively rewrite the local config.env so a stale model key (e.g. the
+    // custom model option) cannot survive a bind/rebind via any save path. `None`
+    // entries become JSON-null and are removed by `merge_json_values`.
+    if let Some((api_url, api_key, model_env)) = claude_local_cascade {
+        if let Err(e) = cascade_update_agent_config(
+            agent_type,
+            &api_url,
+            &api_key,
+            &model_env,
+            &CodexModelAction::NoOp,
+        ) {
+            eprintln!("[acp_update_agent_env] cascade_update_agent_config({agent_type}) failed: {e}");
+        }
+    }
 
     if let Err(e) = apply_codex_root_model_action(&codex_action) {
         eprintln!("[acp_update_agent_env] apply_codex_root_model_action failed: {e}");
@@ -6080,6 +6120,77 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("codeg-acp-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create test directory");
         dir
+    }
+
+    #[test]
+    fn parse_provider_model_emits_claude_custom_model_option_trio() {
+        // A Claude provider that defines the custom model option must surface all
+        // three ANTHROPIC_CUSTOM_MODEL_OPTION* env vars (Some => set) alongside
+        // the standard model fields.
+        let raw = r#"{
+            "main": "gw/opus",
+            "customOption": "gw/opus-preview",
+            "customOptionName": "Gateway Opus",
+            "customOptionDescription": "via gateway"
+        }"#;
+        let out = parse_provider_model(AgentType::ClaudeCode, Some(raw));
+        assert_eq!(
+            out.get("ANTHROPIC_CUSTOM_MODEL_OPTION"),
+            Some(&Some("gw/opus-preview".to_string()))
+        );
+        assert_eq!(
+            out.get("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"),
+            Some(&Some("Gateway Opus".to_string()))
+        );
+        assert_eq!(
+            out.get("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"),
+            Some(&Some("via gateway".to_string()))
+        );
+        assert_eq!(out.get("ANTHROPIC_MODEL"), Some(&Some("gw/opus".to_string())));
+
+        // Omitted custom keys are authoritative clears (None => remove from env),
+        // matching the five model fields' overwrite semantics.
+        let bare = parse_provider_model(AgentType::ClaudeCode, Some(r#"{"main":"x"}"#));
+        assert_eq!(bare.get("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(&None));
+        assert_eq!(bare.get("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"), Some(&None));
+        assert_eq!(
+            bare.get("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION"),
+            Some(&None)
+        );
+    }
+
+    #[test]
+    fn merge_json_values_clears_stale_custom_model_option_via_null() {
+        // The local-config cascade (cascade_update_agent_config) encodes a
+        // cleared model key as JSON-null. merge_json_values must DELETE that key
+        // from the on-disk config (nested under `env`) while preserving sibling
+        // keys — this is what stops a stale ANTHROPIC_CUSTOM_MODEL_OPTION* in
+        // ~/.claude/settings.json from winning after binding to a provider that
+        // omits the trio (parse_provider_model yields `None` => null here).
+        let mut base = serde_json::json!({
+            "env": {
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": "gw/opus-stale",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": "Stale",
+                "ANTHROPIC_MODEL": "keep-me"
+            }
+        });
+        let patch = serde_json::json!({
+            "env": {
+                "ANTHROPIC_CUSTOM_MODEL_OPTION": null,
+                "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": null
+            }
+        });
+        merge_json_values(&mut base, &patch);
+        let env = base
+            .get("env")
+            .and_then(|v| v.as_object())
+            .expect("env object survives the merge");
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION"));
+        assert!(!env.contains_key("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"));
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
     }
 
     #[test]

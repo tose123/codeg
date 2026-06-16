@@ -142,6 +142,9 @@ interface AgentDraft {
   claudeDefaultHaikuModel: string
   claudeDefaultSonnetModel: string
   claudeDefaultOpusModel: string
+  claudeCustomModelOption: string
+  claudeCustomModelOptionName: string
+  claudeCustomModelOptionDescription: string
   claudeEffortLevel: ClaudeEffortLevel
   codexAuthJsonText: string
   codexConfigTomlText: string
@@ -278,6 +281,10 @@ const CLAUDE_MODEL_ENV_KEYS = {
   claudeDefaultHaikuModel: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
   claudeDefaultSonnetModel: "ANTHROPIC_DEFAULT_SONNET_MODEL",
   claudeDefaultOpusModel: "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  claudeCustomModelOption: "ANTHROPIC_CUSTOM_MODEL_OPTION",
+  claudeCustomModelOptionName: "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+  claudeCustomModelOptionDescription:
+    "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
 } as const
 
 const CLAUDE_EFFORT_LEVEL_CONFIG_KEY = "effortLevel"
@@ -528,6 +535,9 @@ function extractImportantConfigValues(
   claudeDefaultHaikuModel: string
   claudeDefaultSonnetModel: string
   claudeDefaultOpusModel: string
+  claudeCustomModelOption: string
+  claudeCustomModelOptionName: string
+  claudeCustomModelOptionDescription: string
   claudeEffortLevel: ClaudeEffortLevel
   configError: string | null
 } {
@@ -562,6 +572,15 @@ function extractImportantConfigValues(
   const claudeDefaultOpusModel = findEnvValue(mergedEnv, [
     CLAUDE_MODEL_ENV_KEYS.claudeDefaultOpusModel,
   ])
+  const claudeCustomModelOption = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOption,
+  ])
+  const claudeCustomModelOptionName = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOptionName,
+  ])
+  const claudeCustomModelOptionDescription = findEnvValue(mergedEnv, [
+    CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOptionDescription,
+  ])
 
   const claudeEffortLevel: ClaudeEffortLevel =
     agentType === "claude_code"
@@ -581,6 +600,12 @@ function extractImportantConfigValues(
       agentType === "claude_code" ? claudeDefaultSonnetModel : "",
     claudeDefaultOpusModel:
       agentType === "claude_code" ? claudeDefaultOpusModel : "",
+    claudeCustomModelOption:
+      agentType === "claude_code" ? claudeCustomModelOption : "",
+    claudeCustomModelOptionName:
+      agentType === "claude_code" ? claudeCustomModelOptionName : "",
+    claudeCustomModelOptionDescription:
+      agentType === "claude_code" ? claudeCustomModelOptionDescription : "",
     claudeEffortLevel,
     configError: parseResult.error,
   }
@@ -2213,7 +2238,7 @@ function patchCodexConfigTomlText(
   return trimmed ? `${trimmed}\n` : ""
 }
 
-function patchImportantConfigText(
+export function patchImportantConfigText(
   agentType: AgentType,
   configText: string,
   patch: ImportantDraftPatch
@@ -2270,6 +2295,18 @@ function patchImportantConfigText(
       CLAUDE_MODEL_ENV_KEYS.claudeDefaultOpusModel,
       patch.claudeDefaultOpusModel
     )
+    assignEnv(
+      CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOption,
+      patch.claudeCustomModelOption
+    )
+    assignEnv(
+      CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOptionName,
+      patch.claudeCustomModelOptionName
+    )
+    assignEnv(
+      CLAUDE_MODEL_ENV_KEYS.claudeCustomModelOptionDescription,
+      patch.claudeCustomModelOptionDescription
+    )
 
     if (Object.keys(env).length === 0) {
       delete config.env
@@ -2287,6 +2324,61 @@ function patchImportantConfigText(
       Object.keys(config).length === 0 ? "" : JSON.stringify(config, null, 2),
     recoveredFromInvalid: Boolean(parseResult.error),
   }
+}
+
+/**
+ * Make a Claude agent's native config provider-authoritative. When a provider
+ * was bound in an earlier session, the on-disk config loaded into the draft can
+ * still carry stale model keys (e.g. a leftover ANTHROPIC_CUSTOM_MODEL_OPTION)
+ * that no longer match the provider — `handleModelProviderSelect` only rewrites
+ * configText when the dropdown changes, not on reload. A config-management save
+ * would otherwise persist that stale text back over the backend bind cascade, so
+ * re-derive the provider-controlled keys here (empty => cleared by `assignEnv`)
+ * before saving. Unrelated config/env keys are preserved.
+ */
+export function applyClaudeProviderToConfigText(
+  configText: string,
+  provider: Pick<ModelProviderInfo, "api_url" | "api_key" | "model">
+): string {
+  const model = parseClaudeProviderModel(provider.model ?? null)
+  return patchImportantConfigText("claude_code", configText, {
+    apiBaseUrl: provider.api_url,
+    apiKey: provider.api_key,
+    claudeMainModel: model.main ?? "",
+    claudeReasoningModel: model.reasoning ?? "",
+    claudeDefaultHaikuModel: model.haiku ?? "",
+    claudeDefaultSonnetModel: model.sonnet ?? "",
+    claudeDefaultOpusModel: model.opus ?? "",
+    claudeCustomModelOption: model.customOption ?? "",
+    claudeCustomModelOptionName: model.customOptionName ?? "",
+    claudeCustomModelOptionDescription: model.customOptionDescription ?? "",
+  }).configText
+}
+
+/**
+ * Decide the config text to persist for a config-management save. For a bound
+ * Claude agent with VALID config JSON, rewrite the provider-controlled keys to be
+ * provider-authoritative (see {@link applyClaudeProviderToConfigText}). Anything
+ * else — non-Claude, unbound, or INVALID JSON — passes through unchanged. The
+ * invalid-JSON passthrough is important: persistConfig must still surface the
+ * parse error, otherwise patchImportantConfigText would silently recover the bad
+ * text as `{}` and persist provider-derived config over the user's broken edits.
+ */
+export function configTextForClaudeSave(
+  configText: string,
+  agentType: AgentType,
+  modelProviderId: number | null,
+  provider: Pick<ModelProviderInfo, "api_url" | "api_key" | "model"> | undefined
+): string {
+  if (
+    agentType === "claude_code" &&
+    modelProviderId != null &&
+    provider &&
+    !parseConfigJsonText(configText).error
+  ) {
+    return applyClaudeProviderToConfigText(configText, provider)
+  }
+  return configText
 }
 
 function patchEnvByImportantKey(
@@ -2326,7 +2418,16 @@ function applyImportantFieldToDraft(
   if (key === "claudeDefaultSonnetModel") {
     return { ...draft, claudeDefaultSonnetModel: value }
   }
-  return { ...draft, claudeDefaultOpusModel: value }
+  if (key === "claudeDefaultOpusModel") {
+    return { ...draft, claudeDefaultOpusModel: value }
+  }
+  if (key === "claudeCustomModelOption") {
+    return { ...draft, claudeCustomModelOption: value }
+  }
+  if (key === "claudeCustomModelOptionName") {
+    return { ...draft, claudeCustomModelOptionName: value }
+  }
+  return { ...draft, claudeCustomModelOptionDescription: value }
 }
 
 function buildImportantPatchFromDraft(draft: AgentDraft): ImportantDraftPatch {
@@ -2339,6 +2440,10 @@ function buildImportantPatchFromDraft(draft: AgentDraft): ImportantDraftPatch {
     claudeDefaultHaikuModel: draft.claudeDefaultHaikuModel,
     claudeDefaultSonnetModel: draft.claudeDefaultSonnetModel,
     claudeDefaultOpusModel: draft.claudeDefaultOpusModel,
+    claudeCustomModelOption: draft.claudeCustomModelOption,
+    claudeCustomModelOptionName: draft.claudeCustomModelOptionName,
+    claudeCustomModelOptionDescription:
+      draft.claudeCustomModelOptionDescription,
   }
 }
 
@@ -2487,6 +2592,10 @@ function buildAgentDraft(agent: AcpAgentInfo): AgentDraft {
     claudeDefaultHaikuModel: important.claudeDefaultHaikuModel,
     claudeDefaultSonnetModel: important.claudeDefaultSonnetModel,
     claudeDefaultOpusModel: important.claudeDefaultOpusModel,
+    claudeCustomModelOption: important.claudeCustomModelOption,
+    claudeCustomModelOptionName: important.claudeCustomModelOptionName,
+    claudeCustomModelOptionDescription:
+      important.claudeCustomModelOptionDescription,
     claudeEffortLevel: important.claudeEffortLevel,
     codexAuthJsonText,
     codexConfigTomlText,
@@ -4041,6 +4150,10 @@ export function AcpAgentSettings() {
         claudeDefaultHaikuModel: important.claudeDefaultHaikuModel,
         claudeDefaultSonnetModel: important.claudeDefaultSonnetModel,
         claudeDefaultOpusModel: important.claudeDefaultOpusModel,
+        claudeCustomModelOption: important.claudeCustomModelOption,
+        claudeCustomModelOptionName: important.claudeCustomModelOptionName,
+        claudeCustomModelOptionDescription:
+          important.claudeCustomModelOptionDescription,
         claudeEffortLevel: important.claudeEffortLevel,
       }))
     },
@@ -4196,6 +4309,10 @@ export function AcpAgentSettings() {
         const claudeHaiku = claudeModel.haiku ?? ""
         const claudeSonnet = claudeModel.sonnet ?? ""
         const claudeOpus = claudeModel.opus ?? ""
+        const claudeCustomOption = claudeModel.customOption ?? ""
+        const claudeCustomOptionName = claudeModel.customOptionName ?? ""
+        const claudeCustomOptionDescription =
+          claudeModel.customOptionDescription ?? ""
         const nextConfigJson = patchImportantConfigText(
           agentType,
           selectedDraft.configText,
@@ -4208,6 +4325,12 @@ export function AcpAgentSettings() {
             claudeDefaultHaikuModel: claudeHaiku,
             claudeDefaultSonnetModel: claudeSonnet,
             claudeDefaultOpusModel: claudeOpus,
+            // The custom model option travels with the provider's model JSON,
+            // authoritative like the five model fields: a defined value sets it,
+            // an empty/omitted value clears the key from config.env.
+            claudeCustomModelOption: claudeCustomOption,
+            claudeCustomModelOptionName: claudeCustomOptionName,
+            claudeCustomModelOptionDescription: claudeCustomOptionDescription,
           }
         )
         setConfigErrors((prev) => ({
@@ -4257,6 +4380,24 @@ export function AcpAgentSettings() {
             "claudeDefaultOpusModel",
             claudeOpus
           )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeCustomModelOption",
+            claudeCustomOption
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeCustomModelOptionName",
+            claudeCustomOptionName
+          )
+          nextEnvText = patchEnvByImportantKey(
+            agentType,
+            nextEnvText,
+            "claudeCustomModelOptionDescription",
+            claudeCustomOptionDescription
+          )
           return {
             ...current,
             modelProviderId: providerId,
@@ -4267,6 +4408,9 @@ export function AcpAgentSettings() {
             claudeDefaultHaikuModel: claudeHaiku,
             claudeDefaultSonnetModel: claudeSonnet,
             claudeDefaultOpusModel: claudeOpus,
+            claudeCustomModelOption: claudeCustomOption,
+            claudeCustomModelOptionName: claudeCustomOptionName,
+            claudeCustomModelOptionDescription: claudeCustomOptionDescription,
             envText: nextEnvText,
             configText: nextConfigJson.configText,
           }
@@ -8367,7 +8511,7 @@ supports_websockets = true`}
                                   event.target.value
                                 )
                               }}
-                              placeholder="claude-haiku-4-5-20251001"
+                              placeholder="claude-haiku-4-5"
                             />
                           </div>
                           <div className="space-y-1.5">
@@ -8412,6 +8556,74 @@ supports_websockets = true`}
                         <p className="text-[11px] text-muted-foreground">
                           {t("modelHintDefault")}
                         </p>
+                        <div className="space-y-2 border-t border-border/60 pt-3">
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <div className="space-y-1.5 md:col-span-2">
+                              <label className="text-[11px] text-muted-foreground">
+                                {t("claude.customModelOption")}
+                              </label>
+                              <Input
+                                value={selectedDraft.claudeCustomModelOption}
+                                readOnly={
+                                  selectedDraft.claudeAuthMode ===
+                                  "model_provider"
+                                }
+                                onChange={(event) => {
+                                  handleImportantConfigChange(
+                                    "claudeCustomModelOption",
+                                    event.target.value
+                                  )
+                                }}
+                                placeholder="my-gateway/claude-opus-4-8"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] text-muted-foreground">
+                                {t("claude.customModelOptionName")}
+                              </label>
+                              <Input
+                                value={
+                                  selectedDraft.claudeCustomModelOptionName
+                                }
+                                readOnly={
+                                  selectedDraft.claudeAuthMode ===
+                                  "model_provider"
+                                }
+                                onChange={(event) => {
+                                  handleImportantConfigChange(
+                                    "claudeCustomModelOptionName",
+                                    event.target.value
+                                  )
+                                }}
+                                placeholder="Gateway Opus"
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <label className="text-[11px] text-muted-foreground">
+                                {t("claude.customModelOptionDescription")}
+                              </label>
+                              <Input
+                                value={
+                                  selectedDraft.claudeCustomModelOptionDescription
+                                }
+                                readOnly={
+                                  selectedDraft.claudeAuthMode ===
+                                  "model_provider"
+                                }
+                                onChange={(event) => {
+                                  handleImportantConfigChange(
+                                    "claudeCustomModelOptionDescription",
+                                    event.target.value
+                                  )
+                                }}
+                                placeholder="Routed via custom gateway"
+                              />
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            {t("claude.customModelOptionHint")}
+                          </p>
+                        </div>
                         <div className="space-y-1.5">
                           <label className="text-[11px] text-muted-foreground">
                             {t("claude.effortLevel")}
@@ -8497,19 +8709,53 @@ supports_websockets = true`}
                             toast.error(t("toasts.modelProviderRequired"))
                             return
                           }
-                          Promise.all([
-                            persistEnv(
-                              selectedAgent.agent_type,
-                              selectedDraft.enabled,
-                              selectedDraft.envText,
-                              selectedDraft.modelProviderId
-                            ),
-                            persistConfig(
-                              selectedAgent.agent_type,
-                              selectedDraft.configText
-                            ),
-                          ])
+                          // When a Claude provider is bound, the on-disk config
+                          // loaded into configText may carry stale model keys
+                          // (e.g. a leftover custom model option) from before the
+                          // binding — re-derive them from the provider so
+                          // persistConfig cannot write a stale value back over
+                          // the backend bind cascade (invalid JSON passes through
+                          // so persistConfig still surfaces the error). Sequence
+                          // env→config (never parallel): persistEnv also rewrites
+                          // config.env on the backend, so concurrent writes would
+                          // interleave two writers of ~/.claude/settings.json.
+                          const configToSave = configTextForClaudeSave(
+                            selectedDraft.configText,
+                            selectedAgent.agent_type,
+                            selectedDraft.modelProviderId,
+                            modelProviders.find(
+                              (p) => p.id === selectedDraft.modelProviderId
+                            )
+                          )
+                          persistEnv(
+                            selectedAgent.agent_type,
+                            selectedDraft.enabled,
+                            selectedDraft.envText,
+                            selectedDraft.modelProviderId
+                          )
+                            .then(() =>
+                              persistConfig(
+                                selectedAgent.agent_type,
+                                configToSave
+                              )
+                            )
                             .then(() => {
+                              // Reflect the provider-authoritative rewrite in the
+                              // editor so the textarea doesn't keep showing a
+                              // stale value (e.g. a cleared custom model option)
+                              // until reload — only when the rewrite changed it.
+                              // The inner guard preserves any edit the user typed
+                              // into the still-editable textarea while the save
+                              // was in flight (don't clobber a newer draft).
+                              if (configToSave !== selectedDraft.configText) {
+                                const synced = normalizeConfigText(configToSave)
+                                updateSelectedDraft((current) =>
+                                  current.configText ===
+                                  selectedDraft.configText
+                                    ? { ...current, configText: synced }
+                                    : current
+                                )
+                              }
                               toast.success(t("toasts.configSaved"), {
                                 description: t("toasts.configSavedHint"),
                               })
