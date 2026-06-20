@@ -427,7 +427,7 @@ pub async fn upload_workspace_file(
                 match tokio::fs::symlink_metadata(&final_abs).await {
                     Ok(_) => {}
                     Err(err) => {
-                        eprintln!(
+                        tracing::error!(
                             "[workspace_files] upload commit verification FAILED: \
                              final_abs={} commit_method={} written={} err={}",
                             final_abs.display(),
@@ -744,7 +744,7 @@ fn zip_body_stream(
     tokio::spawn(async move {
         let result = write_zip_archive_to_stream(manager, dir_path.clone(), writer).await;
         if let Err(err) = result {
-            eprintln!(
+            tracing::error!(
                 "[workspace_files] streaming zip failed for {}: {}{}",
                 dir_path.display(),
                 err.message,
@@ -823,7 +823,7 @@ async fn write_zip_archive_to_stream(
         }
     }
     if symlinks_skipped > 0 {
-        eprintln!(
+        tracing::warn!(
             "[workspace_files] download_workspace_dir: skipped {} symlink entries under {}",
             symlinks_skipped,
             dir.display()

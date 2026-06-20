@@ -218,12 +218,12 @@ pub fn spawn_event_subscriber(
             let envelope_arc = match rx.recv().await {
                 Ok(e) => e,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("[ChatChannel] event subscriber lagged by {n} messages");
+                    tracing::warn!("[ChatChannel] event subscriber lagged by {n} messages");
                     metrics.lagged_count.fetch_add(n, Ordering::Relaxed);
                     continue;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    eprintln!("[ChatChannel] internal bus closed, stopping subscriber");
+                    tracing::info!("[ChatChannel] internal bus closed, stopping subscriber");
                     break;
                 }
             };

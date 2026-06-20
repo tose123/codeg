@@ -49,7 +49,8 @@
       "web_service": "Webdienst",
       "model_providers": "Modellanbieter",
       "experts": "Experten",
-      "quick_messages": "Schnellnachrichten"
+      "quick_messages": "Schnellnachrichten",
+      "logs": "Protokolle"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "{branchName} in {currentBranch} mergen",
       "rebaseCurrentToBranch": "{currentBranch} auf {branchName} rebasen",
       "noBranch": "Kein Branch",
+      "detachedHead": "Losgelöster HEAD bei {sha}",
       "initGitRepo": "Git-Repository initialisieren",
       "pullCode": "Code pullen",
       "fetchRemoteBranches": "Remote-Branches fetchen",
@@ -2981,5 +2983,53 @@
     "saved": "Frageeinstellungen gespeichert",
     "saveFailed": "Frageeinstellungen konnten nicht gespeichert werden",
     "loadFailed": "Laden fehlgeschlagen: {detail}"
+  },
+  "LogsSettings": {
+    "loading": "Wird geladen…",
+    "sectionTitle": "Protokolle",
+    "sectionDescription": "Diagnoseprotokolle der Anwendung anzeigen und konfigurieren. Protokolle werden in lokale Dateien geschrieben und für die Live-Ansicht im Speicher gehalten.",
+    "captureTitle": "Protokollebene",
+    "captureDescription": "Steuert, wie viele Details erfasst werden. Höhere Stufen (Debug, Trace) zeichnen mehr auf, erzeugen aber größere Protokolle. „Aus“ deaktiviert die Protokollierung.",
+    "captureLabel": "Erfassungsebene",
+    "levels": {
+      "off": "Aus",
+      "error": "Fehler",
+      "warn": "Warnung",
+      "info": "Info",
+      "debug": "Debug",
+      "trace": "Trace"
+    },
+    "viewerTitle": "Aktuelle Protokolle",
+    "viewerDescription": "Live-Ansicht der letzten Protokolleinträge. Nach Ebene filtern oder Text suchen.",
+    "searchPlaceholder": "Nachricht oder Ziel suchen…",
+    "viewLevels": {
+      "all": "Alle Ebenen",
+      "error": "Fehler und höher",
+      "warn": "Warnung und höher",
+      "info": "Info und höher",
+      "debug": "Debug und höher",
+      "trace": "Trace und höher"
+    },
+    "pause": "Pause",
+    "resume": "Live",
+    "refresh": "Aktualisieren",
+    "clear": "Leeren",
+    "openFolder": "Ordner öffnen",
+    "shownCount": "{shown} / {total} angezeigt",
+    "empty": "Keine Protokolle vorhanden.",
+    "levelSaveFailed": "Protokollebene konnte nicht gespeichert werden",
+    "openFolderFailed": "Protokollordner konnte nicht geöffnet werden",
+    "downloadFailed": "Protokolldatei konnte nicht heruntergeladen werden",
+    "filesTitle": "Protokolldateien",
+    "filesDescription": "Vollständige Protokolldateien von der Festplatte herunterladen, um den Verlauf über den Live-Puffer hinaus anzuzeigen.",
+    "filesEmpty": "Noch keine Protokolldateien.",
+    "download": "Herunterladen",
+    "downloadTruncated": "Die Datei ist groß; die neuesten {size} wurden heruntergeladen. Die vollständige Datei befindet sich im Log-Verzeichnis.",
+    "captureEnvLocked": "Die Protokollebene wird durch die Umgebungsvariable RUST_LOG / CODEG_LOG gesteuert; ändere sie dort, damit es wirksam wird.",
+    "targetsTitle": "Modulspezifische Überschreibungen",
+    "targetsDescription": "Lege für bestimmte Module (z. B. codeg_lib::acp) eine andere Stufe fest, ohne die globale Stufe zu ändern.",
+    "targetsAdd": "Hinzufügen",
+    "targetsRemove": "Überschreibung entfernen",
+    "toggleDetails": "Details umschalten"
   }
 }

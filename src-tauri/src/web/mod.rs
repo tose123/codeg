@@ -164,7 +164,7 @@ pub async fn resolve_persisted_server_token(
     let token = generate_random_token();
     *generated = true;
     if let Err(e) = app_metadata_service::upsert_value(conn, WEB_SERVICE_TOKEN_KEY, &token).await {
-        eprintln!(
+        tracing::warn!(
             "[SERVER][WARN] could not persist the generated access token ({e}); it will rotate on \
              restart and self-update success detection may be unreliable — set CODEG_TOKEN to pin it"
         );
@@ -320,7 +320,7 @@ pub(crate) fn find_static_dir_tauri(app: &tauri::AppHandle) -> PathBuf {
     if let Some(ref dir) = resource {
         let web = dir.join("web");
         if web.join("index.html").exists() {
-            eprintln!(
+            tracing::info!(
                 "[WEB] Serving static files from resource/web: {}",
                 web.display()
             );
@@ -328,7 +328,7 @@ pub(crate) fn find_static_dir_tauri(app: &tauri::AppHandle) -> PathBuf {
         }
         // Fallback: files at resource root.
         if dir.join("index.html").exists() {
-            eprintln!(
+            tracing::info!(
                 "[WEB] Serving static files from resource dir: {}",
                 dir.display()
             );
@@ -345,7 +345,7 @@ pub(crate) fn find_static_dir_fallback() -> PathBuf {
     let project_out = manifest_dir.parent().map(|p| p.join("out"));
     if let Some(ref out) = project_out {
         if out.join("index.html").exists() {
-            eprintln!(
+            tracing::info!(
                 "[WEB] Serving static files from project out/: {}",
                 out.display()
             );
@@ -357,7 +357,7 @@ pub(crate) fn find_static_dir_fallback() -> PathBuf {
     let cwd_out = std::env::current_dir()
         .map(|d| d.join("out"))
         .unwrap_or_else(|_| PathBuf::from("out"));
-    eprintln!(
+    tracing::warn!(
         "[WEB] Fallback static dir (may not exist): {}",
         cwd_out.display()
     );
@@ -368,7 +368,7 @@ pub fn find_static_dir_standalone(explicit: Option<&str>) -> PathBuf {
     if let Some(dir) = explicit {
         let p = PathBuf::from(dir);
         if p.join("index.html").exists() {
-            eprintln!(
+            tracing::info!(
                 "[WEB] Serving static files from CODEG_STATIC_DIR: {}",
                 p.display()
             );
@@ -379,7 +379,7 @@ pub fn find_static_dir_standalone(explicit: Option<&str>) -> PathBuf {
     // Try ./web/
     let web = PathBuf::from("web");
     if web.join("index.html").exists() {
-        eprintln!("[WEB] Serving static files from ./web/: {}", web.display());
+        tracing::info!("[WEB] Serving static files from ./web/: {}", web.display());
         return web;
     }
 
@@ -570,7 +570,7 @@ pub(crate) async fn do_start_web_server_with_state(
     // the serve task still works; we just lose this defense-in-depth on
     // this start. See issue #126.
     if let Err(e) = socket_inherit::mark_listener_non_inheritable(&listener) {
-        eprintln!("[WEB][WARN] failed to mark listener non-inheritable: {}", e);
+        tracing::warn!("[WEB][WARN] failed to mark listener non-inheritable: {}", e);
     }
 
     // Persist only after a successful bind AND a successful strict-
@@ -599,7 +599,7 @@ pub(crate) async fn do_start_web_server_with_state(
     let actual_port = local_addr.map(|a| a.port()).unwrap_or(port);
     // Advertise the IP the socket is actually bound to, not the raw config.
     let advertised_host = advertise_host(local_addr, &host);
-    eprintln!("[WEB] Starting web server on {}", addr);
+    tracing::info!("[WEB] Starting web server on {}", addr);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
@@ -607,7 +607,7 @@ pub(crate) async fn do_start_web_server_with_state(
             let _ = shutdown_rx.await;
         });
         if let Err(e) = serve.await {
-            eprintln!("[WEB] Server error: {}", e);
+            tracing::error!("[WEB] Server error: {}", e);
         }
     });
 
@@ -662,7 +662,7 @@ pub(crate) async fn do_stop_web_server(state: &WebServerState) {
     *state.token.lock().unwrap() = String::new();
     *state.host.lock().unwrap() = "0.0.0.0".to_string();
     state.running.store(false, Ordering::Release);
-    eprintln!("[WEB] Web server stopped");
+    tracing::info!("[WEB] Web server stopped");
 }
 
 pub(crate) fn do_get_web_server_status(state: &WebServerState) -> Option<WebServerInfo> {
@@ -750,7 +750,7 @@ pub(crate) async fn do_start_web_server_tauri(
 
     // See do_start_web_server_with_state for rationale.
     if let Err(e) = socket_inherit::mark_listener_non_inheritable(&listener) {
-        eprintln!("[WEB][WARN] failed to mark listener non-inheritable: {}", e);
+        tracing::warn!("[WEB][WARN] failed to mark listener non-inheritable: {}", e);
     }
 
     // Persist only after a successful bind AND strict-mode validation,
@@ -859,7 +859,7 @@ pub(crate) async fn do_start_web_server_tauri(
     let actual_port = local_addr.map(|a| a.port()).unwrap_or(port_val);
     // Advertise the IP the socket is actually bound to, not the raw config.
     let advertised_host = advertise_host(local_addr, &host_val);
-    eprintln!("[WEB] Starting web server on {}", addr);
+    tracing::info!("[WEB] Starting web server on {}", addr);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
@@ -867,7 +867,7 @@ pub(crate) async fn do_start_web_server_tauri(
             let _ = shutdown_rx.await;
         });
         if let Err(e) = serve.await {
-            eprintln!("[WEB] Server error: {}", e);
+            tracing::error!("[WEB] Server error: {}", e);
         }
     });
 

@@ -49,7 +49,8 @@
       "web_service": "Service Web",
       "model_providers": "Fournisseurs de Modèles",
       "experts": "Experts",
-      "quick_messages": "Messages rapides"
+      "quick_messages": "Messages rapides",
+      "logs": "Journaux"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "Fusionner {branchName} dans {currentBranch}",
       "rebaseCurrentToBranch": "Rebaser {currentBranch} sur {branchName}",
       "noBranch": "Aucune branche",
+      "detachedHead": "HEAD détaché sur {sha}",
       "initGitRepo": "Initialiser le dépôt Git",
       "pullCode": "Pull du code",
       "fetchRemoteBranches": "Récupérer les branches distantes",
@@ -2981,5 +2983,53 @@
     "saved": "Paramètres de question enregistrés",
     "saveFailed": "Échec de l'enregistrement des paramètres de question",
     "loadFailed": "Échec du chargement : {detail}"
+  },
+  "LogsSettings": {
+    "loading": "Chargement…",
+    "sectionTitle": "Journaux",
+    "sectionDescription": "Consultez et configurez les journaux de diagnostic de l'application. Les journaux sont écrits dans des fichiers locaux et conservés en mémoire pour l'affichage en direct.",
+    "captureTitle": "Niveau de journalisation",
+    "captureDescription": "Contrôle le niveau de détail capturé. Les niveaux plus élevés (Debug, Trace) enregistrent davantage mais produisent des journaux plus volumineux. « Désactivé » désactive la journalisation.",
+    "captureLabel": "Niveau de capture",
+    "levels": {
+      "off": "Désactivé",
+      "error": "Erreur",
+      "warn": "Avertissement",
+      "info": "Info",
+      "debug": "Débogage",
+      "trace": "Trace"
+    },
+    "viewerTitle": "Journaux récents",
+    "viewerDescription": "Affichage en direct des journaux récents. Filtrez par niveau ou recherchez du texte.",
+    "searchPlaceholder": "Rechercher un message ou une cible…",
+    "viewLevels": {
+      "all": "Tous les niveaux",
+      "error": "Erreur et plus",
+      "warn": "Avertissement et plus",
+      "info": "Info et plus",
+      "debug": "Débogage et plus",
+      "trace": "Trace et plus"
+    },
+    "pause": "Pause",
+    "resume": "Direct",
+    "refresh": "Actualiser",
+    "clear": "Effacer",
+    "openFolder": "Ouvrir le dossier",
+    "shownCount": "{shown} / {total} affichés",
+    "empty": "Aucun journal à afficher.",
+    "levelSaveFailed": "Échec de l'enregistrement du niveau de journalisation",
+    "openFolderFailed": "Échec de l'ouverture du dossier des journaux",
+    "downloadFailed": "Échec du téléchargement du fichier journal",
+    "filesTitle": "Fichiers journaux",
+    "filesDescription": "Téléchargez les fichiers journaux complets depuis le disque pour l'historique au-delà du tampon en direct.",
+    "filesEmpty": "Aucun fichier journal pour l'instant.",
+    "download": "Télécharger",
+    "downloadTruncated": "Le fichier est volumineux ; les {size} les plus récents ont été téléchargés. Le fichier complet se trouve dans le répertoire des journaux.",
+    "captureEnvLocked": "Le niveau de journalisation est contrôlé par la variable d'environnement RUST_LOG / CODEG_LOG ; modifiez-la là pour qu'elle prenne effet.",
+    "targetsTitle": "Remplacements par module",
+    "targetsDescription": "Définissez un niveau différent pour des modules spécifiques (p. ex. codeg_lib::acp) sans changer le niveau global.",
+    "targetsAdd": "Ajouter",
+    "targetsRemove": "Supprimer le remplacement",
+    "toggleDetails": "Afficher les détails"
   }
 }

@@ -49,7 +49,8 @@
       "web_service": "Web 服务",
       "model_providers": "模型供应商",
       "experts": "专家",
-      "quick_messages": "快捷消息"
+      "quick_messages": "快捷消息",
+      "logs": "日志"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "将 {branchName} 合并到 {currentBranch}",
       "rebaseCurrentToBranch": "将 {currentBranch} 变基到 {branchName}",
       "noBranch": "无分支",
+      "detachedHead": "游离 HEAD（{sha}）",
       "initGitRepo": "初始化 Git 仓库",
       "pullCode": "更新代码",
       "fetchRemoteBranches": "提取远程分支",
@@ -2981,5 +2983,53 @@
     "saved": "提问设置已保存",
     "saveFailed": "保存提问设置失败",
     "loadFailed": "加载失败：{detail}"
+  },
+  "LogsSettings": {
+    "loading": "加载中…",
+    "sectionTitle": "日志",
+    "sectionDescription": "查看和配置应用诊断日志。日志会写入本地文件，并保留在内存中以便实时查看。",
+    "captureTitle": "日志级别",
+    "captureDescription": "控制记录的详细程度。级别越高（Debug、Trace）记录越多，但日志也越大。“关闭”将停止记录日志。",
+    "captureLabel": "采集级别",
+    "levels": {
+      "off": "关闭",
+      "error": "错误",
+      "warn": "警告",
+      "info": "信息",
+      "debug": "调试",
+      "trace": "跟踪"
+    },
+    "viewerTitle": "最近日志",
+    "viewerDescription": "实时查看最近的日志记录。可按级别筛选或搜索文本。",
+    "searchPlaceholder": "搜索消息或来源…",
+    "viewLevels": {
+      "all": "全部级别",
+      "error": "错误及以上",
+      "warn": "警告及以上",
+      "info": "信息及以上",
+      "debug": "调试及以上",
+      "trace": "跟踪及以上"
+    },
+    "pause": "暂停",
+    "resume": "实时",
+    "refresh": "刷新",
+    "clear": "清空",
+    "openFolder": "打开文件夹",
+    "shownCount": "已显示 {shown} / {total}",
+    "empty": "暂无日志。",
+    "levelSaveFailed": "保存日志级别失败",
+    "openFolderFailed": "打开日志文件夹失败",
+    "downloadFailed": "下载日志文件失败",
+    "filesTitle": "日志文件",
+    "filesDescription": "从磁盘下载完整日志文件，查看实时缓冲区之外的历史记录。",
+    "filesEmpty": "暂无日志文件。",
+    "download": "下载",
+    "downloadTruncated": "文件较大，已下载最新的 {size}。完整文件请在日志目录中查看。",
+    "captureEnvLocked": "日志级别由 RUST_LOG / CODEG_LOG 环境变量控制；请在该处修改以生效。",
+    "targetsTitle": "按模块覆盖",
+    "targetsDescription": "为特定模块（如 codeg_lib::acp）单独设置级别，不影响全局级别。",
+    "targetsAdd": "添加",
+    "targetsRemove": "移除覆盖",
+    "toggleDetails": "切换详情"
   }
 }

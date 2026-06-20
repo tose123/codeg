@@ -43,7 +43,7 @@ pub fn schedule_restart(hold: tokio::sync::OwnedMutexGuard<()>) {
 fn restart_now() -> ! {
     match runtime::capability() {
         UpdateCapability::Supervised => {
-            eprintln!("[update] exiting for supervisor relaunch");
+            tracing::info!("[update] exiting for supervisor relaunch");
             std::process::exit(runtime::EXIT_RESTART);
         }
         UpdateCapability::Reexec => reexec(),
@@ -55,12 +55,12 @@ fn reexec() -> ! {
     use std::os::unix::process::CommandExt;
     let exe = runtime::self_exe();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    eprintln!("[update] re-exec {} {:?}", exe.display(), args);
+    tracing::info!("[update] re-exec {} {:?}", exe.display(), args);
     // `exec` only returns on failure (it replaces the process image). The
     // listening socket is marked CLOEXEC at bind time, so it closes here and
     // the new image rebinds cleanly.
     let err = std::process::Command::new(&exe).args(&args).exec();
-    eprintln!("[update] re-exec failed: {err}; exiting");
+    tracing::error!("[update] re-exec failed: {err}; exiting");
     std::process::exit(runtime::EXIT_RESTART);
 }
 
@@ -68,11 +68,11 @@ fn reexec() -> ! {
 fn reexec() -> ! {
     let exe = runtime::self_exe();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    eprintln!("[update] re-spawn {} {:?}", exe.display(), args);
+    tracing::info!("[update] re-spawn {} {:?}", exe.display(), args);
     match std::process::Command::new(&exe).args(&args).spawn() {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            eprintln!("[update] re-spawn failed: {e}");
+            tracing::error!("[update] re-spawn failed: {e}");
             std::process::exit(runtime::EXIT_RESTART);
         }
     }

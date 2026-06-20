@@ -245,13 +245,13 @@ pub fn list_pets() -> Result<Vec<PetSummary>, AppCommandError> {
         let manifest = match read_manifest(&path) {
             Ok(m) => m,
             Err(err) => {
-                eprintln!("[Pets] skipping {}: {}", path.display(), err.message);
+                tracing::warn!("[Pets] skipping {}: {}", path.display(), err.message);
                 continue;
             }
         };
         let spritesheet = path.join(SPRITESHEET_FILENAME);
         if !spritesheet.exists() {
-            eprintln!("[Pets] skipping {}: spritesheet missing", path.display());
+            tracing::warn!("[Pets] skipping {}: spritesheet missing", path.display());
             continue;
         }
         out.push(PetSummary {

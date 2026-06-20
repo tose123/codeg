@@ -1890,7 +1890,7 @@ pub fn install_tray_icon(
                 builder = builder.icon(icon).icon_as_template(true);
             }
             Err(err) => {
-                eprintln!("[Tray] failed to load template icon, falling back: {err}");
+                tracing::warn!("[Tray] failed to load template icon, falling back: {err}");
                 if let Some(icon) = app.default_window_icon() {
                     builder = builder.icon(icon.clone());
                 }

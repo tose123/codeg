@@ -90,7 +90,7 @@ pub fn spawn_webhook_delivery(
         tokio::spawn(async move {
             if let Err(e) = post_one(&client, &url, &payload).await {
                 // Redact: webhook URLs often carry secrets in the path/query.
-                eprintln!(
+                tracing::error!(
                     "[ChatChannel] webhook delivery to {} failed: {e}",
                     redact_url(&url)
                 );

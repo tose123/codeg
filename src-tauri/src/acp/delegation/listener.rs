@@ -127,19 +127,19 @@ impl DelegationListener {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let listener = tokio::net::UnixListener::bind(&socket_path)?;
-        eprintln!("[delegation] listening on UDS {}", socket_path.display());
+        tracing::info!("[delegation] listening on UDS {}", socket_path.display());
         loop {
             match listener.accept().await {
                 Ok((mut conn, _)) => {
                     let me = Arc::clone(&self);
                     tokio::spawn(async move {
                         if let Err(e) = me.serve_one(&mut conn).await {
-                            eprintln!("[delegation] connection failed: {e}");
+                            tracing::error!("[delegation] connection failed: {e}");
                         }
                     });
                 }
                 Err(e) => {
-                    eprintln!("[delegation] accept failed: {e}");
+                    tracing::error!("[delegation] accept failed: {e}");
                     // Brief backoff so a persistent accept error doesn't pin a core.
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
@@ -159,10 +159,10 @@ impl DelegationListener {
         let mut server = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&path_str)?;
-        eprintln!("[delegation] listening on named pipe {path_str}");
+        tracing::info!("[delegation] listening on named pipe {path_str}");
         loop {
             if let Err(e) = server.connect().await {
-                eprintln!("[delegation] connect failed: {e}");
+                tracing::error!("[delegation] connect failed: {e}");
                 // Re-create the instance so the next iteration has a fresh
                 // listener; a failed connect leaves the current one unusable.
                 server = ServerOptions::new().create(&path_str)?;
@@ -176,7 +176,7 @@ impl DelegationListener {
             tokio::spawn(async move {
                 let mut conn = connected;
                 if let Err(e) = me.serve_one(&mut conn).await {
-                    eprintln!("[delegation] connection failed: {e}");
+                    tracing::error!("[delegation] connection failed: {e}");
                 }
             });
         }

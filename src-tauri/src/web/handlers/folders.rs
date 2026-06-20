@@ -217,6 +217,13 @@ pub async fn get_git_branch(
     Ok(Json(result))
 }
 
+pub async fn get_git_head(
+    Json(params): Json<PathParams>,
+) -> Result<Json<folder_commands::GitHeadInfo>, AppCommandError> {
+    let result = folder_commands::get_git_head(params.path).await?;
+    Ok(Json(result))
+}
+
 pub async fn get_home_directory() -> Result<Json<String>, AppCommandError> {
     let result = folder_commands::get_home_directory().await?;
     Ok(Json(result))

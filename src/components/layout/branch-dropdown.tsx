@@ -139,7 +139,7 @@ export function BranchDropdown() {
   const tCommon = useTranslations("Folder.common")
   const { activeFolder } = useActiveFolder()
   const isChatMode = useIsActiveChatMode()
-  const { allFolders, branches, refreshFolder, openWorktreeFolder } =
+  const { allFolders, branches, gitHeads, refreshFolder, openWorktreeFolder } =
     useAppWorkspace()
   const { openNewConversationTab } = useTabContext()
   const { addTask, updateTask, removeTask } = useTaskContext()
@@ -152,6 +152,13 @@ export function BranchDropdown() {
   const branch = activeFolder
     ? (branches.get(activeFolder.id) ?? activeFolder.git_branch ?? null)
     : null
+  const head = activeFolder ? (gitHeads.get(activeFolder.id) ?? null) : null
+  // The gate is "is this a git repo?" — not "is there a branch?". A detached
+  // HEAD has no branch name yet is still a repo whose git operations must
+  // remain available (issue #279). Until the first poll resolves `head`, fall
+  // back to branch presence so the first-frame behavior is unchanged.
+  const isRepo = head ? head.is_repo : branch !== null
+  const isDetached = !branch && !!head?.detached
 
   const [branchList, setBranchList] = useState<GitBranchList>({
     local: [],
@@ -325,7 +332,7 @@ export function BranchDropdown() {
 
   function handleDropdownOpenChange(open: boolean) {
     setDropdownOpen(open)
-    if (open && branch !== null) {
+    if (open && isRepo) {
       void loadAllBranches()
     }
   }
@@ -673,7 +680,7 @@ export function BranchDropdown() {
   // below still use `activeFolder` (the worktree) unchanged.
   const folderName = resolveFolderDisplayName(activeFolder, allFolders)
 
-  if (branch === null) {
+  if (!isRepo) {
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -706,12 +713,25 @@ export function BranchDropdown() {
     <>
       <DropdownMenu open={dropdownOpen} onOpenChange={handleDropdownOpenChange}>
         <DropdownMenuTrigger asChild>
-          <button className="flex min-w-0 items-center gap-1 text-sm tracking-tight outline-none transition-colors cursor-default hover:text-foreground/80">
-            <GitBranch className="h-3 w-3 shrink-0" />
+          <button
+            className="flex min-w-0 items-center gap-1 text-sm tracking-tight outline-none transition-colors cursor-default hover:text-foreground/80"
+            title={
+              isDetached
+                ? t("detachedHead", { sha: head?.short_sha ?? "" })
+                : undefined
+            }
+          >
+            {isDetached ? (
+              <GitCommitHorizontal className="h-3 w-3 shrink-0" />
+            ) : (
+              <GitBranch className="h-3 w-3 shrink-0" />
+            )}
             <span className="max-w-[320px] truncate">
               {folderName}
               <span className="mx-1.5 inline-block h-3 w-px bg-foreground/20 align-middle" />
-              <span className="text-primary">{branch}</span>
+              <span className="text-primary">
+                {branch ?? head?.short_sha ?? t("noBranch")}
+              </span>
             </span>
             <ChevronDown className="h-3 w-3 shrink-0 opacity-50" />
           </button>

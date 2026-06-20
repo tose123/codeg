@@ -35,7 +35,7 @@ pub fn load() -> AppPreferences {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
         Err(err) if err.kind() == io::ErrorKind::NotFound => AppPreferences::default(),
         Err(err) => {
-            eprintln!("[Preferences] failed to read {}: {err}", path.display());
+            tracing::error!("[Preferences] failed to read {}: {err}", path.display());
             AppPreferences::default()
         }
     }

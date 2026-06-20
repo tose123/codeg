@@ -422,7 +422,7 @@ fn map_io_error(action: &str, path: &Path, err: std::io::Error) -> FileSystemRun
 fn log_if_slow(operation: &str, path: &Path, started_at: Instant) {
     let elapsed = started_at.elapsed();
     if elapsed.as_millis() >= FS_SLOW_OPERATION_MS {
-        eprintln!(
+        tracing::info!(
             "[ACP] {operation} slow path={} elapsed_ms={}",
             path.display(),
             elapsed.as_millis()

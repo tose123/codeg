@@ -244,7 +244,7 @@ pub fn spawn_forwarder(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[WS attach] subscription {} lagged ({} events dropped); detaching",
                         subscription_id, n
                     );

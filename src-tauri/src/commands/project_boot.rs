@@ -204,10 +204,10 @@ pub async fn create_shadcn_project(
         preset_code,
         target_dir
     );
-    eprintln!("[ProjectBoot] executing: {cmd_display}");
+    tracing::info!("[ProjectBoot] executing: {cmd_display}");
 
     let output = cmd.output().await.map_err(|e| {
-        eprintln!("[ProjectBoot] spawn error: {e}");
+        tracing::error!("[ProjectBoot] spawn error: {e}");
         if e.kind() == std::io::ErrorKind::NotFound {
             AppCommandError::dependency_missing(format!(
                 "{program} is not installed. Please install Node.js first."
@@ -223,17 +223,17 @@ pub async fn create_shadcn_project(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    eprintln!(
+    tracing::info!(
         "[ProjectBoot] exit={} stdout_len={} stderr_len={}",
         output.status,
         stdout.len(),
         stderr.len()
     );
     if !stdout.is_empty() {
-        eprintln!("[ProjectBoot] stdout: {stdout}");
+        tracing::info!("[ProjectBoot] stdout: {stdout}");
     }
     if !stderr.is_empty() {
-        eprintln!("[ProjectBoot] stderr: {stderr}");
+        tracing::info!("[ProjectBoot] stderr: {stderr}");
     }
 
     if !output.status.success() {
@@ -420,7 +420,7 @@ pub async fn install_hyperframes_skills(agents: Vec<String>) -> Result<(), AppCo
         ]);
         cmd.env("GIT_CLONE_PROTECTION_ACTIVE", "0");
 
-        eprintln!(
+        tracing::info!(
             "[ProjectBoot] executing: npx --yes skills@latest add heygen-com/hyperframes --skill * -g -y --agent {agent}"
         );
 
@@ -444,7 +444,7 @@ pub async fn install_hyperframes_skills(agents: Vec<String>) -> Result<(), AppCo
             } else {
                 format!("exited with status: {}", output.status)
             };
-            eprintln!("[ProjectBoot] skills install failed for {agent}: {detail}");
+            tracing::error!("[ProjectBoot] skills install failed for {agent}: {detail}");
             failures.push(format!("{agent}: {detail}"));
         } else {
             ran_ok.push(agent);
@@ -460,7 +460,7 @@ pub async fn install_hyperframes_skills(agents: Vec<String>) -> Result<(), AppCo
     // `~/.agents/skills`, so one satisfied install covers all that read it.
     for &agent in &ran_ok {
         if !hyperframes_skill_installed(agent) {
-            eprintln!("[ProjectBoot] {agent}: install exited 0 but no HyperFrames skill detected");
+            tracing::info!("[ProjectBoot] {agent}: install exited 0 but no HyperFrames skill detected");
             failures.push(format!(
                 "{agent}: install reported success but no HyperFrames skill was detected"
             ));
@@ -569,10 +569,10 @@ pub async fn create_hyperframes_project(
         args.join(" "),
         target_dir
     );
-    eprintln!("[ProjectBoot] executing: {cmd_display}");
+    tracing::info!("[ProjectBoot] executing: {cmd_display}");
 
     let output = cmd.output().await.map_err(|e| {
-        eprintln!("[ProjectBoot] spawn error: {e}");
+        tracing::error!("[ProjectBoot] spawn error: {e}");
         if e.kind() == std::io::ErrorKind::NotFound {
             AppCommandError::dependency_missing(format!(
                 "{program} is not installed. Please install Node.js first."
@@ -588,17 +588,17 @@ pub async fn create_hyperframes_project(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    eprintln!(
+    tracing::info!(
         "[ProjectBoot] exit={} stdout_len={} stderr_len={}",
         output.status,
         stdout.len(),
         stderr.len()
     );
     if !stdout.is_empty() {
-        eprintln!("[ProjectBoot] stdout: {stdout}");
+        tracing::info!("[ProjectBoot] stdout: {stdout}");
     }
     if !stderr.is_empty() {
-        eprintln!("[ProjectBoot] stderr: {stderr}");
+        tracing::info!("[ProjectBoot] stderr: {stderr}");
     }
 
     if !output.status.success() {

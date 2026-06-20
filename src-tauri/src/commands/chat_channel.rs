@@ -114,11 +114,11 @@ pub async fn connect_chat_channel_core(
     })?;
 
     let token = crate::keyring_store::get_channel_token(id).ok_or_else(|| {
-        eprintln!("[connect_chat_channel] channel {id}: Token not set in keyring");
+        tracing::info!("[connect_chat_channel] channel {id}: Token not set in keyring");
         AppCommandError::configuration_missing("Token not set")
     })?;
 
-    eprintln!(
+    tracing::info!(
         "[connect_chat_channel] channel {id}: creating {channel_type} backend, config={}",
         model.config_json
     );
@@ -130,11 +130,11 @@ pub async fn connect_chat_channel_core(
         .add_channel(id, model.name, channel_type, backend)
         .await
         .map_err(|e| {
-            eprintln!("[connect_chat_channel] channel {id}: add_channel failed: {e}");
+            tracing::error!("[connect_chat_channel] channel {id}: add_channel failed: {e}");
             AppCommandError::from(e)
         })?;
 
-    eprintln!("[connect_chat_channel] channel {id}: connected successfully");
+    tracing::info!("[connect_chat_channel] channel {id}: connected successfully");
     Ok(())
 }
 
@@ -409,7 +409,7 @@ pub async fn weixin_check_qrcode_core(
 
     // On confirmed: save token + update config with base_url
     if result.status == "confirmed" {
-        eprintln!(
+        tracing::error!(
             "[Weixin] QR confirmed for channel {channel_id}, bot_token={}, base_url={}",
             result
                 .bot_token
@@ -425,9 +425,9 @@ pub async fn weixin_check_qrcode_core(
         );
         if let Some(ref token) = result.bot_token {
             save_chat_channel_token_core(channel_id, token)?;
-            eprintln!("[Weixin] Token saved for channel {channel_id}");
+            tracing::info!("[Weixin] Token saved for channel {channel_id}");
         } else {
-            eprintln!(
+            tracing::warn!(
                 "[Weixin] WARNING: No bot_token in confirmed response for channel {channel_id}"
             );
         }
@@ -444,7 +444,7 @@ pub async fn weixin_check_qrcode_core(
                 None,
             )
             .await?;
-            eprintln!("[Weixin] Config updated with base_url for channel {channel_id}");
+            tracing::info!("[Weixin] Config updated with base_url for channel {channel_id}");
         }
     }
 

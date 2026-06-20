@@ -271,7 +271,7 @@ fn parse_agent_type(s: &str) -> AgentType {
             // DB has a value the enum does not recognise (manual edit or removed variant).
             // Fall back to ClaudeCode so the row stays readable, but log so resume-as-wrong-agent
             // regressions are traceable.
-            eprintln!(
+            tracing::warn!(
                 "[conversation_service] unknown agent_type {s:?} in DB, falling back to ClaudeCode"
             );
             AgentType::ClaudeCode

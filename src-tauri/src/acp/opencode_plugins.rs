@@ -143,7 +143,7 @@ pub fn check_opencode_plugins(project_root: Option<&Path>) -> Result<PluginCheck
         let spec_str = match item.as_str() {
             Some(s) => s,
             None => {
-                eprintln!("[opencode_plugins] Skipping non-string plugin entry: {item}");
+                tracing::warn!("[opencode_plugins] Skipping non-string plugin entry: {item}");
                 continue;
             }
         };
@@ -151,7 +151,7 @@ pub fn check_opencode_plugins(project_root: Option<&Path>) -> Result<PluginCheck
         let (name, declared_spec) = match parse_plugin_spec(spec_str) {
             Some(pair) => pair,
             None => {
-                eprintln!("[opencode_plugins] Skipping invalid plugin spec: {spec_str:?}");
+                tracing::warn!("[opencode_plugins] Skipping invalid plugin spec: {spec_str:?}");
                 continue;
             }
         };

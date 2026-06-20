@@ -36,14 +36,14 @@ fn worker_args() -> Vec<String> {
 /// Best-effort: a missing `.bak` (nothing to revert to) returns `false` and
 /// the caller propagates the original failure.
 fn attempt_rollback(reason: &str) -> bool {
-    eprintln!("[supervise] {reason}; rolling back to the previous version");
+    tracing::info!("[supervise] {reason}; rolling back to the previous version");
     match crate::update::install::rollback() {
         Ok(()) => {
-            eprintln!("[supervise] rollback complete; relaunching previous version");
+            tracing::info!("[supervise] rollback complete; relaunching previous version");
             true
         }
         Err(e) => {
-            eprintln!("[supervise] rollback failed: {e}; propagating original exit");
+            tracing::error!("[supervise] rollback failed: {e}; propagating original exit");
             false
         }
     }
@@ -125,12 +125,12 @@ pub fn run() -> ! {
             {
                 *on_trial = false;
                 spawn_and_track().unwrap_or_else(|e2| {
-                    eprintln!("[supervise][FATAL] failed to spawn restored worker: {e2}");
+                    tracing::error!("[supervise][FATAL] failed to spawn restored worker: {e2}");
                     std::process::exit(1);
                 })
             }
             Err(e) => {
-                eprintln!("[supervise][FATAL] failed to spawn worker: {e}");
+                tracing::error!("[supervise][FATAL] failed to spawn worker: {e}");
                 std::process::exit(1);
             }
         }
@@ -159,7 +159,7 @@ pub fn run() -> ! {
     // marker always covers the whole window. (The windows path does the same.)
     let mut spawned_at = std::time::Instant::now();
     let mut child = spawn_trial(&mut on_trial);
-    eprintln!("[supervise] worker started (pid {})", child.id());
+    tracing::info!("[supervise] worker started (pid {})", child.id());
 
     loop {
         let worker_pid = WORKER_PID.load(Ordering::SeqCst);
@@ -181,7 +181,7 @@ pub fn run() -> ! {
                     1
                 });
             }
-            eprintln!("[supervise][FATAL] waitpid failed (errno {errno})");
+            tracing::error!("[supervise][FATAL] waitpid failed (errno {errno})");
             std::process::exit(1);
         }
 
@@ -196,7 +196,7 @@ pub fn run() -> ! {
                                   // forwarded signal must not `kill()` a PID the OS may have recycled.
         WORKER_PID.store(0, Ordering::SeqCst);
         if TERMINATING.load(Ordering::SeqCst) {
-            eprintln!("[supervise] worker stopped during shutdown; exiting");
+            tracing::info!("[supervise] worker stopped during shutdown; exiting");
             std::process::exit(0);
         }
 
@@ -205,7 +205,7 @@ pub fn run() -> ! {
         if libc::WIFEXITED(status) {
             let code = libc::WEXITSTATUS(status);
             if code == runtime::EXIT_RESTART {
-                eprintln!("[supervise] upgrade restart requested; relaunching in {delay}ms");
+                tracing::info!("[supervise] upgrade restart requested; relaunching in {delay}ms");
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 if TERMINATING.load(Ordering::SeqCst) {
                     std::process::exit(0);
@@ -220,7 +220,7 @@ pub fn run() -> ! {
                 // always outlives the supervisor's rollback window.
                 spawned_at = std::time::Instant::now();
                 child = spawn_trial(&mut on_trial);
-                eprintln!("[supervise] worker relaunched (pid {})", child.id());
+                tracing::info!("[supervise] worker relaunched (pid {})", child.id());
                 continue;
             }
             // A freshly-upgraded worker that dies fast can't boot — restore
@@ -235,17 +235,17 @@ pub fn run() -> ! {
             {
                 on_trial = false;
                 child = spawn_and_track().unwrap_or_else(|e| {
-                    eprintln!("[supervise][FATAL] failed to spawn restored worker: {e}");
+                    tracing::error!("[supervise][FATAL] failed to spawn restored worker: {e}");
                     std::process::exit(1);
                 });
                 spawned_at = std::time::Instant::now();
-                eprintln!(
+                tracing::info!(
                     "[supervise] previous version relaunched (pid {})",
                     child.id()
                 );
                 continue;
             }
-            eprintln!("[supervise] worker exited with code {code}; propagating");
+            tracing::info!("[supervise] worker exited with code {code}; propagating");
             std::process::exit(code);
         }
 
@@ -260,17 +260,17 @@ pub fn run() -> ! {
             {
                 on_trial = false;
                 child = spawn_and_track().unwrap_or_else(|e| {
-                    eprintln!("[supervise][FATAL] failed to spawn restored worker: {e}");
+                    tracing::error!("[supervise][FATAL] failed to spawn restored worker: {e}");
                     std::process::exit(1);
                 });
                 spawned_at = std::time::Instant::now();
-                eprintln!(
+                tracing::info!(
                     "[supervise] previous version relaunched (pid {})",
                     child.id()
                 );
                 continue;
             }
-            eprintln!("[supervise] worker killed by signal {sig}; exiting");
+            tracing::info!("[supervise] worker killed by signal {sig}; exiting");
             // Mirror the conventional 128+signal exit code.
             std::process::exit(128 + sig);
         }
@@ -301,19 +301,19 @@ pub fn run() -> ! {
             .env(runtime::ENV_RESTART_DELAY_MS, delay.to_string())
             .spawn()
             .unwrap_or_else(|e| {
-                eprintln!("[supervise][FATAL] failed to spawn worker: {e}");
+                tracing::error!("[supervise][FATAL] failed to spawn worker: {e}");
                 std::process::exit(1);
             });
 
         let status = child.wait().unwrap_or_else(|e| {
-            eprintln!("[supervise][FATAL] wait failed: {e}");
+            tracing::error!("[supervise][FATAL] wait failed: {e}");
             std::process::exit(1);
         });
         let elapsed = spawned_at.elapsed();
 
         match status.code() {
             Some(code) if code == runtime::EXIT_RESTART => {
-                eprintln!("[supervise] upgrade restart requested; relaunching in {delay}ms");
+                tracing::info!("[supervise] upgrade restart requested; relaunching in {delay}ms");
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 // Probation for the next launch only if an upgrade is staged.
                 // Peek, don't consume — see the unix path for the rationale.
@@ -330,7 +330,7 @@ pub fn run() -> ! {
                     ))
                 {
                     on_trial = false;
-                    eprintln!("[supervise] relaunching previous version");
+                    tracing::info!("[supervise] relaunching previous version");
                     continue;
                 }
                 std::process::exit(code);
@@ -341,7 +341,7 @@ pub fn run() -> ! {
                     && attempt_rollback("new version terminated abnormally")
                 {
                     on_trial = false;
-                    eprintln!("[supervise] relaunching previous version");
+                    tracing::info!("[supervise] relaunching previous version");
                     continue;
                 }
                 std::process::exit(1);

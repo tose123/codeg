@@ -25,6 +25,7 @@ import type {
   SaveTabsOutcome,
   GitStatusEntry,
   GitBranchList,
+  GitHeadInfo,
   GitPullResult,
   GitPushResult,
   GitPushInfo,
@@ -613,6 +614,10 @@ export async function cloneRepository(
 
 export async function getGitBranch(path: string): Promise<string | null> {
   return invoke("get_git_branch", { path })
+}
+
+export async function getGitHead(path: string): Promise<GitHeadInfo> {
+  return invoke("get_git_head", { path })
 }
 
 export async function gitInit(path: string): Promise<void> {

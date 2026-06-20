@@ -46,7 +46,7 @@ pub fn spawn_session_event_subscriber(
                     let envelope_arc = match result {
                         Ok(e) => e,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("[SessionEventSub] lagged {n} events");
+                            tracing::warn!("[SessionEventSub] lagged {n} events");
                             metrics.lagged_count.fetch_add(n, Ordering::Relaxed);
                             continue;
                         }
@@ -129,7 +129,7 @@ async fn handle_acp_envelope(
                         // instead of silently dropping the task's initial prompt.
                         if matches!(e, crate::acp::error::AcpError::TurnInProgress) {
                             session.pending_prompt = Some(prompt_text);
-                            eprintln!(
+                            tracing::warn!(
                                 "[SessionEventSub] kickoff deferred; a turn is already in \
                                  progress, will retry on TurnComplete"
                             );
@@ -140,7 +140,7 @@ async fn handle_acp_envelope(
                             );
                             let _ = manager.send_to_channel(channel_id, &msg).await;
                         } else {
-                            eprintln!("[SessionEventSub] failed to send pending prompt: {e}");
+                            tracing::error!("[SessionEventSub] failed to send pending prompt: {e}");
                             let channel_id = session.channel_id;
                             let msg = RichMessage::error(format!("Failed to send task: {e}"));
                             let _ = manager.send_to_channel(channel_id, &msg).await;
@@ -491,12 +491,12 @@ async fn handle_acp_envelope(
                             if let Some(s) = g.get_mut(connection_id) {
                                 s.pending_prompt = Some(prompt_text);
                             }
-                            eprintln!(
+                            tracing::warn!(
                                 "[SessionEventSub] deferred kickoff still blocked; will retry on \
                                  next TurnComplete"
                             );
                         } else {
-                            eprintln!("[SessionEventSub] failed to send deferred kickoff: {e}");
+                            tracing::error!("[SessionEventSub] failed to send deferred kickoff: {e}");
                             let msg = RichMessage::error(format!("Failed to send task: {e}"));
                             let _ = manager.send_to_channel(channel_id, &msg).await;
                         }

@@ -198,11 +198,11 @@ fn restore_one(src: &Path, base: &Path, target: &Path, policy: ConflictPolicy) -
     // parent is a symlink — otherwise `create_dir_all`/rename would follow it
     // and write outside the agent's tree.
     if !parent_chain_is_safe(base, parent) {
-        eprintln!("[RESTORE] external: symlinked parent under {}, skipping {}", base.display(), target.display());
+        tracing::warn!("[RESTORE] external: symlinked parent under {}, skipping {}", base.display(), target.display());
         return FileOutcome::Failed;
     }
     if let Err(e) = std::fs::create_dir_all(parent) {
-        eprintln!("[RESTORE] external: mkdir {} failed: {e}", parent.display());
+        tracing::error!("[RESTORE] external: mkdir {} failed: {e}", parent.display());
         return FileOutcome::Failed;
     }
 
@@ -215,14 +215,14 @@ fn restore_one(src: &Path, base: &Path, target: &Path, policy: ConflictPolicy) -
                 Ok(mut out) => match File::open(src).and_then(|mut i| std::io::copy(&mut i, &mut out)) {
                     Ok(_) => FileOutcome::Written,
                     Err(e) => {
-                        eprintln!("[RESTORE] external: write {} failed: {e}", target.display());
+                        tracing::error!("[RESTORE] external: write {} failed: {e}", target.display());
                         let _ = std::fs::remove_file(target);
                         FileOutcome::Failed
                     }
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => FileOutcome::Skipped,
                 Err(e) => {
-                    eprintln!("[RESTORE] external: create {} failed: {e}", target.display());
+                    tracing::error!("[RESTORE] external: create {} failed: {e}", target.display());
                     FileOutcome::Failed
                 }
             }
@@ -239,7 +239,7 @@ fn restore_one(src: &Path, base: &Path, target: &Path, policy: ConflictPolicy) -
                 Ok(())
             })();
             if let Err(e) = write {
-                eprintln!("[RESTORE] external: stage temp for {} failed: {e}", target.display());
+                tracing::error!("[RESTORE] external: stage temp for {} failed: {e}", target.display());
                 let _ = std::fs::remove_file(&tmp);
                 return FileOutcome::Failed;
             }
@@ -249,7 +249,7 @@ fn restore_one(src: &Path, base: &Path, target: &Path, policy: ConflictPolicy) -
                 let _ = std::fs::remove_file(target);
             }
             if let Err(e) = std::fs::rename(&tmp, target) {
-                eprintln!("[RESTORE] external: publish {} failed: {e}", target.display());
+                tracing::error!("[RESTORE] external: publish {} failed: {e}", target.display());
                 let _ = std::fs::remove_file(&tmp);
                 return FileOutcome::Failed;
             }

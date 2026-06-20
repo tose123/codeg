@@ -62,14 +62,14 @@ async fn rebuild_and_emit(
     let payload = match pet_list_active_sessions_core(manager, db).await {
         Ok(p) => p,
         Err(err) => {
-            eprintln!("[Pet] failed to build active-session payload: {err}");
+            tracing::error!("[Pet] failed to build active-session payload: {err}");
             return;
         }
     };
     let json = match serde_json::to_string(&payload) {
         Ok(j) => j,
         Err(err) => {
-            eprintln!("[Pet] failed to serialize active-session payload: {err}");
+            tracing::error!("[Pet] failed to serialize active-session payload: {err}");
             return;
         }
     };

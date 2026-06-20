@@ -779,7 +779,7 @@ async fn flush_watch_batch(
         match folders::get_file_tree(root_display.to_string(), Some(WORKSPACE_TREE_MAX_DEPTH)).await
         {
             Ok(tree) => refreshed_tree = Some(tree),
-            Err(err) => eprintln!(
+            Err(err) => tracing::error!(
                 "[workspace-state-watch] tree refresh failed for {}: {}",
                 root_display, err
             ),
@@ -789,7 +789,7 @@ async fn flush_watch_batch(
     if should_refresh_git {
         match collect_git_snapshot(root_display).await {
             Ok(git_snapshot) => refreshed_git = Some(git_snapshot),
-            Err(err) => eprintln!(
+            Err(err) => tracing::error!(
                 "[workspace-state-watch] git refresh failed for {}: {}",
                 root_display, err
             ),
@@ -1027,7 +1027,7 @@ pub async fn start_workspace_state_stream_core(
                     Err(TrySendError::Closed(_)) => {}
                 },
                 Err(err) => {
-                    eprintln!(
+                    tracing::error!(
                         "[workspace-state-watch] failed event for {}: {}",
                         root_display_for_error, err
                     );
@@ -1046,7 +1046,7 @@ pub async fn start_workspace_state_stream_core(
         .watch(&root_canonical, RecursiveMode::Recursive);
 
     if let Err(err) = watch_result {
-        eprintln!(
+        tracing::info!(
             "[workspace-state-watch] degraded (no realtime updates) for {}: {}",
             root_path, err
         );

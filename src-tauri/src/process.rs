@@ -148,12 +148,12 @@ pub fn ensure_node_in_path() {
 
     let home = dirs::home_dir();
     if home.is_none() {
-        eprintln!("[PATH] HOME not set; env-var-only Node.js search (no home-relative paths)");
+        tracing::info!("[PATH] HOME not set; env-var-only Node.js search (no home-relative paths)");
     }
 
     if let Some(bin_dir) = find_node_bin_dir(home.as_deref()) {
         prepend_to_path(&bin_dir);
-        eprintln!("[PATH] node not in PATH, prepended {}", bin_dir.display());
+        tracing::info!("[PATH] node not in PATH, prepended {}", bin_dir.display());
     }
 }
 

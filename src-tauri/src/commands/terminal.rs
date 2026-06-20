@@ -27,7 +27,7 @@ pub(crate) fn prepare_credential_env(
     let app_binary = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[TERM] failed to get current exe path: {}", e);
+            tracing::error!("[TERM] failed to get current exe path: {}", e);
             return None;
         }
     };
@@ -36,7 +36,7 @@ pub(crate) fn prepare_credential_env(
         match git_credential::create_credential_helper_script(app_data_dir, &app_binary) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[TERM] failed to create credential helper script: {}", e);
+                tracing::error!("[TERM] failed to create credential helper script: {}", e);
                 return None;
             }
         };

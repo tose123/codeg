@@ -49,7 +49,8 @@
       "web_service": "Web 服務",
       "model_providers": "模型供應商",
       "experts": "專家",
-      "quick_messages": "快捷訊息"
+      "quick_messages": "快捷訊息",
+      "logs": "日誌"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "將 {branchName} 合併到 {currentBranch}",
       "rebaseCurrentToBranch": "將 {currentBranch} 變基到 {branchName}",
       "noBranch": "無分支",
+      "detachedHead": "分離 HEAD（{sha}）",
       "initGitRepo": "初始化 Git 倉庫",
       "pullCode": "更新程式碼",
       "fetchRemoteBranches": "提取遠端分支",
@@ -2981,5 +2983,53 @@
     "saved": "提問設定已儲存",
     "saveFailed": "儲存提問設定失敗",
     "loadFailed": "載入失敗：{detail}"
+  },
+  "LogsSettings": {
+    "loading": "載入中…",
+    "sectionTitle": "日誌",
+    "sectionDescription": "檢視與設定應用程式診斷日誌。日誌會寫入本機檔案，並保留在記憶體中以便即時檢視。",
+    "captureTitle": "日誌等級",
+    "captureDescription": "控制記錄的詳細程度。等級越高（Debug、Trace）記錄越多，但日誌也越大。「關閉」會停止記錄日誌。",
+    "captureLabel": "擷取等級",
+    "levels": {
+      "off": "關閉",
+      "error": "錯誤",
+      "warn": "警告",
+      "info": "資訊",
+      "debug": "除錯",
+      "trace": "追蹤"
+    },
+    "viewerTitle": "最近日誌",
+    "viewerDescription": "即時檢視最近的日誌記錄。可依等級篩選或搜尋文字。",
+    "searchPlaceholder": "搜尋訊息或來源…",
+    "viewLevels": {
+      "all": "所有等級",
+      "error": "錯誤以上",
+      "warn": "警告以上",
+      "info": "資訊以上",
+      "debug": "除錯以上",
+      "trace": "追蹤以上"
+    },
+    "pause": "暫停",
+    "resume": "即時",
+    "refresh": "重新整理",
+    "clear": "清除",
+    "openFolder": "開啟資料夾",
+    "shownCount": "已顯示 {shown} / {total}",
+    "empty": "尚無日誌。",
+    "levelSaveFailed": "儲存日誌等級失敗",
+    "openFolderFailed": "開啟日誌資料夾失敗",
+    "downloadFailed": "下載日誌檔案失敗",
+    "filesTitle": "日誌檔案",
+    "filesDescription": "從磁碟下載完整日誌檔案，檢視即時緩衝區以外的歷史記錄。",
+    "filesEmpty": "尚無日誌檔案。",
+    "download": "下載",
+    "downloadTruncated": "檔案較大，已下載最新的 {size}。完整檔案請在日誌目錄中查看。",
+    "captureEnvLocked": "日誌等級由 RUST_LOG / CODEG_LOG 環境變數控制；請在該處修改以生效。",
+    "targetsTitle": "依模組覆寫",
+    "targetsDescription": "為特定模組（如 codeg_lib::acp）單獨設定級別，不影響全域級別。",
+    "targetsAdd": "新增",
+    "targetsRemove": "移除覆寫",
+    "toggleDetails": "切換詳情"
   }
 }

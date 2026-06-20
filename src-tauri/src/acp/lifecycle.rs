@@ -135,7 +135,7 @@ async fn handle_event_with_retry(
     match handle_event(db_conn, manager, envelope, broker).await {
         Ok(()) => return,
         Err(e) => {
-            eprintln!(
+            tracing::warn!(
                 "[lifecycle][WARN] handle_event failed (attempt 1, will retry) for {:?}: {e}",
                 envelope.payload
             );
@@ -149,7 +149,7 @@ async fn handle_event_with_retry(
                 let attempt_num = attempt + 2;
                 let is_last = attempt + 1 == HANDLE_EVENT_RETRY_BACKOFFS.len();
                 let level = if is_last { "ERROR" } else { "WARN" };
-                eprintln!(
+                tracing::warn!(
                     "[lifecycle][{level}] handle_event failed (attempt {attempt_num}{}) \
                      for {:?}: {e}",
                     if is_last {
@@ -296,7 +296,7 @@ async fn forward_turn_complete_to_broker(
     let row = match conversation_service::get_by_id(db_conn, conversation_id).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "[delegation][lifecycle] couldn't fetch child conversation \
                  {conversation_id} for outcome routing: {e}"
             );
@@ -308,7 +308,7 @@ async fn forward_turn_complete_to_broker(
         None => return, // not a delegation child; nothing to do.
     };
     if row.parent_tool_use_id.is_none() {
-        eprintln!(
+        tracing::info!(
             "[delegation][lifecycle] conversation {conversation_id} has \
              delegation_call_id but no parent_tool_use_id; dropping"
         );
@@ -369,7 +369,7 @@ async fn try_cache_link(
     // `ConversationLinked` is emitted by `send_prompt_linked` from the
     // connection's own send path, well before any disconnect.
     let Some((state, emitter)) = manager.get_state_and_emitter(connection_id).await else {
-        eprintln!(
+        tracing::warn!(
             "[lifecycle][WARN] ConversationLinked for unknown connection {connection_id}; \
              skipping cache (terminal-status hand-off will no-op)"
         );
@@ -669,7 +669,7 @@ async fn register_delegation_tool_call_from_event(
             .tombstone_pending_tool_call(&envelope.connection_id, tool_call_id)
             .await;
         if removed {
-            eprintln!(
+            tracing::info!(
                 "[delegation] tombstoned stale parent tool_call_id={tool_call_id} on conn={} (terminal status={status})",
                 envelope.connection_id
             );
@@ -700,7 +700,7 @@ async fn register_delegation_tool_call_from_event(
         return;
     }
     let match_key = extract_delegation_match_key(raw_input);
-    eprintln!(
+    tracing::info!(
         "[delegation] registering parent tool_call_id={tool_call_id} on conn={} (keyed={})",
         envelope.connection_id,
         match_key.is_some()
@@ -1304,7 +1304,7 @@ async fn connection_worker_loop(
                     continue;
                 }
                 if let Err(e) = handle_terminal_event(&db, &mut cache, &connection_id).await {
-                    eprintln!("[lifecycle][ERROR] terminal event for {connection_id}: {e}");
+                    tracing::error!("[lifecycle][ERROR] terminal event for {connection_id}: {e}");
                 }
                 if let Some(b) = broker.as_ref() {
                     forward_disconnect_to_broker(b.as_ref(), &connection_id, None).await;
@@ -1346,7 +1346,7 @@ async fn connection_worker_loop(
                 // so the subsequent Disconnected will short-circuit on
                 // `terminal_dispatched`.
                 if let Err(e) = handle_terminal_event(&db, &mut cache, &connection_id).await {
-                    eprintln!("[lifecycle][ERROR] terminal event for {connection_id}: {e}");
+                    tracing::error!("[lifecycle][ERROR] terminal event for {connection_id}: {e}");
                 }
                 if let Some(b) = broker.as_ref() {
                     let detail = format_terminal_error(message, code.as_deref());
@@ -1446,7 +1446,7 @@ pub fn lifecycle_subscriber_task(
                             metrics
                                 .worker_queue_full_count
                                 .fetch_add(1, Ordering::Relaxed);
-                            eprintln!(
+                            tracing::warn!(
                                 "[lifecycle][WARN] worker queue full for \
                                  {conn_id}, awaiting drain (back-pressure)"
                             );
@@ -1474,14 +1474,14 @@ pub fn lifecycle_subscriber_task(
                     // filters and only blocks on the rare relevant events,
                     // this should only fire under genuine emit-rate spikes
                     // exceeding the 4096 broadcast capacity.
-                    eprintln!(
+                    tracing::warn!(
                         "[lifecycle][WARN] internal bus lagged, dropped {skipped} events \
                          (emit rate exceeded broadcast capacity)"
                     );
                     metrics.lagged_count.fetch_add(skipped, Ordering::Relaxed);
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    eprintln!("[lifecycle] internal bus closed; dispatcher exiting");
+                    tracing::info!("[lifecycle] internal bus closed; dispatcher exiting");
                     // Drop all worker senders; workers drain & exit on their own.
                     drop(workers);
                     break;

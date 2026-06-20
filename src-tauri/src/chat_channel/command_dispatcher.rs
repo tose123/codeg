@@ -66,7 +66,7 @@ pub fn spawn_command_dispatcher(
 
         while let Some(cmd) = command_rx.recv().await {
             let text = cmd.command_text.trim();
-            eprintln!(
+            tracing::info!(
                 "[ChatChannel] received command from channel={} sender={}: {:?}",
                 cmd.channel_id, cmd.sender_id, text
             );
@@ -99,7 +99,7 @@ pub fn spawn_command_dispatcher(
             )
             .await;
 
-            eprintln!(
+            tracing::info!(
                 "[ChatChannel] dispatch result: title={:?}, body_len={}",
                 response.title,
                 response.body.len()
@@ -110,7 +110,7 @@ pub fn spawn_command_dispatcher(
             let (status, error_detail) = match &send_result {
                 Ok(_) => ("sent", None),
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "[ChatChannel] failed to send response for {:?} to channel {}: {e}",
                         text, cmd.channel_id
                     );

@@ -281,7 +281,7 @@ impl LarkBackend {
                 let ws_url = match fetch_ws_url(&client, &app_id, &app_secret).await {
                     Ok(url) => url,
                     Err(e) => {
-                        eprintln!("[Lark] failed to get WS endpoint: {e}");
+                        tracing::error!("[Lark] failed to get WS endpoint: {e}");
                         *status.lock().await = ChannelConnectionStatus::Error;
                         let delay = Duration::from_secs((2u64).pow(retry_count.min(5)));
                         retry_count += 1;
@@ -297,11 +297,11 @@ impl LarkBackend {
                     Ok((stream, _)) => {
                         *status.lock().await = ChannelConnectionStatus::Connected;
                         retry_count = 0;
-                        eprintln!("[Lark] WebSocket connected");
+                        tracing::info!("[Lark] WebSocket connected");
                         stream
                     }
                     Err(e) => {
-                        eprintln!("[Lark] WebSocket connect failed: {e}");
+                        tracing::error!("[Lark] WebSocket connect failed: {e}");
                         *status.lock().await = ChannelConnectionStatus::Error;
                         let delay = Duration::from_secs((2u64).pow(retry_count.min(5)));
                         retry_count += 1;
@@ -381,7 +381,7 @@ impl LarkBackend {
                                                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(payload_str) {
                                                             handle_lark_event(&event, channel_id, &command_tx).await;
                                                         } else {
-                                                            eprintln!("[Lark] event payload is not valid JSON");
+                                                            tracing::info!("[Lark] event payload is not valid JSON");
                                                         }
                                                     }
 
@@ -398,7 +398,7 @@ impl LarkBackend {
                                             }
                                         }
                                         Err(e) => {
-                                            eprintln!("[Lark] protobuf decode error: {e}, len={}", data.len());
+                                            tracing::error!("[Lark] protobuf decode error: {e}, len={}", data.len());
                                         }
                                     }
                                 }
@@ -406,11 +406,11 @@ impl LarkBackend {
                                     let _ = write.send(tungstenite::Message::Pong(data)).await;
                                 }
                                 Some(Ok(tungstenite::Message::Close(_))) | None => {
-                                    eprintln!("[Lark] WebSocket closed, will reconnect");
+                                    tracing::info!("[Lark] WebSocket closed, will reconnect");
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    eprintln!("[Lark] WebSocket error: {e}");
+                                    tracing::error!("[Lark] WebSocket error: {e}");
                                     break;
                                 }
                                 _ => {}
@@ -502,7 +502,7 @@ async fn handle_lark_event(
             .unwrap_or("unknown")
             .to_string();
 
-        eprintln!("[Lark] incoming message from {}: {}", sender_id, clean_text);
+        tracing::info!("[Lark] incoming message from {}: {}", sender_id, clean_text);
 
         let _ = command_tx
             .send(IncomingCommand {
@@ -580,7 +580,7 @@ impl ChatChannelBackend for LarkBackend {
         *self.status.lock().await = ChannelConnectionStatus::Connected;
 
         if let Err(e) = self.start_ws_receiver(command_tx).await {
-            eprintln!("[Lark] WebSocket receiver failed to start: {e}");
+            tracing::error!("[Lark] WebSocket receiver failed to start: {e}");
         }
 
         Ok(())

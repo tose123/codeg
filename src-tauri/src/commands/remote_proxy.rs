@@ -1655,7 +1655,7 @@ async fn run_ws_task(
         let mut socket = match connect_result {
             Ok(s) => s,
             Err(err) => {
-                eprintln!("[RemoteProxy] WS connect failed for connection {connection_id}: {err}");
+                tracing::error!("[RemoteProxy] WS connect failed for connection {connection_id}: {err}");
                 fail_count += 1;
                 if fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
                     emit_internal(&app, &entry, &event_name, WS_UNAUTHORIZED_CHANNEL).await;
@@ -1687,7 +1687,7 @@ async fn run_ws_task(
                 outbound = outbound_rx.recv() => match outbound {
                     Some(text) => {
                         if let Err(err) = socket.send(Message::Text(text.into())).await {
-                            eprintln!(
+                            tracing::error!(
                                 "[RemoteProxy] outbound send failed on connection {connection_id}: {err}"
                             );
                             break;
@@ -1703,7 +1703,7 @@ async fn run_ws_task(
                 msg = socket.next() => match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Err(err) = forward_text_message(&app, &entry, &event_name, &text).await {
-                            eprintln!(
+                            tracing::error!(
                                 "[RemoteProxy] failed to forward WS message on connection {connection_id}: {err}"
                             );
                         }
@@ -1719,7 +1719,7 @@ async fn run_ws_task(
                         break;
                     }
                     Some(Err(err)) => {
-                        eprintln!(
+                        tracing::error!(
                             "[RemoteProxy] WS read error on connection {connection_id}: {err}"
                         );
                         break;
@@ -1797,7 +1797,7 @@ async fn forward_text_message(
     let labels = snapshot_subscribers(entry).await;
     for label in labels {
         if let Err(e) = app.emit_to(EventTarget::webview(&label), event_name, &envelope) {
-            eprintln!("[RemoteProxy] emit_to {label} for {event_name} failed: {e}");
+            tracing::error!("[RemoteProxy] emit_to {label} for {event_name} failed: {e}");
         }
     }
     Ok(())
@@ -1823,7 +1823,7 @@ fn emit_internal_to_label(app: &AppHandle, label: &str, event_name: &str, channe
         "payload": Value::Null,
     });
     if let Err(e) = app.emit_to(EventTarget::webview(label), event_name, &envelope) {
-        eprintln!("[RemoteProxy] emit_to {label} for {event_name} ({channel}) failed: {e}");
+        tracing::error!("[RemoteProxy] emit_to {label} for {event_name} ({channel}) failed: {e}");
     }
 }
 

@@ -11,6 +11,7 @@ pub mod db;
 pub mod git_credential;
 pub mod git_repo;
 pub mod keyring_store;
+pub mod logging;
 pub mod models;
 mod network;
 pub mod parsers;
@@ -46,7 +47,7 @@ mod tauri_app {
         acp as acp_commands, app_update as app_update_commands, backup,
         chat_channel as chat_channel_commands, conversations, delegation as delegation_commands,
         experts as experts_commands, feedback as feedback_commands, file_io, folder_commands,
-        folders, mcp as mcp_commands,
+        folders, logging as logging_commands, mcp as mcp_commands,
         model_provider as model_provider_commands, notification, pet as pet_commands, project_boot,
         question as question_commands, quick_messages as quick_messages_commands,
         remote_proxy as remote_proxy_commands,
@@ -128,13 +129,19 @@ mod tauri_app {
 
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
+        // Install the logging subscriber first so it captures everything from
+        // here on. The file appender's logs dir is resolved from env (no DB
+        // needed); hold the guard for the whole process so buffered file lines
+        // flush on a graceful exit.
+        let _log_guard = crate::logging::init::init_desktop();
+
         // Apply the WebView2 rendering override before *any* tokio worker
         // exists or any plugin reads the env. See doc comment above.
         #[cfg(target_os = "windows")]
         apply_webview2_rendering_override();
 
         if let Err(err) = fix_path_env::fix() {
-            eprintln!("[PATH] fix_path_env failed: {err}");
+            tracing::error!("[PATH] fix_path_env failed: {err}");
         }
         process::ensure_node_in_path();
         process::ensure_user_npm_prefix_in_path();
@@ -253,7 +260,7 @@ mod tauri_app {
                 if let Some(home) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
                     let home_path = git_credential::absolutize(std::path::Path::new(&home));
                     if home_path != effective_data_dir {
-                        eprintln!(
+                        tracing::warn!(
                             "[paths][WARN] CODEG_HOME ({}) and CODEG_DATA_DIR ({}) point at different roots. \
                              Uploads/pets follow CODEG_HOME; the database follows CODEG_DATA_DIR. \
                              Unset one or align them to avoid split state.",
@@ -275,6 +282,19 @@ mod tauri_app {
                 let db = app.state::<db::AppDatabase>();
                 tauri::async_runtime::block_on(network::proxy::init_proxy_from_db(&db.conn));
 
+                // Logging phase 2/3: override the default level from the
+                // persisted `logging.level` now that the DB is open, then wire
+                // the emitter so the Logs viewer's live tail (`logs://appended`)
+                // starts flowing.
+                tauri::async_runtime::block_on(crate::logging::init::apply_persisted_level(
+                    &db.conn,
+                ));
+                if let Some(hub) = crate::logging::hub::log_hub() {
+                    hub.set_emitter(crate::web::event_bridge::EventEmitter::Tauri(
+                        app.handle().clone(),
+                    ));
+                }
+
                 // Load saved appearance settings before any window is created.
                 tauri::async_runtime::block_on(windows::load_saved_zoom(&db.conn));
                 tauri::async_runtime::block_on(windows::load_saved_appearance_mode(&db.conn));
@@ -290,7 +310,7 @@ mod tauri_app {
                 .map(|settings| settings.language)
                 .unwrap_or_default();
                 if let Err(err) = windows::install_tray_icon(app.handle(), tray_locale) {
-                    eprintln!("[Tray] failed to install tray icon: {err}");
+                    tracing::error!("[Tray] failed to install tray icon: {err}");
                 }
 
                 // Sweep stale ACP binary cache trash (rename-aside fallback
@@ -309,13 +329,13 @@ mod tauri_app {
                 tauri::async_runtime::spawn(async move {
                     let report = crate::commands::experts::ensure_central_experts_installed().await;
                     if !report.errors.is_empty() {
-                        eprintln!(
+                        tracing::error!(
                             "[Experts] install finished with {} error(s): {:?}",
                             report.errors.len(),
                             report.errors
                         );
                     } else {
-                        eprintln!(
+                        tracing::info!(
                             "[Experts] install ok: installed={} updated={} pending_review={}",
                             report.installed_count,
                             report.updated_count,
@@ -338,12 +358,12 @@ mod tauri_app {
                         )
                         .await
                         {
-                            Ok(n) if n > 0 => eprintln!(
+                            Ok(n) if n > 0 => tracing::info!(
                                 "[conversations] chat-dir GC: reclaimed {n} orphan scratch dir(s)"
                             ),
                             Ok(_) => {}
                             Err(err) => {
-                                eprintln!("[conversations] chat-dir GC failed: {err}")
+                                tracing::error!("[conversations] chat-dir GC failed: {err}")
                             }
                         }
                     });
@@ -517,7 +537,7 @@ mod tauri_app {
                     );
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = listener.run(socket_path).await {
-                            eprintln!("[delegation] listener exited: {e}");
+                            tracing::info!("[delegation] listener exited: {e}");
                         }
                     });
                     broker
@@ -557,12 +577,12 @@ mod tauri_app {
                                 config.token,
                             ))
                         {
-                            eprintln!("[WEB] auto-start failed: {err}");
+                            tracing::error!("[WEB] auto-start failed: {err}");
                             notify_web_auto_start_failed(app.handle(), port, &err);
                         }
                     }
                     Ok(_) => {}
-                    Err(err) => eprintln!("[WEB] failed to load auto-start config: {err}"),
+                    Err(err) => tracing::error!("[WEB] failed to load auto-start config: {err}"),
                 }
 
                 // Spawn the idle sweep so connections abandoned without an
@@ -761,14 +781,14 @@ mod tauri_app {
                             let disconnected = tauri::async_runtime::block_on(
                                 cm.disconnect_by_owner_window(&label),
                             );
-                            eprintln!(
+                            tracing::info!(
                                 "[ACP] main window closing disconnected_connections={}",
                                 disconnected
                             );
                         }
                         if let Some(tm) = app.try_state::<TerminalManager>() {
                             let killed = tm.kill_by_owner_window(&label);
-                            eprintln!("[TERM] main window closing killed_terminals={}", killed);
+                            tracing::info!("[TERM] main window closing killed_terminals={}", killed);
                         }
                     }
                 }
@@ -810,6 +830,7 @@ mod tauri_app {
                 folders::create_folder_directory,
                 folders::clone_repository,
                 folders::get_git_branch,
+                folders::get_git_head,
                 folders::git_init,
                 folders::git_pull,
                 folders::git_start_pull_merge,
@@ -943,6 +964,11 @@ mod tauri_app {
                 system_settings::probe_terminal_shell_path,
                 system_settings::get_system_rendering_settings,
                 system_settings::update_system_rendering_settings,
+                logging_commands::get_log_settings,
+                logging_commands::set_log_settings,
+                logging_commands::get_recent_logs,
+                logging_commands::list_log_files,
+                logging_commands::open_logs_dir,
                 delegation_commands::get_delegation_settings,
                 delegation_commands::set_delegation_settings,
                 feedback_commands::get_feedback_settings,

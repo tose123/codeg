@@ -391,7 +391,7 @@ impl TerminalManager {
                 Ok(Some(_)) => exited_terminal_ids.push(id.clone()),
                 Ok(None) => {}
                 Err(err) => {
-                    eprintln!(
+                    tracing::error!(
                         "[TERM] failed to query child status for terminal {}: {}",
                         id, err
                     );
@@ -462,7 +462,7 @@ impl TerminalManager {
         for instance in &mut instances {
             terminate_terminal(instance);
         }
-        eprintln!("[TERM] kill_all killed_terminals={}", killed);
+        tracing::info!("[TERM] kill_all killed_terminals={}", killed);
         killed
     }
 }

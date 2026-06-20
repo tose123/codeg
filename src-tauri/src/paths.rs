@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 const CODEG_DIR_NAME: &str = ".codeg";
 const PETS_DIR_NAME: &str = "pets";
 const UPLOADS_DIR_NAME: &str = "uploads";
+const LOGS_DIR_NAME: &str = "logs";
 
 /// `$CODEG_HOME` if set (and non-empty), else `~/.codeg/`.
 ///
@@ -77,6 +78,30 @@ pub fn codeg_uploads_root() -> PathBuf {
     dirs::home_dir()
         .map(|h| h.join(CODEG_DIR_NAME).join(UPLOADS_DIR_NAME))
         .unwrap_or_else(|| PathBuf::from(CODEG_DIR_NAME).join(UPLOADS_DIR_NAME))
+}
+
+/// Root directory for application diagnostic logs (rotating files written by
+/// the `tracing` file appender; see `crate::logging`).
+///
+/// Resolution mirrors [`codeg_uploads_root`] exactly so logs land on the same
+/// filesystem root as uploads/pets/the database:
+/// 1. `$CODEG_HOME/logs` (explicit override)
+/// 2. `$CODEG_DATA_DIR/logs` (server-mode data directory)
+/// 3. `~/.codeg/logs` (default for the desktop app)
+///
+/// Pure env + `dirs::home_dir()`, so it is callable at the very start of a
+/// process — before the database (or, in `codeg-server`, the tokio runtime)
+/// exists — which is exactly when the subscriber must be installed.
+pub fn codeg_logs_root() -> PathBuf {
+    if let Some(custom) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(custom).join(LOGS_DIR_NAME);
+    }
+    if let Some(data) = std::env::var_os("CODEG_DATA_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(data).join(LOGS_DIR_NAME);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(CODEG_DIR_NAME).join(LOGS_DIR_NAME))
+        .unwrap_or_else(|| PathBuf::from(CODEG_DIR_NAME).join(LOGS_DIR_NAME))
 }
 
 /// Single source of truth for "where does the database live, and where

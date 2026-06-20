@@ -56,7 +56,7 @@ fn write_pet_state(handle: &PetStateHandle, value: PetState) {
             // is now permanently stale, which would silently degrade the
             // open-pet-mid-conversation experience to "always Idle" with no
             // other symptom. Surface it so it shows up in operator logs.
-            eprintln!("[Pet] pet_state handle poisoned, dropping write: {err}");
+            tracing::info!("[Pet] pet_state handle poisoned, dropping write: {err}");
         }
     }
 }
@@ -415,7 +415,7 @@ pub fn pet_state_subscriber_task(
                             // events would leave the pet stuck on idle even
                             // if connections are still active; surface it on
                             // the metric so operators can spot it.
-                            eprintln!(
+                            tracing::warn!(
                                 "[Pet] internal bus lagged, dropped {skipped} events; resetting to idle"
                             );
                             metrics.lagged_count.fetch_add(skipped, Ordering::Relaxed);
@@ -467,7 +467,7 @@ pub fn pet_state_subscriber_task(
                             // these are fire-and-forget side-channel events
                             // (a lost git-commit ping is benign), so just
                             // log and keep going. No snapshot reset.
-                            eprintln!(
+                            tracing::warn!(
                                 "[Pet] web broadcaster lagged, dropped {skipped} non-ACP events"
                             );
                         }

@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react"
 import {
-  getGitBranch,
+  getGitHead,
   listAllConversations,
   listAllFolderDetails,
   listOpenFolderDetails,
@@ -33,6 +33,7 @@ import {
   type DbConversationSummary,
   type EventEnvelope,
   type FolderDetail,
+  type GitHeadInfo,
 } from "@/lib/types"
 
 interface AppWorkspaceContextValue {
@@ -56,6 +57,14 @@ interface AppWorkspaceContextValue {
   branches: Map<number, string | null>
   getBranch: (folderId: number) => string | null | undefined
   setBranch: (folderId: number, branch: string | null) => void
+
+  /**
+   * Full HEAD state per folder (repo-ness, detached, short sha). The poll keeps
+   * this in sync alongside `branches`; consumers that only need the display
+   * branch name keep reading `branches`. `BranchDropdown` reads this to tell a
+   * detached HEAD apart from a non-git folder (issue #279).
+   */
+  gitHeads: Map<number, GitHeadInfo | null>
 
   /**
    * Insert/replace a folder in local state, mirroring the backend's list
@@ -138,6 +147,9 @@ export function AppWorkspaceProvider({ children }: AppWorkspaceProviderProps) {
   )
 
   const [branches, setBranches] = useState<Map<number, string | null>>(
+    new Map()
+  )
+  const [gitHeads, setGitHeads] = useState<Map<number, GitHeadInfo | null>>(
     new Map()
   )
   const [activeFolderId, setActiveFolderId] = useState<number | null>(null)
@@ -489,16 +501,34 @@ export function AppWorkspaceProvider({ children }: AppWorkspaceProviderProps) {
 
     const poll = async () => {
       try {
-        const branch = await getGitBranch(folder.path)
+        const head = await getGitHead(folder.path)
         if (cancelled) return
+        // `branches` stays the display branch name (null when detached or
+        // non-repo) — unchanged contract for tab-bar/context-bar consumers.
         setBranches((prev) => {
           const existing = prev.get(folderId)
-          if (existing === branch) return prev
+          if (existing === head.branch) return prev
           const next = new Map(prev)
-          next.set(folderId, branch)
+          next.set(folderId, head.branch)
           return next
         })
-        const delay = branch ? 10_000 : 60_000
+        setGitHeads((prev) => {
+          const existing = prev.get(folderId)
+          if (
+            existing &&
+            existing.is_repo === head.is_repo &&
+            existing.branch === head.branch &&
+            existing.detached === head.detached &&
+            existing.short_sha === head.short_sha
+          ) {
+            return prev
+          }
+          const next = new Map(prev)
+          next.set(folderId, head)
+          return next
+        })
+        // Poll a repo briskly to catch branch switches; back off otherwise.
+        const delay = head.is_repo ? 10_000 : 60_000
         timer = setTimeout(poll, delay)
       } catch {
         if (!cancelled) {
@@ -533,6 +563,7 @@ export function AppWorkspaceProvider({ children }: AppWorkspaceProviderProps) {
       refreshConversations,
       updateConversationLocal,
       branches,
+      gitHeads,
       getBranch,
       setBranch,
       upsertFolder,
@@ -558,6 +589,7 @@ export function AppWorkspaceProvider({ children }: AppWorkspaceProviderProps) {
       refreshConversations,
       updateConversationLocal,
       branches,
+      gitHeads,
       getBranch,
       setBranch,
       upsertFolder,

@@ -47,6 +47,7 @@ import type {
   SaveTabsOutcome,
   GitStatusEntry,
   GitBranchList,
+  GitHeadInfo,
   GitPullResult,
   GitPushResult,
   GitPushInfo,
@@ -75,6 +76,10 @@ import type {
   SystemProxySettings,
   SystemRenderingSettings,
   SystemTerminalSettings,
+  LogSettings,
+  LogSettingsView,
+  LogRecord,
+  LogFileInfo,
   GitCredentials,
   GitDetectResult,
   PackageManagerInfo,
@@ -654,6 +659,68 @@ export async function updateSystemRenderingSettings(
   return getTransport().call("update_system_rendering_settings", { settings })
 }
 
+// --- Logging ---
+
+/** Live-tail channel: one event per appended log record. */
+export const LOG_APPENDED_EVENT = "logs://appended"
+/** Cross-window broadcast announcing a log-level change. */
+export const LOG_SETTINGS_CHANGED_EVENT = "log-settings://changed"
+
+export async function getLogSettings(): Promise<LogSettingsView> {
+  return getTransport().call("get_log_settings")
+}
+
+export async function setLogSettings(
+  settings: LogSettings
+): Promise<LogSettings> {
+  return getTransport().call("set_log_settings", { settings })
+}
+
+export async function getRecentLogs(params: {
+  limit: number
+  minLevel?: string
+  search?: string
+}): Promise<LogRecord[]> {
+  return getTransport().call("get_recent_logs", {
+    limit: params.limit,
+    minLevel: params.minLevel,
+    search: params.search,
+  })
+}
+
+export async function listLogFiles(): Promise<LogFileInfo[]> {
+  return getTransport().call("list_log_files")
+}
+
+/** Ensure the logs dir exists and return its absolute path (desktop only). */
+export async function openLogsDir(): Promise<string> {
+  return getTransport().call("open_logs_dir")
+}
+
+/** Read a single on-disk log file (web download / paginate). Returns the
+ * newest `maxBytes` when capped. */
+export async function readLogFile(
+  name: string,
+  maxBytes?: number
+): Promise<string> {
+  return getTransport().call("read_log_file", { name, maxBytes })
+}
+
+export async function subscribeLogAppended(
+  handler: (record: LogRecord) => void
+): Promise<() => void> {
+  return getTransport().subscribe<LogRecord>(LOG_APPENDED_EVENT, handler)
+}
+
+export async function subscribeLogSettingsChanged(
+  handler: (settings: LogSettings) => void
+): Promise<() => void> {
+  return getTransport().subscribe<LogSettings>(
+    LOG_SETTINGS_CHANGED_EVENT,
+    handler
+  )
+}
+
 // --- Version Control ---
 
 export async function detectGit(): Promise<GitDetectResult> {
@@ -912,6 +979,10 @@ export async function cloneRepository(
 
 export async function getGitBranch(path: string): Promise<string | null> {
   return getTransport().call("get_git_branch", { path })
+}
+
+export async function getGitHead(path: string): Promise<GitHeadInfo> {
+  return getTransport().call("get_git_head", { path })
 }
 
 export async function gitInit(path: string): Promise<void> {

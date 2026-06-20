@@ -160,7 +160,7 @@ impl ChatChannelBackend for TelegramBackend {
                         if let Ok(body) = resp.json::<serde_json::Value>().await {
                             if let Some(updates) = body.get("result").and_then(|r| r.as_array()) {
                                 if !updates.is_empty() {
-                                    eprintln!("[Telegram] got {} update(s)", updates.len());
+                                    tracing::info!("[Telegram] got {} update(s)", updates.len());
                                 }
                                 for update in updates {
                                     if let Some(uid) =
@@ -182,7 +182,7 @@ impl ChatChannelBackend for TelegramBackend {
                                         {
                                             let at_bot = format!("@{}", bot_username);
                                             if !text.to_lowercase().contains(&at_bot) {
-                                                eprintln!("[Telegram] skipped group msg without @bot: {text}");
+                                                tracing::warn!("[Telegram] skipped group msg without @bot: {text}");
                                                 continue;
                                             }
                                         }
@@ -195,7 +195,7 @@ impl ChatChannelBackend for TelegramBackend {
                                             .and_then(|i| i.as_i64())
                                             .map(|i| i.to_string())
                                             .unwrap_or_default();
-                                        eprintln!("[Telegram] dispatching: {clean_text}");
+                                        tracing::info!("[Telegram] dispatching: {clean_text}");
                                         let send_result = command_tx
                                             .send(IncomingCommand {
                                                 channel_id,
@@ -205,19 +205,19 @@ impl ChatChannelBackend for TelegramBackend {
                                             })
                                             .await;
                                         if let Err(e) = send_result {
-                                            eprintln!("[Telegram] command_tx.send failed: {e}");
+                                            tracing::error!("[Telegram] command_tx.send failed: {e}");
                                         }
                                     } else {
-                                        eprintln!("[Telegram] update without /message/text");
+                                        tracing::info!("[Telegram] update without /message/text");
                                     }
                                 }
                             }
                         } else {
-                            eprintln!("[Telegram] failed to parse response body");
+                            tracing::error!("[Telegram] failed to parse response body");
                         }
                     }
                     Err(e) => {
-                        eprintln!("[Telegram] polling error: {e}");
+                        tracing::error!("[Telegram] polling error: {e}");
                         *status.lock().await = ChannelConnectionStatus::Error;
                         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     }
@@ -256,7 +256,7 @@ impl ChatChannelBackend for TelegramBackend {
             Ok(id) => Ok(id),
             Err(e) => {
                 // MarkdownV2 failed — fall back to plain text
-                eprintln!("[Telegram] MarkdownV2 send failed: {e}, retrying as plain text");
+                tracing::warn!("[Telegram] MarkdownV2 send failed: {e}, retrying as plain text");
                 let plain_text = message.to_plain_text();
                 self.send_text(&plain_text, None).await
             }

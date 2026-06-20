@@ -49,7 +49,8 @@
       "web_service": "Serviço Web",
       "model_providers": "Provedores de Modelos",
       "experts": "Especialistas",
-      "quick_messages": "Mensagens rápidas"
+      "quick_messages": "Mensagens rápidas",
+      "logs": "Registros"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "Mesclar {branchName} em {currentBranch}",
       "rebaseCurrentToBranch": "Rebase de {currentBranch} sobre {branchName}",
       "noBranch": "Sem ramo",
+      "detachedHead": "HEAD desanexado em {sha}",
       "initGitRepo": "Inicializar repositório Git",
       "pullCode": "Fazer pull do código",
       "fetchRemoteBranches": "Buscar branches remotas",
@@ -2981,5 +2983,53 @@
     "saved": "Configurações de pergunta salvas",
     "saveFailed": "Falha ao salvar as configurações de pergunta",
     "loadFailed": "Falha ao carregar: {detail}"
+  },
+  "LogsSettings": {
+    "loading": "Carregando…",
+    "sectionTitle": "Registros",
+    "sectionDescription": "Visualize e configure os registros de diagnóstico do aplicativo. Os registros são gravados em arquivos locais e mantidos na memória para visualização ao vivo.",
+    "captureTitle": "Nível de registro",
+    "captureDescription": "Controla quanto detalhe é capturado. Níveis mais altos (Debug, Trace) registram mais, mas geram registros maiores. «Desligado» desativa o registro.",
+    "captureLabel": "Nível de captura",
+    "levels": {
+      "off": "Desligado",
+      "error": "Erro",
+      "warn": "Aviso",
+      "info": "Informação",
+      "debug": "Depuração",
+      "trace": "Rastreamento"
+    },
+    "viewerTitle": "Registros recentes",
+    "viewerDescription": "Visualização ao vivo dos registros recentes. Filtre por nível ou pesquise texto.",
+    "searchPlaceholder": "Pesquisar mensagem ou origem…",
+    "viewLevels": {
+      "all": "Todos os níveis",
+      "error": "Erro e acima",
+      "warn": "Aviso e acima",
+      "info": "Informação e acima",
+      "debug": "Depuração e acima",
+      "trace": "Rastreamento e acima"
+    },
+    "pause": "Pausar",
+    "resume": "Ao vivo",
+    "refresh": "Atualizar",
+    "clear": "Limpar",
+    "openFolder": "Abrir pasta",
+    "shownCount": "{shown} / {total} exibidos",
+    "empty": "Nenhum registro para exibir.",
+    "levelSaveFailed": "Falha ao salvar o nível de registro",
+    "openFolderFailed": "Falha ao abrir a pasta de registros",
+    "downloadFailed": "Falha ao baixar o arquivo de registro",
+    "filesTitle": "Arquivos de registro",
+    "filesDescription": "Baixe arquivos de registro completos do disco para o histórico além do buffer ao vivo.",
+    "filesEmpty": "Ainda não há arquivos de registro.",
+    "download": "Baixar",
+    "downloadTruncated": "O arquivo é grande; foram baixados os {size} mais recentes. O arquivo completo está no diretório de logs.",
+    "captureEnvLocked": "O nível de registro é controlado pela variável de ambiente RUST_LOG / CODEG_LOG; altere-a lá para ter efeito.",
+    "targetsTitle": "Substituições por módulo",
+    "targetsDescription": "Defina um nível diferente para módulos específicos (ex.: codeg_lib::acp) sem alterar o nível global.",
+    "targetsAdd": "Adicionar",
+    "targetsRemove": "Remover substituição",
+    "toggleDetails": "Alternar detalhes"
   }
 }

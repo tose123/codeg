@@ -185,7 +185,7 @@ fn list_conversations_sync(
                 }
             }
             Err(e) => {
-                eprintln!("Error listing {} conversations: {}", at, e);
+                tracing::error!("Error listing {} conversations: {}", at, e);
             }
         }
     }
@@ -787,7 +787,7 @@ pub async fn get_folder_conversation_with_live_core(
                         emit_conversation_upsert(emitter, conn, conversation_id).await;
                     }
                     Ok(false) => {}
-                    Err(e) => eprintln!(
+                    Err(e) => tracing::error!(
                         "[conversations] auto-title refresh failed for {conversation_id}: {e}"
                     ),
                 }
@@ -855,7 +855,7 @@ pub(crate) async fn emit_conversation_upsert(
                 },
             )
         }
-        Err(e) => eprintln!(
+        Err(e) => tracing::warn!(
             "[conversations] upsert emit skipped (get_by_id {conversation_id} failed): {e}"
         ),
     }
@@ -913,7 +913,7 @@ pub(crate) async fn cleanup_tabs_for_deleted_conversation(
                 emit_tabs_changed(emitter, inv.version, tabs, "server".to_string());
             }
         }
-        Err(e) => eprintln!(
+        Err(e) => tracing::error!(
             "[conversations] tab cleanup failed (delete tabs for conversation {conversation_id}): {e}"
         ),
     }
@@ -1066,7 +1066,7 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
     let date_dirs = match std::fs::read_dir(&root) {
         Ok(rd) => rd,
         Err(err) => {
-            eprintln!(
+            tracing::error!(
                 "[conversations] chat-dir GC: read {} failed: {err}",
                 root.display()
             );
@@ -1086,7 +1086,7 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
         let uuid_dirs = match std::fs::read_dir(&date_path) {
             Ok(rd) => rd,
             Err(err) => {
-                eprintln!(
+                tracing::error!(
                     "[conversations] chat-dir GC: read {} failed: {err}",
                     date_path.display()
                 );
@@ -1120,7 +1120,7 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
             }
             match std::fs::remove_dir_all(&uuid_path) {
                 Ok(()) => removed += 1,
-                Err(err) => eprintln!(
+                Err(err) => tracing::error!(
                     "[conversations] chat-dir GC: remove {} failed: {err}",
                     uuid_path.display()
                 ),
@@ -1178,7 +1178,7 @@ pub async fn create_chat_conversation_core(
             Ok(model) => model,
             Err(create_err) => {
                 if let Err(cleanup_err) = folder_service::remove_folder(conn, &folder.path).await {
-                    eprintln!(
+                    tracing::error!(
                         "[conversations] failed to clean up orphan chat folder {} after conversation create error: {cleanup_err}",
                         folder.id
                     );
@@ -1361,20 +1361,20 @@ pub async fn cleanup_chat_folder_for_deleted_conversation(
             {
                 Ok(remaining) if remaining.is_empty() => {
                     if let Err(e) = folder_service::remove_folder(conn, &folder.path).await {
-                        eprintln!(
+                        tracing::error!(
                             "[conversations] chat folder cleanup failed (folder {folder_id}): {e}"
                         );
                     }
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!(
+                Err(e) => tracing::error!(
                     "[conversations] chat folder conversation check failed (folder {folder_id}): {e}"
                 ),
             }
         }
         Ok(_) => {}
         Err(e) => {
-            eprintln!("[conversations] chat folder lookup failed (folder {folder_id}): {e}")
+            tracing::error!("[conversations] chat folder lookup failed (folder {folder_id}): {e}")
         }
     }
 }

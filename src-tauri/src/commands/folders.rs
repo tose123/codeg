@@ -100,7 +100,7 @@ async fn prepare_remote_git_cmd_for_url(
 /// Classify a git remote command error, detecting authentication failures.
 fn classify_remote_git_error(operation: &str, stderr: &[u8]) -> AppCommandError {
     let msg = String::from_utf8_lossy(stderr).trim().to_string();
-    eprintln!("[GIT_CMD] {} failed, stderr: {}", operation, msg);
+    tracing::error!("[GIT_CMD] {} failed, stderr: {}", operation, msg);
     let lower = msg.to_lowercase();
 
     if lower.contains("authentication failed")
@@ -887,40 +887,104 @@ fn classify_git_clone_error(stderr: &str) -> AppCommandError {
     AppCommandError::external_command("Git clone failed", stderr.to_string())
 }
 
+/// The state of a working tree's `HEAD`. The legacy `get_git_branch` contract
+/// collapsed every non-branch state into `None`, so a detached HEAD looked
+/// identical to a non-git folder and the UI hid all git operations (issue
+/// #279). This distinguishes the four states the UI actually needs.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct GitHeadInfo {
+    /// Whether git recognizes this path as a work tree.
+    pub is_repo: bool,
+    /// Branch name when `HEAD` points at a branch — including an unborn branch
+    /// right after `git init`. `None` when detached or not a repo.
+    pub branch: Option<String>,
+    /// Whether `HEAD` is detached (points directly at a commit, not a branch).
+    pub detached: bool,
+    /// Short commit hash; present when detached and at least one commit exists.
+    pub short_sha: Option<String>,
+}
+
+async fn git_output(
+    path: &str,
+    args: &[&str],
+) -> Result<std::process::Output, AppCommandError> {
+    crate::process::tokio_command("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .await
+        .map_err(AppCommandError::io)
+}
+
+/// Resolve the current `HEAD` state. The common cases (on a branch / detached)
+/// cost a single git invocation; the rarer unborn-branch and non-repository
+/// cases fall through to `symbolic-ref` and `--is-inside-work-tree`.
+async fn resolve_git_head(path: &str) -> Result<GitHeadInfo, AppCommandError> {
+    // `rev-parse --abbrev-ref HEAD` prints the branch name, the literal "HEAD"
+    // when detached, and fails on an unborn branch or a non-repository.
+    let head = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    if head.status.success() {
+        let name = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        if !name.is_empty() && name != "HEAD" {
+            return Ok(GitHeadInfo {
+                is_repo: true,
+                branch: Some(name),
+                detached: false,
+                short_sha: None,
+            });
+        }
+        // Detached HEAD — surface the short commit so the UI can label it.
+        let short_sha = git_output(path, &["rev-parse", "--short", "HEAD"])
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        return Ok(GitHeadInfo {
+            is_repo: true,
+            branch: None,
+            detached: true,
+            short_sha,
+        });
+    }
+
+    // Unborn branch (after `git init`, before the first commit): `symbolic-ref`
+    // still resolves the branch name where `rev-parse` cannot.
+    let sym = git_output(path, &["symbolic-ref", "--short", "HEAD"]).await?;
+    if sym.status.success() {
+        let name = String::from_utf8_lossy(&sym.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Ok(GitHeadInfo {
+                is_repo: true,
+                branch: Some(name),
+                detached: false,
+                short_sha: None,
+            });
+        }
+    }
+
+    // Neither resolved a branch — authoritatively decide repo-ness. An unusual
+    // work tree with no resolvable branch still counts as a repo so the UI
+    // offers git operations rather than "initialize".
+    let inside = git_output(path, &["rev-parse", "--is-inside-work-tree"]).await?;
+    let is_repo =
+        inside.status.success() && String::from_utf8_lossy(&inside.stdout).trim() == "true";
+    Ok(GitHeadInfo {
+        is_repo,
+        branch: None,
+        detached: false,
+        short_sha: None,
+    })
+}
+
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn get_git_head(path: String) -> Result<GitHeadInfo, AppCommandError> {
+    resolve_git_head(&path).await
+}
+
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn get_git_branch(path: String) -> Result<Option<String>, AppCommandError> {
-    let output = crate::process::tokio_command("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&path)
-        .output()
-        .await
-        .map_err(AppCommandError::io)?;
-
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !branch.is_empty() && branch != "HEAD" {
-            return Ok(Some(branch));
-        }
-    }
-
-    // Fallback: symbolic-ref works on unborn branches (after git init, before first commit)
-    let sym_output = crate::process::tokio_command("git")
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .current_dir(&path)
-        .output()
-        .await
-        .map_err(AppCommandError::io)?;
-
-    if sym_output.status.success() {
-        let branch = String::from_utf8_lossy(&sym_output.stdout)
-            .trim()
-            .to_string();
-        if !branch.is_empty() {
-            return Ok(Some(branch));
-        }
-    }
-
-    Ok(None)
+    Ok(resolve_git_head(&path).await?.branch)
 }
 
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
@@ -4229,6 +4293,121 @@ mod tests {
     use super::*;
     use crate::db::test_helpers::fresh_in_memory_db;
     use crate::models::agent::AgentType;
+
+    /// Run a git command in `dir`, supplying identity via env so the test does
+    /// not depend on (or mutate) the developer's global git config.
+    fn git_run(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_git_head_reports_branch_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_run(dir.path(), &["init", "-q"]);
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c1"]);
+        git_run(dir.path(), &["checkout", "-q", "-b", "feature"]);
+
+        let info = resolve_git_head(dir.path().to_str().unwrap())
+            .await
+            .expect("resolve");
+        assert_eq!(
+            info,
+            GitHeadInfo {
+                is_repo: true,
+                branch: Some("feature".into()),
+                detached: false,
+                short_sha: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_git_head_detects_detached_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_run(dir.path(), &["init", "-q"]);
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c1"]);
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c2"]);
+        git_run(dir.path(), &["checkout", "-q", "HEAD~1"]);
+
+        let info = resolve_git_head(dir.path().to_str().unwrap())
+            .await
+            .expect("resolve");
+        assert!(info.is_repo, "detached HEAD is still a repo");
+        assert!(info.detached, "must be flagged detached");
+        assert_eq!(info.branch, None, "no branch when detached");
+        assert!(
+            info.short_sha.as_deref().is_some_and(|s| !s.is_empty()),
+            "detached HEAD should expose a short sha, got {:?}",
+            info.short_sha
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_git_head_handles_non_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = resolve_git_head(dir.path().to_str().unwrap())
+            .await
+            .expect("resolve");
+        assert_eq!(
+            info,
+            GitHeadInfo {
+                is_repo: false,
+                branch: None,
+                detached: false,
+                short_sha: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_git_head_handles_unborn_branch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_run(dir.path(), &["init", "-q"]);
+
+        let info = resolve_git_head(dir.path().to_str().unwrap())
+            .await
+            .expect("resolve");
+        assert!(info.is_repo, "freshly-initialized repo is a repo");
+        assert!(!info.detached, "unborn branch is not detached");
+        assert!(
+            info.branch.is_some(),
+            "unborn branch should resolve a name, got {:?}",
+            info.branch
+        );
+    }
+
+    #[tokio::test]
+    async fn get_git_branch_stays_none_on_detached_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git_run(dir.path(), &["init", "-q"]);
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c1"]);
+        git_run(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c2"]);
+        git_run(dir.path(), &["checkout", "-q", "HEAD~1"]);
+
+        // The legacy `Option<String>` contract intentionally reports no branch
+        // for a detached HEAD; git-log default selection and compare rely on it.
+        assert_eq!(
+            get_git_branch(dir.path().to_str().unwrap().to_string())
+                .await
+                .expect("branch"),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn add_folder_to_history_core_derives_name_from_path() {

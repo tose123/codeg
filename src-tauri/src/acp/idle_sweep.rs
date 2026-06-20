@@ -58,7 +58,7 @@ pub async fn idle_sweep_task(
         ticker.tick().await;
         let n = manager.sweep_idle(idle_timeout).await;
         if n > 0 {
-            eprintln!("[ACP] idle sweep disconnected {n} connection(s)");
+            tracing::info!("[ACP] idle sweep disconnected {n} connection(s)");
         }
     }
 }

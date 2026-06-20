@@ -164,7 +164,7 @@ pub fn run_credential_helper() {
     {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("[codeg credential-helper] tokio runtime build failed: {e}");
+            tracing::error!("[codeg credential-helper] tokio runtime build failed: {e}");
             return;
         }
     };
@@ -178,7 +178,7 @@ pub fn run_credential_helper() {
             // Silent — git falls through to the next helper. See block
             // comment above for why we don't log here.
         }
-        Err(e) => eprintln!("[codeg credential-helper] lookup failed: {e}"),
+        Err(e) => tracing::error!("[codeg credential-helper] lookup failed: {e}"),
     }
 }
 
@@ -504,7 +504,7 @@ pub async fn try_inject_for_repo_remote(
     let settings = match load_github_accounts(conn).await {
         Some(s) if !s.accounts.is_empty() => s,
         _ => {
-            eprintln!("[GIT_CRED] no accounts configured");
+            tracing::info!("[GIT_CRED] no accounts configured");
             return false;
         }
     };
@@ -513,7 +513,7 @@ pub async fn try_inject_for_repo_remote(
     let remote_url = match get_remote_url_by_name(repo_path, target_remote).await {
         Some(url) => url,
         None => {
-            eprintln!(
+            tracing::info!(
                 "[GIT_CRED] no remote URL found for {} (remote: {})",
                 repo_path, target_remote
             );
@@ -523,14 +523,14 @@ pub async fn try_inject_for_repo_remote(
 
     // Only inject for HTTPS URLs (SSH uses keys, not tokens)
     if !remote_url.starts_with("https://") && !remote_url.starts_with("http://") {
-        eprintln!("[GIT_CRED] skipping non-HTTPS URL: {}", remote_url);
+        tracing::warn!("[GIT_CRED] skipping non-HTTPS URL: {}", remote_url);
         return false;
     }
 
     let account = match find_matching_account(&settings.accounts, &remote_url) {
         Some(a) => a,
         None => {
-            eprintln!(
+            tracing::info!(
                 "[GIT_CRED] no matching account for remote {}. Available hosts: {}",
                 remote_url,
                 settings
@@ -547,7 +547,7 @@ pub async fn try_inject_for_repo_remote(
     let askpass = match ensure_askpass_script(app_data_dir) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[GIT_CRED] failed to create askpass script: {}", e);
+            tracing::error!("[GIT_CRED] failed to create askpass script: {}", e);
             return false;
         }
     };
@@ -555,12 +555,12 @@ pub async fn try_inject_for_repo_remote(
     let token = match crate::keyring_store::get_token(&account.id) {
         Some(t) => t,
         None => {
-            eprintln!("[GIT_CRED] no token in keyring for account {}", account.id);
+            tracing::info!("[GIT_CRED] no token in keyring for account {}", account.id);
             return false;
         }
     };
 
-    eprintln!(
+    tracing::info!(
         "[GIT_CRED] injecting credentials for {} (user: {})",
         remote_url, account.username
     );
@@ -593,7 +593,7 @@ pub async fn try_inject_for_url(
     let token = match crate::keyring_store::get_token(&account.id) {
         Some(t) => t,
         None => {
-            eprintln!("[GIT_CRED] no token in keyring for account {}", account.id);
+            tracing::info!("[GIT_CRED] no token in keyring for account {}", account.id);
             return false;
         }
     };
@@ -601,7 +601,7 @@ pub async fn try_inject_for_url(
     let askpass = match ensure_askpass_script(app_data_dir) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("[GIT_CRED] failed to create askpass script: {}", e);
+            tracing::error!("[GIT_CRED] failed to create askpass script: {}", e);
             return false;
         }
     };

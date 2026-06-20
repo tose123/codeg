@@ -109,7 +109,7 @@ pub async fn weixin_get_qrcode() -> Result<WeixinQrcodeInfo, ChatChannelError> {
         match fetch_image_as_data_uri(&client, &raw_img).await {
             Ok(data_uri) => data_uri,
             Err(_) => {
-                eprintln!("[Weixin] URL is an SPA page, generating QR code from URL");
+                tracing::info!("[Weixin] URL is an SPA page, generating QR code from URL");
                 generate_qrcode_data_uri(&raw_img)?
             }
         }
@@ -351,7 +351,7 @@ impl WeixinBackend {
                         .get("errmsg")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
-                    eprintln!("[Weixin] sendmessage ret={ret}, errmsg={errmsg}");
+                    tracing::info!("[Weixin] sendmessage ret={ret}, errmsg={errmsg}");
 
                     if ret == -2 {
                         // Context token expired — mark stale and buffer
@@ -362,7 +362,7 @@ impl WeixinBackend {
                         if buf.len() < MAX_PENDING_MESSAGES {
                             buf.push(req.text.to_string());
                         }
-                        eprintln!("[Weixin] context_token expired (ret=-2), buffered message");
+                        tracing::info!("[Weixin] context_token expired (ret=-2), buffered message");
                         return Ok(false);
                     }
 
@@ -393,7 +393,7 @@ impl WeixinBackend {
 
         // If context is expired, buffer the message for resend on next refresh
         if expired {
-            eprintln!(
+            tracing::info!(
                 "[Weixin] context expired, buffering message (len={})",
                 text.len()
             );
@@ -401,12 +401,12 @@ impl WeixinBackend {
             if buf.len() < MAX_PENDING_MESSAGES {
                 buf.push(text.to_string());
             } else {
-                eprintln!("[Weixin] pending buffer full, dropping message");
+                tracing::info!("[Weixin] pending buffer full, dropping message");
             }
             return Ok(SentMessageId(String::new()));
         }
 
-        eprintln!(
+        tracing::info!(
             "[Weixin] sendmessage to={to_user_id}, context_token_len={}, text_len={}",
             context_token.len(),
             text.len()
@@ -441,7 +441,7 @@ impl ChatChannelBackend for WeixinBackend {
     ) -> Result<(), ChatChannelError> {
         *self.status.lock().await = ChannelConnectionStatus::Connecting;
 
-        eprintln!(
+        tracing::info!(
             "[Weixin] start: base_url={}, token_len={}",
             self.base_url,
             self.bot_token.len()
@@ -453,7 +453,7 @@ impl ChatChannelBackend for WeixinBackend {
             "base_info": { "channel_version": ILINK_CHANNEL_VERSION }
         });
         let url = format!("{}/ilink/bot/getupdates", self.base_url);
-        eprintln!("[Weixin] verify POST {url}");
+        tracing::info!("[Weixin] verify POST {url}");
 
         let resp = self
             .client
@@ -470,7 +470,7 @@ impl ChatChannelBackend for WeixinBackend {
             .await
             .map_err(|e| ChatChannelError::ConnectionFailed(e.to_string()))?;
 
-        eprintln!("[Weixin] verify response status={status_code}, body={resp_text}");
+        tracing::info!("[Weixin] verify response status={status_code}, body={resp_text}");
 
         let verify_result: serde_json::Value = serde_json::from_str(&resp_text)
             .map_err(|e| ChatChannelError::ConnectionFailed(format!("JSON parse failed: {e}")))?;
@@ -508,7 +508,7 @@ impl ChatChannelBackend for WeixinBackend {
 
         if let Some(r) = ret {
             if r != 0 {
-                eprintln!(
+                tracing::info!(
                     "[Weixin] verify returned ret={r}, but got cursor len={}",
                     initial_cursor.len()
                 );
@@ -579,11 +579,11 @@ impl ChatChannelBackend for WeixinBackend {
                             // If ret is explicitly non-zero (not just missing), log it
                             if let Some(r) = ret {
                                 if r != 0 {
-                                    eprintln!("[Weixin] getupdates ret={r}");
+                                    tracing::info!("[Weixin] getupdates ret={r}");
                                 }
                                 // Session expired — pause and wait for re-auth
                                 if r == -14 {
-                                    eprintln!("[Weixin] session expired (ret=-14), pausing 30s");
+                                    tracing::info!("[Weixin] session expired (ret=-14), pausing 30s");
                                     *status.lock().await = ChannelConnectionStatus::Error;
                                     tokio::time::sleep(Duration::from_secs(30)).await;
                                     continue;
@@ -593,7 +593,7 @@ impl ChatChannelBackend for WeixinBackend {
                             // Process messages
                             if let Some(msgs) = body.get("msgs").and_then(|v| v.as_array()) {
                                 if !msgs.is_empty() {
-                                    eprintln!("[Weixin] got {} message(s)", msgs.len());
+                                    tracing::info!("[Weixin] got {} message(s)", msgs.len());
                                 }
                                 for msg in msgs {
                                     // Only handle user messages (message_type=1),
@@ -626,7 +626,7 @@ impl ChatChannelBackend for WeixinBackend {
                                     let text = match text {
                                         Some(t) if !t.is_empty() => t,
                                         _ => {
-                                            eprintln!("[Weixin] skipped non-text message");
+                                            tracing::warn!("[Weixin] skipped non-text message");
                                             continue;
                                         }
                                     };
@@ -660,7 +660,7 @@ impl ChatChannelBackend for WeixinBackend {
                                             let buffered: Vec<String> =
                                                 pending_messages.lock().await.drain(..).collect();
                                             if !buffered.is_empty() {
-                                                eprintln!(
+                                                tracing::info!(
                                                     "[Weixin] context refreshed, resending {} buffered message(s)",
                                                     buffered.len()
                                                 );
@@ -678,7 +678,7 @@ impl ChatChannelBackend for WeixinBackend {
                                                     })
                                                     .await;
                                                     if let Err(e) = ok {
-                                                        eprintln!("[Weixin] resend error: {e}");
+                                                        tracing::error!("[Weixin] resend error: {e}");
                                                         // Re-buffer remaining on hard error
                                                         let mut buf = pending_messages.lock().await;
                                                         if buf.len() < MAX_PENDING_MESSAGES {
@@ -692,7 +692,7 @@ impl ChatChannelBackend for WeixinBackend {
                                         }
                                     }
 
-                                    eprintln!("[Weixin] dispatching: {text}");
+                                    tracing::info!("[Weixin] dispatching: {text}");
                                     let send_result = command_tx
                                         .send(IncomingCommand {
                                             channel_id,
@@ -702,17 +702,17 @@ impl ChatChannelBackend for WeixinBackend {
                                         })
                                         .await;
                                     if let Err(e) = send_result {
-                                        eprintln!("[Weixin] command_tx.send failed: {e}");
+                                        tracing::error!("[Weixin] command_tx.send failed: {e}");
                                     }
                                 }
                             }
                         } else {
-                            eprintln!("[Weixin] failed to parse response body");
+                            tracing::error!("[Weixin] failed to parse response body");
                         }
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        eprintln!("[Weixin] polling error ({consecutive_errors}): {e}");
+                        tracing::error!("[Weixin] polling error ({consecutive_errors}): {e}");
                         *status.lock().await = ChannelConnectionStatus::Error;
                         // Exponential backoff: 5s, 10s, 20s, capped at 30s
                         let delay =
@@ -773,7 +773,7 @@ impl ChatChannelBackend for WeixinBackend {
             .await
             .map_err(|e| ChatChannelError::ConnectionFailed(e.to_string()))?;
 
-        eprintln!("[Weixin] test_connection: status={status_code}, body={resp_text}");
+        tracing::info!("[Weixin] test_connection: status={status_code}, body={resp_text}");
 
         let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
             .map_err(|e| ChatChannelError::ConnectionFailed(format!("Not valid JSON: {e}")))?;

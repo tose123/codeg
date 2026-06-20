@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use codeg_lib::app_state::AppState;
@@ -8,7 +9,7 @@ use codeg_lib::web::{
     WebServerState,
 };
 
-fn main() {
+fn main() -> ExitCode {
     // Capture our own executable path before anything can rename it (an
     // in-place upgrade swaps the binary mid-run; `current_exe()` would then
     // resolve to a `" (deleted)"` path on Linux). Cheap, single-shot.
@@ -18,13 +19,16 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
-        return;
+        return ExitCode::SUCCESS;
     }
 
     // `--supervise`: run as the process supervisor that owns the worker's
     // lifecycle (PID 1 in Docker). It spawns `codeg-server` without this
     // flag and relaunches it after an in-place upgrade. Never returns.
     if args.iter().any(|a| a == "--supervise") {
+        // This mode never reaches init_server(); install a stderr-only
+        // subscriber so the supervisor's diagnostics still reach Docker logs.
+        let _log_guard = codeg_lib::logging::init::init_stderr_only();
         codeg_lib::supervise::run();
     }
 
@@ -34,8 +38,12 @@ fn main() {
     // early-exit in `main.rs` so server deployments don't accidentally try
     // to start a second server instance per `git credential` invocation.
     if args.iter().any(|a| a == "--credential-helper") {
+        // Subprocess mode, before init_server(): stderr-only subscriber so
+        // helper diagnostics aren't dropped, while stdout stays the git
+        // credential protocol channel.
+        let _log_guard = codeg_lib::logging::init::init_stderr_only();
         codeg_lib::git_credential::run_credential_helper();
-        return;
+        return ExitCode::SUCCESS;
     }
 
     // PATH initialisation MUST happen before the tokio runtime is created.
@@ -76,6 +84,13 @@ fn main() {
     let resolved_data_dir = codeg_lib::git_credential::absolutize(&resolved_data_dir);
     std::env::set_var("CODEG_DATA_DIR", &resolved_data_dir);
 
+    // Install the logging subscriber now that CODEG_DATA_DIR is pinned (the logs
+    // dir resolves from it). Doing it here — before the first server diagnostic
+    // below — captures even the CODEG_HOME warning and the FATAL upload-quota
+    // abort. Hold the guard for the whole process so buffered file lines flush
+    // on a graceful exit.
+    let _log_guard = codeg_lib::logging::init::init_server();
+
     // `CODEG_HOME` overrides `CODEG_DATA_DIR` for uploads/pets inside
     // `paths::codeg_*_root` (legacy `~/.codeg/` layout). If both are set
     // and resolve to different roots, the database and uploads land on
@@ -85,7 +100,7 @@ fn main() {
     if let Some(home) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
         let home_path = codeg_lib::git_credential::absolutize(std::path::Path::new(&home));
         if home_path != resolved_data_dir {
-            eprintln!(
+            tracing::warn!(
                 "[paths][WARN] CODEG_HOME ({}) and CODEG_DATA_DIR ({}) point at different roots. \
                  Uploads/pets follow CODEG_HOME; the database follows CODEG_DATA_DIR. \
                  Unset one or align them to avoid split state.",
@@ -101,18 +116,22 @@ fn main() {
     // the operator sees the FATAL line and a clean exit code 2.
     codeg_lib::web::handlers::files::log_upload_quota_config_at_startup();
     if let Err(err) = codeg_lib::web::handlers::files::validate_upload_quota_config() {
-        eprintln!("[uploads][FATAL] {err}; aborting startup.");
-        std::process::exit(2);
+        tracing::error!("[uploads][FATAL] {err}; aborting startup.");
+        // Return (don't process::exit) so `_log_guard` drops on the way out and
+        // flushes the non-blocking file appender before the process ends.
+        return ExitCode::from(2);
     }
 
+    // `main` returns the worker's exit code so `_log_guard` drops here — after
+    // the runtime finishes — flushing any buffered file logs on a clean exit.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(async_main());
+        .block_on(async_main())
 }
 
-async fn async_main() {
+async fn async_main() -> ExitCode {
     // Sweep stale ACP binary cache trash (rename-aside fallback artifacts).
     // Detached OS thread: cannot block startup, panics are caught and dropped,
     // errors are silenced, no subprocesses spawned.
@@ -165,14 +184,19 @@ async fn async_main() {
         let _ = codeg_lib::update::install::take_upgrade_staged();
     }
 
-    eprintln!("[SERVER] codeg-server v{}", app_version);
-    eprintln!("[SERVER] Data directory: {}", data_dir.display());
-    eprintln!("[SERVER] Static directory: {}", static_dir.display());
+    tracing::info!("[SERVER] codeg-server v{}", app_version);
+    tracing::info!("[SERVER] Data directory: {}", data_dir.display());
+    tracing::info!("[SERVER] Static directory: {}", static_dir.display());
 
     // Initialize database
     let db = codeg_lib::db::init_database(&data_dir, app_version)
         .await
         .expect("Failed to initialize database");
+
+    // Logging phase 2: override the default level from the persisted
+    // `logging.level` now that the DB is open. Phase 3 (wiring the emitter)
+    // happens once AppState exists, below.
+    codeg_lib::logging::init::apply_persisted_level(&db.conn).await;
 
     // Resolve the access token *after* the DB is up so a generated token can be
     // persisted and reused across restarts (a self-update restart must not
@@ -185,7 +209,13 @@ async fn async_main() {
     )
     .await;
     if token_generated {
-        eprintln!("[SERVER] No CODEG_TOKEN set; generated an access token (persisted): {token}");
+        // Operator-facing startup notice on stderr ONLY: the access token is a
+        // bearer credential and must never enter the durable log files or the
+        // in-app log viewer. `eprintln!` bypasses the tracing sinks (file +
+        // ring buffer); only the local terminal / Docker stderr sees it.
+        eprintln!(
+            "[SERVER] No CODEG_TOKEN set; generated an access token (persisted): {token}"
+        );
         eprintln!("[SERVER] Pin your own by setting the CODEG_TOKEN environment variable.");
     }
 
@@ -208,10 +238,10 @@ async fn async_main() {
             .await
             {
                 Ok(n) if n > 0 => {
-                    eprintln!("[SERVER] chat-dir GC: reclaimed {n} orphan scratch dir(s)")
+                    tracing::info!("[SERVER] chat-dir GC: reclaimed {n} orphan scratch dir(s)")
                 }
                 Ok(_) => {}
-                Err(err) => eprintln!("[SERVER] chat-dir GC failed: {err}"),
+                Err(err) => tracing::error!("[SERVER] chat-dir GC failed: {err}"),
             }
         });
     }
@@ -262,6 +292,12 @@ async fn async_main() {
         system_op_lock: codeg_lib::app_state::default_system_op_lock(),
         update_state: codeg_lib::app_state::default_update_state(),
     });
+
+    // Logging phase 3: wire the emitter so the Logs viewer's live tail
+    // (`logs://appended`) reaches WS clients.
+    if let Some(hub) = codeg_lib::logging::hub::log_hub() {
+        hub.set_emitter(state.emitter.clone());
+    }
 
     // Apply persisted delegation settings (depth, enabled) before
     // the listener starts accepting so even the first companion request
@@ -315,7 +351,7 @@ async fn async_main() {
         let socket = delegation_socket_path.clone();
         tokio::spawn(async move {
             if let Err(e) = listener.run(socket).await {
-                eprintln!("[delegation] listener exited: {e}");
+                tracing::info!("[delegation] listener exited: {e}");
             }
         });
     }
@@ -326,13 +362,13 @@ async fn async_main() {
     tokio::spawn(async move {
         let report = codeg_lib::commands::experts::ensure_central_experts_installed().await;
         if !report.errors.is_empty() {
-            eprintln!(
+            tracing::error!(
                 "[Experts] install finished with {} error(s): {:?}",
                 report.errors.len(),
                 report.errors
             );
         } else {
-            eprintln!(
+            tracing::info!(
                 "[Experts] install ok: installed={} updated={} pending_review={}",
                 report.installed_count,
                 report.updated_count,
@@ -405,15 +441,16 @@ async fn async_main() {
 
     // Bind
     let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("[SERVER] Failed to bind {}: {}", addr, e);
-            std::process::exit(1);
-        });
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            tracing::error!("[SERVER] Failed to bind {}: {}", addr, e);
+            return ExitCode::from(1);
+        }
+    };
 
     if let Err(e) = codeg_lib::web::socket_inherit::mark_listener_non_inheritable(&listener) {
-        eprintln!(
+        tracing::warn!(
             "[SERVER][WARN] failed to mark listener non-inheritable: {}",
             e
         );
@@ -433,17 +470,20 @@ async fn async_main() {
         .mark_externally_running(advertised_host.clone(), actual_port, token.clone());
     let addresses = addresses_for_bind(&advertised_host, actual_port);
 
+    // Token on stderr ONLY (bearer credential — keep it out of the log files
+    // and the in-app viewer); the bind addresses are safe to log normally.
     eprintln!("[SERVER] Token: {}", token);
-    eprintln!("[SERVER] Listening on:");
+    tracing::info!("[SERVER] Listening on:");
     for addr in &addresses {
-        eprintln!("  {}", addr);
+        tracing::info!("  {}", addr);
     }
 
     // Start serving
     if let Err(e) = axum::serve(listener, router).await {
-        eprintln!("[SERVER] Server error: {}", e);
-        std::process::exit(1);
+        tracing::error!("[SERVER] Server error: {}", e);
+        return ExitCode::from(1);
     }
+    ExitCode::SUCCESS
 }
 
 fn default_data_dir() -> PathBuf {

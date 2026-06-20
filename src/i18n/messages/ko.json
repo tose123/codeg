@@ -49,7 +49,8 @@
       "web_service": "웹 서비스",
       "model_providers": "모델 제공업체",
       "experts": "전문가",
-      "quick_messages": "빠른 메시지"
+      "quick_messages": "빠른 메시지",
+      "logs": "로그"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "{branchName}을(를) {currentBranch}에 병합",
       "rebaseCurrentToBranch": "{currentBranch}를 {branchName}로 리베이스",
       "noBranch": "브랜치 없음",
+      "detachedHead": "분리된 HEAD ({sha})",
       "initGitRepo": "Git 저장소 초기화",
       "pullCode": "코드 pull",
       "fetchRemoteBranches": "원격 브랜치 가져오기",
@@ -2981,5 +2983,53 @@
     "saved": "질문 설정이 저장되었습니다",
     "saveFailed": "질문 설정 저장 실패",
     "loadFailed": "불러오기 실패: {detail}"
+  },
+  "LogsSettings": {
+    "loading": "불러오는 중…",
+    "sectionTitle": "로그",
+    "sectionDescription": "애플리케이션 진단 로그를 보고 구성합니다. 로그는 로컬 파일에 기록되며 실시간 보기를 위해 메모리에도 보관됩니다.",
+    "captureTitle": "로그 수준",
+    "captureDescription": "기록되는 상세 수준을 제어합니다. 수준이 높을수록(Debug, Trace) 더 많이 기록되지만 로그도 커집니다. '끔'은 로깅을 비활성화합니다.",
+    "captureLabel": "수집 수준",
+    "levels": {
+      "off": "끔",
+      "error": "오류",
+      "warn": "경고",
+      "info": "정보",
+      "debug": "디버그",
+      "trace": "추적"
+    },
+    "viewerTitle": "최근 로그",
+    "viewerDescription": "최근 로그 레코드를 실시간으로 봅니다. 수준으로 필터링하거나 텍스트를 검색하세요.",
+    "searchPlaceholder": "메시지 또는 대상 검색…",
+    "viewLevels": {
+      "all": "모든 수준",
+      "error": "오류 이상",
+      "warn": "경고 이상",
+      "info": "정보 이상",
+      "debug": "디버그 이상",
+      "trace": "추적 이상"
+    },
+    "pause": "일시정지",
+    "resume": "실시간",
+    "refresh": "새로고침",
+    "clear": "지우기",
+    "openFolder": "폴더 열기",
+    "shownCount": "{shown} / {total} 표시됨",
+    "empty": "표시할 로그가 없습니다.",
+    "levelSaveFailed": "로그 수준 저장 실패",
+    "openFolderFailed": "로그 폴더 열기 실패",
+    "downloadFailed": "로그 파일 다운로드 실패",
+    "filesTitle": "로그 파일",
+    "filesDescription": "실시간 버퍼를 넘어선 기록을 위해 디스크에서 전체 로그 파일을 다운로드합니다.",
+    "filesEmpty": "아직 로그 파일이 없습니다.",
+    "download": "다운로드",
+    "downloadTruncated": "파일이 커서 최신 {size}만 다운로드했습니다. 전체 파일은 로그 디렉터리에 있습니다.",
+    "captureEnvLocked": "로그 수준은 RUST_LOG / CODEG_LOG 환경 변수로 제어됩니다. 변경하려면 해당 변수를 수정하세요.",
+    "targetsTitle": "모듈별 재정의",
+    "targetsDescription": "전역 레벨을 바꾸지 않고 특정 모듈(예: codeg_lib::acp)의 레벨을 따로 설정합니다.",
+    "targetsAdd": "추가",
+    "targetsRemove": "재정의 제거",
+    "toggleDetails": "세부 정보 전환"
   }
 }

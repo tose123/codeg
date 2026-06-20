@@ -17,6 +17,7 @@ const mockSetLiveOwnsActiveTurn = vi.fn()
 const mockGetSession = vi.fn()
 const mockGetTimelineTurns = vi.fn(() => [])
 const mockRespondPermission = vi.fn()
+const mockAnswerQuestion = vi.fn()
 // syncTurnMetadata returns a cancel function; hand back a spy so tests can
 // assert both that the backfill is kicked off and that it's cancelled on close.
 const mockSyncCancel = vi.fn()
@@ -75,7 +76,10 @@ vi.mock("@/contexts/acp-connections-context", async () => {
       getActiveKey: () => null,
       subscribeActiveKey: () => () => {},
     }),
-    useAcpActions: () => ({ respondPermission: mockRespondPermission }),
+    useAcpActions: () => ({
+      respondPermission: mockRespondPermission,
+      answerQuestion: mockAnswerQuestion,
+    }),
   }
 })
 
@@ -98,6 +102,30 @@ vi.mock("@/components/chat/permission-dialog", () => ({
         permission for {permission.request_id}
       </button>
     ) : null,
+}))
+
+// AskQuestionCard owns RadioGroup/Checkbox/Tabs/Progress and its own answer-
+// collection state. Stub it to a sentinel that forwards a canned answer so we
+// can assert the dialog surfaces the live ask-question card and routes the
+// response through the CHILD connection id — the regression was that this card
+// was never wired into the read-only viewer at all.
+vi.mock("@/components/chat/ask-question-card", () => ({
+  AskQuestionCard: ({
+    question,
+    onAnswer,
+  }: {
+    question: { question_id: string }
+    onAnswer: (questionId: string, answer: unknown) => void | Promise<void>
+  }) => (
+    <button
+      data-testid="ask-question-card"
+      onClick={() =>
+        onAnswer(question.question_id, { question_id: question.question_id })
+      }
+    >
+      ask question {question.question_id}
+    </button>
+  ),
 }))
 
 // useConversationDetail drives the persisted-detail fetch. We don't need
@@ -194,6 +222,7 @@ describe("SubAgentSessionDialog", () => {
     mockGetSession.mockReset()
     mockGetTimelineTurns.mockClear()
     mockRespondPermission.mockReset()
+    mockAnswerQuestion.mockReset()
     mockSyncCancel.mockReset()
     mockSyncTurnMetadata.mockClear()
     mockSyncTurnMetadata.mockReturnValue(mockSyncCancel)
@@ -258,6 +287,89 @@ describe("SubAgentSessionDialog", () => {
       />
     )
     expect(screen.queryByTestId("permission-dialog")).not.toBeInTheDocument()
+  })
+
+  it("surfaces the child's live ask_user_question and routes the answer through the child connection id", () => {
+    mockChildConnection = makeConnState({
+      pendingAskQuestion: {
+        question_id: "q-1",
+        questions: [{ id: "qq-1" }],
+        created_at: "2024-01-01T00:00:00.000Z",
+      } as unknown as ConnectionState["pendingAskQuestion"],
+    })
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId="c1"
+        agentType="codex"
+      />
+    )
+    const card = screen.getByTestId("ask-question-card")
+    expect(card).toHaveTextContent("ask question q-1")
+    fireEvent.click(card)
+    // Routed via the CHILD connection id (c1) and the live question id, exactly
+    // like the permission path — the backend resolves the child's parked tool.
+    expect(mockAnswerQuestion).toHaveBeenCalledWith(
+      "c1",
+      "q-1",
+      expect.objectContaining({ question_id: "q-1" })
+    )
+  })
+
+  it("renders no ask-question card when the child has no pending ask-question", () => {
+    mockChildConnection = makeConnState({ pendingAskQuestion: null })
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId="c1"
+        agentType="codex"
+      />
+    )
+    expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
+  })
+
+  it("renders no ask-question card for an empty question set", () => {
+    mockChildConnection = makeConnState({
+      pendingAskQuestion: {
+        question_id: "q-1",
+        questions: [],
+        created_at: "2024-01-01T00:00:00.000Z",
+      } as unknown as ConnectionState["pendingAskQuestion"],
+    })
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId="c1"
+        agentType="codex"
+      />
+    )
+    expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
+  })
+
+  it("renders no ask-question card without a child connection id — there is no live connection to route an answer to", () => {
+    mockChildConnection = makeConnState({
+      pendingAskQuestion: {
+        question_id: "q-1",
+        questions: [{ id: "qq-1" }],
+        created_at: "2024-01-01T00:00:00.000Z",
+      } as unknown as ConnectionState["pendingAskQuestion"],
+    })
+    renderWithIntl(
+      <SubAgentSessionDialog
+        open
+        onOpenChange={() => {}}
+        childConversationId={99}
+        childConnectionId={null}
+        agentType="codex"
+      />
+    )
+    expect(screen.queryByTestId("ask-question-card")).not.toBeInTheDocument()
   })
 
   it("renders a strictly read-only MessageListView (no input/send/reload props)", () => {

@@ -7,10 +7,15 @@
  * `MessageListView` used by the main conversation panel, but without
  * the input bar, send signal, or reload/new-session handlers — so the
  * user can scroll the transcript without driving the child's turns. The
- * one interaction it hosts is the child's permission prompt: when the
- * child (running at the user's configured permission level) requests
- * approval, the dialog is surfaced here to allow/deny, since the parent
- * card itself is non-interactive (it only badges "awaiting approval").
+ * interactions it hosts are the child's blocking prompts that resolve
+ * WITHOUT driving a new turn: the permission request (the child runs at
+ * the user's configured permission level), and the codeg-mcp
+ * `ask_user_question` multiple-choice card. Both are answered through the
+ * CHILD connection id; the backend routes the response to the child's
+ * parked tool call. The parent card itself stays non-interactive (it only
+ * badges "awaiting approval"). The legacy free-text `pendingQuestion` path
+ * is intentionally NOT hosted here — it is answered by sending a prompt,
+ * which this read-only viewer deliberately cannot do.
  *
  * Streaming: while the dialog is open, the child connection's live
  * message and status (from `acp-connections-context`) are mirrored
@@ -40,7 +45,8 @@ import {
   type ConnectionState,
 } from "@/contexts/acp-connections-context"
 import { PermissionDialog } from "@/components/chat/permission-dialog"
-import { AGENT_LABELS, type AgentType } from "@/lib/types"
+import { AskQuestionCard } from "@/components/chat/ask-question-card"
+import { AGENT_LABELS, type AgentType, type QuestionAnswer } from "@/lib/types"
 
 interface Props {
   open: boolean
@@ -313,7 +319,7 @@ function SubAgentSessionBody({
   // raise a permission request. The parent card no longer answers it inline
   // (it only badges "awaiting approval"); this dialog is where the user
   // resolves it. Route the response through the CHILD connection id.
-  const { respondPermission } = useAcpActions()
+  const { respondPermission, answerQuestion } = useAcpActions()
   const childPendingPermission = childConn?.pendingPermission ?? null
   const onRespondPermission = useCallback(
     (requestId: string, optionId: string) => {
@@ -321,6 +327,22 @@ function SubAgentSessionBody({
       void respondPermission(childConnectionId, requestId, optionId)
     },
     [childConnectionId, respondPermission]
+  )
+
+  // The child may also call the codeg-mcp `ask_user_question` tool, raising the
+  // interactive multiple-choice card. Mirror the permission path: surface the
+  // live `pendingAskQuestion` from the CHILD connection and route the answer
+  // back through the same child connection id. `answerQuestion` rejects on
+  // failure so AskQuestionCard can show a retryable inline error; it resolves
+  // the parked MCP tool without driving a new turn (so it fits this read-only
+  // viewer, unlike the prompt-driven free-text question path).
+  const childPendingAskQuestion = childConn?.pendingAskQuestion ?? null
+  const onAnswerAskQuestion = useCallback(
+    (questionId: string, answer: QuestionAnswer) => {
+      if (!childConnectionId) return
+      return answerQuestion(childConnectionId, questionId, answer)
+    },
+    [childConnectionId, answerQuestion]
   )
 
   return (
@@ -345,6 +367,16 @@ function SubAgentSessionBody({
           />
         </div>
       )}
+      {childConnectionId &&
+        childPendingAskQuestion &&
+        childPendingAskQuestion.questions.length > 0 && (
+          <div className="border-b border-border px-4 py-3">
+            <AskQuestionCard
+              question={childPendingAskQuestion}
+              onAnswer={onAnswerAskQuestion}
+            />
+          </div>
+        )}
       <div className="flex-1 min-h-0 px-4 py-3">
         <MessageListView
           conversationId={childConversationId}

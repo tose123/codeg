@@ -49,7 +49,8 @@
       "web_service": "Web Service",
       "model_providers": "Model Providers",
       "experts": "Experts",
-      "quick_messages": "Quick Messages"
+      "quick_messages": "Quick Messages",
+      "logs": "Logs"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "Merge {branchName} into {currentBranch}",
       "rebaseCurrentToBranch": "Rebase {currentBranch} onto {branchName}",
       "noBranch": "No branch",
+      "detachedHead": "Detached HEAD at {sha}",
       "initGitRepo": "Initialize Git repository",
       "pullCode": "Pull code",
       "fetchRemoteBranches": "Fetch remote branches",
@@ -2981,5 +2983,53 @@
     "saved": "Question settings saved",
     "saveFailed": "Failed to save question settings",
     "loadFailed": "Failed to load: {detail}"
+  },
+  "LogsSettings": {
+    "loading": "Loading…",
+    "sectionTitle": "Logs",
+    "sectionDescription": "View and configure application diagnostic logs. Logs are written to local files and kept in memory for live viewing.",
+    "captureTitle": "Log level",
+    "captureDescription": "Controls how much detail is captured. Higher levels (Debug, Trace) record more but produce larger logs. Off disables logging.",
+    "captureLabel": "Capture level",
+    "levels": {
+      "off": "Off",
+      "error": "Error",
+      "warn": "Warning",
+      "info": "Info",
+      "debug": "Debug",
+      "trace": "Trace"
+    },
+    "viewerTitle": "Recent logs",
+    "viewerDescription": "Live view of recent log records. Filter by level or search text.",
+    "searchPlaceholder": "Search message or target…",
+    "viewLevels": {
+      "all": "All levels",
+      "error": "Error+",
+      "warn": "Warning+",
+      "info": "Info+",
+      "debug": "Debug+",
+      "trace": "Trace+"
+    },
+    "pause": "Pause",
+    "resume": "Live",
+    "refresh": "Refresh",
+    "clear": "Clear",
+    "openFolder": "Open folder",
+    "shownCount": "{shown} / {total} shown",
+    "empty": "No logs to display.",
+    "levelSaveFailed": "Failed to save log level",
+    "openFolderFailed": "Failed to open log folder",
+    "downloadFailed": "Failed to download log file",
+    "filesTitle": "Log files",
+    "filesDescription": "Download full log files from disk for history beyond the live buffer.",
+    "filesEmpty": "No log files yet.",
+    "download": "Download",
+    "downloadTruncated": "File is large; downloaded the latest {size}. The full file is in the logs directory.",
+    "captureEnvLocked": "Log level is controlled by the RUST_LOG / CODEG_LOG environment variable; change it there to take effect.",
+    "targetsTitle": "Per-module overrides",
+    "targetsDescription": "Set a different level for specific modules (e.g. codeg_lib::acp) without changing the global level.",
+    "targetsAdd": "Add",
+    "targetsRemove": "Remove override",
+    "toggleDetails": "Toggle details"
   }
 }

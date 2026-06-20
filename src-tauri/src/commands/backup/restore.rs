@@ -179,7 +179,7 @@ pub(crate) async fn stage_restore_core(
         match handle_external(&staging_root, data_dir, &manifest, external_mode, cancel).await {
             Ok(result) => result,
             Err(e) => {
-                eprintln!(
+                tracing::error!(
                     "[RESTORE] external transcript handling failed (core restore still staged): {e}"
                 );
                 (None, Vec::new())
@@ -242,19 +242,19 @@ pub(crate) fn apply_pending_restore_with_paths(
         Ok(p) => p,
         Err(_) => {
             // Corrupt / half-written marker — discard so we don't loop.
-            eprintln!("[RESTORE] ignoring malformed pending-restore marker");
+            tracing::warn!("[RESTORE] ignoring malformed pending-restore marker");
             let _ = std::fs::remove_file(&marker);
             return Ok(RestoreApplied::None);
         }
     };
     let staging = PathBuf::from(&pending.staging_dir);
     if !staging.is_dir() {
-        eprintln!("[RESTORE] staging dir missing, discarding marker");
+        tracing::info!("[RESTORE] staging dir missing, discarding marker");
         let _ = std::fs::remove_file(&marker);
         return Ok(RestoreApplied::None);
     }
 
-    eprintln!(
+    tracing::info!(
         "[RESTORE] applying staged restore (backup app_version={}, migration={})",
         pending.app_version, pending.latest_migration
     );
@@ -302,7 +302,7 @@ pub(crate) fn apply_pending_restore_with_paths(
     // retries (swap_in is idempotent) or the operator recovers manually.
     std::fs::remove_file(&marker)?;
     let _ = std::fs::remove_dir_all(&staging);
-    eprintln!(
+    tracing::info!(
         "[RESTORE] restore applied; previous data preserved at {}",
         backup_dir.display()
     );

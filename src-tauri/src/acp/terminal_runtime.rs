@@ -186,7 +186,7 @@ impl TerminalInstance {
 
             if let Some(pid) = child.id() {
                 if let Err(err) = kill_tree::tokio::kill_tree(pid).await {
-                    eprintln!("[ACP] kill_tree failed for pid {pid}: {err}");
+                    tracing::error!("[ACP] kill_tree failed for pid {pid}: {err}");
                 }
             }
 
@@ -453,7 +453,7 @@ impl TerminalRuntime {
 
         for terminal in removed {
             if let Err(err) = terminal.kill_command().await {
-                eprintln!("[ACP] Failed to release terminal during cleanup: {err:?}");
+                tracing::error!("[ACP] Failed to release terminal during cleanup: {err:?}");
             }
         }
     }

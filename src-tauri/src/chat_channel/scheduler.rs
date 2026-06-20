@@ -40,10 +40,10 @@ pub fn spawn_daily_report_scheduler(
                 let cutoff = Utc::now() - chrono::Duration::days(LOG_RETENTION_DAYS);
                 match chat_channel_message_log_service::cleanup_old_logs(&db_conn, cutoff).await {
                     Ok(n) if n > 0 => {
-                        eprintln!("[ChatChannel] cleaned up {n} old message logs");
+                        tracing::info!("[ChatChannel] cleaned up {n} old message logs");
                     }
                     Err(e) => {
-                        eprintln!("[ChatChannel] log cleanup failed: {e}");
+                        tracing::error!("[ChatChannel] log cleanup failed: {e}");
                     }
                     _ => {}
                 }
@@ -52,7 +52,7 @@ pub fn spawn_daily_report_scheduler(
             let channels = match chat_channel_service::list_enabled(&db_conn).await {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[ChatChannel] scheduler: failed to list channels: {e}");
+                    tracing::error!("[ChatChannel] scheduler: failed to list channels: {e}");
                     continue;
                 }
             };

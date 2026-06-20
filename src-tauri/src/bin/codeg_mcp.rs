@@ -135,6 +135,10 @@ async fn write_response(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // Stderr-only subscriber: stdout is the JSON-RPC protocol channel, and
+    // concurrent mcp processes share no log file. No hub/buffer/emitter.
+    let _log_guard = codeg_lib::logging::init::init_mcp();
+
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

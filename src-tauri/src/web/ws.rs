@@ -114,12 +114,12 @@ async fn handle_ws_connection(
     match serde_json::to_string(&ready_payload) {
         Ok(text) => {
             if let Err(e) = socket.send(Message::Text(text.into())).await {
-                eprintln!("[WS][WARN] failed to send __ready__ frame: {e}");
+                tracing::warn!("[WS][WARN] failed to send __ready__ frame: {e}");
                 return;
             }
         }
         Err(e) => {
-            eprintln!("[WS][WARN] failed to serialize __ready__ frame: {e}");
+            tracing::warn!("[WS][WARN] failed to serialize __ready__ frame: {e}");
             return;
         }
     }
@@ -167,7 +167,7 @@ async fn handle_ws_connection(
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[WS][WARN] failed to serialize ServerMsg: {e}");
+                                tracing::warn!("[WS][WARN] failed to serialize ServerMsg: {e}");
                             }
                         }
                     }
@@ -191,7 +191,7 @@ async fn handle_ws_connection(
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("[WS][WARN] global receiver lagged, skipped {n} events");
+                        tracing::warn!("[WS][WARN] global receiver lagged, skipped {n} events");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break;
@@ -217,7 +217,7 @@ async fn handle_ws_connection(
                                 ).await;
                             }
                             Err(e) => {
-                                eprintln!("[WS][WARN] malformed client message: {e}");
+                                tracing::warn!("[WS][WARN] malformed client message: {e}");
                             }
                         }
                     }

@@ -54,7 +54,7 @@ pub async fn import_local_conversations(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error listing {} conversations: {}", at, e);
+                    tracing::error!("Error listing {} conversations: {}", at, e);
                 }
             }
         }

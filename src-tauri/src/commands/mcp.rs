@@ -1428,7 +1428,7 @@ fn read_claude_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                 out.insert(id.to_string(), normalized);
             }
             Err(err) => {
-                eprintln!("[MCP] skip invalid Claude MCP entry id={id}: {err}");
+                tracing::warn!("[MCP] skip invalid Claude MCP entry id={id}: {err}");
             }
         }
     }
@@ -1567,7 +1567,7 @@ fn read_codex_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                     out.insert(id.to_string(), normalized);
                 }
                 Err(err) => {
-                    eprintln!("[MCP] skip invalid Codex mcp_servers entry id={id}: {err}");
+                    tracing::warn!("[MCP] skip invalid Codex mcp_servers entry id={id}: {err}");
                 }
             }
         }
@@ -1584,7 +1584,7 @@ fn read_codex_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                         out.insert(id.to_string(), normalized);
                     }
                     Err(err) => {
-                        eprintln!("[MCP] skip invalid Codex mcp.servers entry id={id}: {err}");
+                        tracing::warn!("[MCP] skip invalid Codex mcp.servers entry id={id}: {err}");
                     }
                 }
             }
@@ -1695,7 +1695,7 @@ fn read_opencode_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                     out.insert(id.to_string(), normalized);
                 }
                 Err(err) => {
-                    eprintln!("[MCP] skip invalid OpenCode mcpServers entry id={id}: {err}");
+                    tracing::warn!("[MCP] skip invalid OpenCode mcpServers entry id={id}: {err}");
                 }
             }
         }
@@ -1711,7 +1711,7 @@ fn read_opencode_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                     out.insert(id.to_string(), normalized);
                 }
                 Err(err) => {
-                    eprintln!("[MCP] skip invalid OpenCode mcp entry id={id}: {err}");
+                    tracing::warn!("[MCP] skip invalid OpenCode mcp entry id={id}: {err}");
                 }
             }
         }
@@ -1804,7 +1804,7 @@ fn read_gemini_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                 out.insert(id.to_string(), normalized);
             }
             Err(err) => {
-                eprintln!("[MCP] skip invalid Gemini MCP entry id={id}: {err}");
+                tracing::warn!("[MCP] skip invalid Gemini MCP entry id={id}: {err}");
             }
         }
     }
@@ -1882,7 +1882,7 @@ fn read_openclaw_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                 out.insert(id.to_string(), normalized);
             }
             Err(err) => {
-                eprintln!("[MCP] skip invalid OpenClaw MCP entry id={id}: {err}");
+                tracing::warn!("[MCP] skip invalid OpenClaw MCP entry id={id}: {err}");
             }
         }
     }
@@ -1974,7 +1974,7 @@ fn read_cline_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                 out.insert(id.to_string(), normalized);
             }
             Err(err) => {
-                eprintln!("[MCP] skip invalid Cline MCP entry id={id}: {err}");
+                tracing::warn!("[MCP] skip invalid Cline MCP entry id={id}: {err}");
             }
         }
     }
@@ -2248,7 +2248,7 @@ fn read_hermes_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
     let root: serde_yaml::Value = match serde_yaml::from_str(&raw) {
         Ok(value) => value,
         Err(err) => {
-            eprintln!("[MCP] skip Hermes mcp_servers: invalid config.yaml: {err}");
+            tracing::warn!("[MCP] skip Hermes mcp_servers: invalid config.yaml: {err}");
             return Ok(BTreeMap::new());
         }
     };
@@ -2267,7 +2267,7 @@ fn read_hermes_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
                 out.insert(id.to_string(), spec);
             }
             Err(err) => {
-                eprintln!("[MCP] skip invalid Hermes mcp_servers entry id={id}: {err}");
+                tracing::warn!("[MCP] skip invalid Hermes mcp_servers entry id={id}: {err}");
             }
         }
     }
@@ -2338,7 +2338,7 @@ fn remove_hermes_server(id: &str) -> Result<bool, AppCommandError> {
     let mut root: Yaml = match serde_yaml::from_str(&raw) {
         Ok(value) => value,
         Err(err) => {
-            eprintln!("[MCP] Hermes remove '{id}': invalid config.yaml: {err}");
+            tracing::info!("[MCP] Hermes remove '{id}': invalid config.yaml: {err}");
             return Ok(false);
         }
     };
@@ -2831,7 +2831,7 @@ async fn search_official_registry(
         match serde_json::from_value::<OfficialServerResponse>(raw_entry.clone()) {
             Ok(item) => out.push(official_entry_to_item(&item)),
             Err(err) => {
-                eprintln!(
+                tracing::warn!(
                     "[MCP] skip invalid official registry server list entry at index={index}: {err}"
                 );
             }
@@ -3234,7 +3234,7 @@ fn build_official_install_options(
                         });
                     }
                     Err(err) => {
-                        eprintln!("[MCP] skip invalid official stdio package: {err}");
+                        tracing::warn!("[MCP] skip invalid official stdio package: {err}");
                     }
                 }
             } else if let Ok(spec) =

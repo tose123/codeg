@@ -255,7 +255,7 @@ impl ChatChannelManager {
 
         // Spawn command dispatcher
         if let Some(command_rx) = self.take_command_receiver().await {
-            eprintln!("[ChatChannel] command dispatcher started");
+            tracing::info!("[ChatChannel] command dispatcher started");
             let manager_for_cmds = self.clone_ref();
             super::command_dispatcher::spawn_command_dispatcher(
                 command_rx,
@@ -266,7 +266,7 @@ impl ChatChannelManager {
                 bridge,
             );
         } else {
-            eprintln!("[ChatChannel] WARNING: command_rx already taken, dispatcher NOT started");
+            tracing::warn!("[ChatChannel] WARNING: command_rx already taken, dispatcher NOT started");
         }
 
         // Spawn daily report scheduler
@@ -281,7 +281,7 @@ impl ChatChannelManager {
         let channels = match crate::db::service::chat_channel_service::list_enabled(db_conn).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[ChatChannel] failed to load enabled channels: {e}");
+                tracing::error!("[ChatChannel] failed to load enabled channels: {e}");
                 return;
             }
         };
@@ -291,7 +291,7 @@ impl ChatChannelManager {
                 match serde_json::from_value(serde_json::Value::String(ch.channel_type.clone())) {
                     Ok(t) => t,
                     Err(_) => {
-                        eprintln!(
+                        tracing::warn!(
                             "[ChatChannel] unknown channel type '{}' for '{}' (id={}), skipping",
                             ch.channel_type, ch.name, ch.id
                         );
@@ -302,7 +302,7 @@ impl ChatChannelManager {
             let config: serde_json::Value = match serde_json::from_str(&ch.config_json) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[ChatChannel] invalid config for '{}' (id={}): {e}, skipping",
                         ch.name, ch.id
                     );
@@ -313,7 +313,7 @@ impl ChatChannelManager {
             let token = match crate::keyring_store::get_channel_token(ch.id) {
                 Some(t) => t,
                 None => {
-                    eprintln!(
+                    tracing::warn!(
                         "[ChatChannel] no token found for '{}' (id={}), skipping auto-connect",
                         ch.name, ch.id
                     );
@@ -325,7 +325,7 @@ impl ChatChannelManager {
             {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "[ChatChannel] failed to create backend for '{}' (id={}): {e}",
                         ch.name, ch.id
                     );
@@ -337,12 +337,12 @@ impl ChatChannelManager {
                 .add_channel(ch.id, ch.name.clone(), channel_type, backend)
                 .await
             {
-                eprintln!(
+                tracing::error!(
                     "[ChatChannel] failed to auto-connect '{}' (id={}): {e}",
                     ch.name, ch.id
                 );
             } else {
-                eprintln!("[ChatChannel] auto-connected '{}' (id={})", ch.name, ch.id);
+                tracing::info!("[ChatChannel] auto-connected '{}' (id={})", ch.name, ch.id);
             }
         }
     }

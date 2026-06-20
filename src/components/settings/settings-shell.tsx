@@ -18,6 +18,7 @@ import {
   SendHorizontal,
   Palette,
   PlugZap,
+  ScrollText,
   Server,
   Settings,
   SlidersHorizontal,
@@ -51,6 +52,7 @@ interface SettingsNavItem {
     | "chat_channels"
     | "system"
     | "web_service"
+    | "logs"
   icon: ComponentType<{ className?: string }>
 }
 
@@ -114,6 +116,11 @@ const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
     href: "/settings/web-service",
     labelKey: "web_service",
     icon: Globe,
+  },
+  {
+    href: "/settings/logs",
+    labelKey: "logs",
+    icon: ScrollText,
   },
   {
     href: "/settings/system",

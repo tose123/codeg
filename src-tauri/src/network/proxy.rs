@@ -59,12 +59,12 @@ pub async fn init_proxy_from_db(conn: &DatabaseConnection) {
     match crate::commands::system_settings::load_system_proxy_settings(conn).await {
         Ok(settings) if settings.enabled => {
             if let Err(err) = apply_system_proxy_settings(&settings) {
-                eprintln!("[Settings] failed to apply system proxy settings: {err}");
+                tracing::error!("[Settings] failed to apply system proxy settings: {err}");
             }
         }
         Ok(_) => {}
         Err(err) => {
-            eprintln!("[Settings] failed to load system proxy settings: {err}");
+            tracing::error!("[Settings] failed to load system proxy settings: {err}");
         }
     }
 }

@@ -39,6 +39,12 @@ vi.mock("@/lib/api", () => ({
   listAllFolderDetails: vi.fn(async () => []),
   listOpenFolderDetails: vi.fn(async () => []),
   getGitBranch: vi.fn(async () => null),
+  getGitHead: vi.fn(async () => ({
+    is_repo: false,
+    branch: null,
+    detached: false,
+    short_sha: null,
+  })),
   openFolder: vi.fn(),
   openFolderById: vi.fn(),
   removeFolderFromWorkspace: vi.fn(),

@@ -207,7 +207,7 @@ fn bundled_metadata() -> &'static [ExpertMetadata] {
     METADATA.get_or_init(|| match load_bundled_metadata_inner() {
         Ok(list) => list,
         Err(err) => {
-            eprintln!("[Experts] failed to load bundled metadata: {err}");
+            tracing::error!("[Experts] failed to load bundled metadata: {err}");
             Vec::new()
         }
     })

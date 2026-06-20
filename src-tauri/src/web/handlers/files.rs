@@ -331,28 +331,28 @@ pub fn log_upload_quota_config_at_startup() {
     let strict = upload_quota_strict_from_env();
     match &config {
         UploadQuotaConfig::Unset => {
-            eprintln!(
+            tracing::info!(
                 "[uploads] {UPLOAD_TOTAL_BYTES_ENV} unset → total-size cap disabled (set to a byte count to enable)"
             );
         }
         UploadQuotaConfig::Disabled => {
-            eprintln!("[uploads] {UPLOAD_TOTAL_BYTES_ENV}=0 → total-size cap disabled");
+            tracing::info!("[uploads] {UPLOAD_TOTAL_BYTES_ENV}=0 → total-size cap disabled");
         }
         UploadQuotaConfig::Enabled(cap) => {
-            eprintln!("[uploads] total-size cap: {cap} bytes ({UPLOAD_TOTAL_BYTES_ENV})");
+            tracing::info!("[uploads] total-size cap: {cap} bytes ({UPLOAD_TOTAL_BYTES_ENV})");
         }
         UploadQuotaConfig::Invalid(raw) => {
             if strict {
                 // Caller will abort via `validate_upload_quota_config`;
                 // here we only narrate so the FATAL line lands in
                 // operator logs alongside the rest of the banner.
-                eprintln!(
+                tracing::error!(
                     "[uploads][FATAL] {UPLOAD_TOTAL_BYTES_ENV}={raw:?} is not a positive integer \
                      and {UPLOAD_STRICT_ENV} is on. Caller will abort startup. \
                      Use a plain decimal byte count (e.g. 10737418240 for 10 GiB)."
                 );
             } else {
-                eprintln!(
+                tracing::warn!(
                     "[uploads][WARN] {UPLOAD_TOTAL_BYTES_ENV}={raw:?} is not a positive integer; \
                      total-size cap is DISABLED. Use a plain decimal byte count (e.g. 10737418240 for 10 GiB), \
                      or set {UPLOAD_STRICT_ENV}=1 to abort startup on this condition."
@@ -469,7 +469,7 @@ async fn current_uploads_total_bytes(uploads_root: &std::path::Path) -> u64 {
         Ok(it) => it,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "[uploads] failed to enumerate uploads root {}: {}",
                 uploads_root.display(),
                 e
@@ -481,7 +481,7 @@ async fn current_uploads_total_bytes(uploads_root: &std::path::Path) -> u64 {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("[uploads] read_dir entry error: {e}");
+                tracing::error!("[uploads] read_dir entry error: {e}");
                 continue;
             }
         };
@@ -711,7 +711,7 @@ pub async fn purge_upload_staging() {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            eprintln!(
+            tracing::error!(
                 "[uploads] failed to purge staging dir {}: {}",
                 tmp_dir.display(),
                 e

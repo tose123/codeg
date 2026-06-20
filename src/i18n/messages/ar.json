@@ -49,7 +49,8 @@
       "web_service": "خدمة الويب",
       "model_providers": "مزودو النماذج",
       "experts": "الخبراء",
-      "quick_messages": "رسائل سريعة"
+      "quick_messages": "رسائل سريعة",
+      "logs": "السجلات"
     }
   },
   "AppearanceSettings": {
@@ -1290,6 +1291,7 @@
       "mergeBranchIntoCurrent": "دمج {branchName} في {currentBranch}",
       "rebaseCurrentToBranch": "Rebase لـ {currentBranch} على {branchName}",
       "noBranch": "بدون فرع",
+      "detachedHead": "HEAD منفصل عند {sha}",
       "initGitRepo": "تهيئة مستودع Git",
       "pullCode": "سحب الكود",
       "fetchRemoteBranches": "جلب الفروع البعيدة",
@@ -2981,5 +2983,53 @@
     "saved": "تم حفظ إعدادات السؤال",
     "saveFailed": "فشل حفظ إعدادات السؤال",
     "loadFailed": "فشل التحميل: {detail}"
+  },
+  "LogsSettings": {
+    "loading": "جارٍ التحميل…",
+    "sectionTitle": "السجلات",
+    "sectionDescription": "عرض وتكوين سجلات تشخيص التطبيق. تُكتب السجلات في ملفات محلية وتُحفظ في الذاكرة للعرض المباشر.",
+    "captureTitle": "مستوى السجل",
+    "captureDescription": "يتحكم في مقدار التفاصيل الملتقطة. المستويات الأعلى (Debug، Trace) تسجل المزيد لكنها تنتج سجلات أكبر. «إيقاف» يعطّل التسجيل.",
+    "captureLabel": "مستوى الالتقاط",
+    "levels": {
+      "off": "إيقاف",
+      "error": "خطأ",
+      "warn": "تحذير",
+      "info": "معلومات",
+      "debug": "تصحيح",
+      "trace": "تتبع"
+    },
+    "viewerTitle": "السجلات الأخيرة",
+    "viewerDescription": "عرض مباشر لأحدث السجلات. قم بالتصفية حسب المستوى أو ابحث في النص.",
+    "searchPlaceholder": "ابحث في الرسالة أو المصدر…",
+    "viewLevels": {
+      "all": "كل المستويات",
+      "error": "خطأ فأعلى",
+      "warn": "تحذير فأعلى",
+      "info": "معلومات فأعلى",
+      "debug": "تصحيح فأعلى",
+      "trace": "تتبع فأعلى"
+    },
+    "pause": "إيقاف مؤقت",
+    "resume": "مباشر",
+    "refresh": "تحديث",
+    "clear": "مسح",
+    "openFolder": "فتح المجلد",
+    "shownCount": "{shown} / {total} معروض",
+    "empty": "لا توجد سجلات للعرض.",
+    "levelSaveFailed": "فشل حفظ مستوى السجل",
+    "openFolderFailed": "فشل فتح مجلد السجلات",
+    "downloadFailed": "فشل تنزيل ملف السجل",
+    "filesTitle": "ملفات السجل",
+    "filesDescription": "نزّل ملفات السجل الكاملة من القرص للاطلاع على السجل خارج المخزن المباشر.",
+    "filesEmpty": "لا توجد ملفات سجل بعد.",
+    "download": "تنزيل",
+    "downloadTruncated": "الملف كبير، تم تنزيل أحدث {size}. الملف الكامل موجود في دليل السجلات.",
+    "captureEnvLocked": "يتم التحكم في مستوى السجل عبر متغير البيئة RUST_LOG / CODEG_LOG؛ غيّره هناك ليصبح ساريًا.",
+    "targetsTitle": "تجاوزات حسب الوحدة",
+    "targetsDescription": "عيّن مستوى مختلفًا لوحدات محددة (مثل codeg_lib::acp) دون تغيير المستوى العام.",
+    "targetsAdd": "إضافة",
+    "targetsRemove": "إزالة التجاوز",
+    "toggleDetails": "تبديل التفاصيل"
   }
 }
