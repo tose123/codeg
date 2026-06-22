@@ -16,7 +16,7 @@ vi.mock("@/lib/api", () => ({
 
 vi.mock("@/lib/platform", () => ({
   isDesktop: vi.fn(() => true),
-  openPath: vi.fn(),
+  revealItemInDir: vi.fn(),
 }))
 
 vi.mock("sonner", () => ({
