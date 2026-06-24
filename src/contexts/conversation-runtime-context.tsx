@@ -502,21 +502,35 @@ function buildStreamingTurnsFromLiveMessage(
         // Only capture children while the agent is still running
         positionalAgentId = isFinal ? null : block.info.tool_call_id
       } else {
-        // Extract parentToolUseId from ACP meta (Claude Code embeds this
-        // under meta.claudeCode.parentToolUseId). Guard each access level
+        // Extract the parent tool-call id from ACP meta. Both Claude Code and
+        // CodeBuddy link a native sub-agent's child tool calls to the parent
+        // Agent tool call this way — just under different keys:
+        //   - Claude Code: nested `meta.claudeCode.parentToolUseId`
+        //   - CodeBuddy:   flat  `meta["codebuddy.ai/parentToolCallId"]`
+        // Reading both makes CodeBuddy sub-agents nest precisely (like Claude
+        // Code) instead of falling back to the positional heuristic, which the
+        // sub-agent's interleaved thinking blocks break. Guard each access level
         // to avoid crashes on unexpected shapes from other agents.
         const meta = block.info.meta
         let parentId: string | undefined
-        if (meta && typeof meta === "object" && "claudeCode" in meta) {
-          const cc = (meta as Record<string, unknown>).claudeCode
-          if (cc && typeof cc === "object" && "parentToolUseId" in cc) {
-            const pid = (cc as Record<string, unknown>).parentToolUseId
-            if (typeof pid === "string") parentId = pid
+        if (meta && typeof meta === "object") {
+          if ("claudeCode" in meta) {
+            const cc = (meta as Record<string, unknown>).claudeCode
+            if (cc && typeof cc === "object" && "parentToolUseId" in cc) {
+              const pid = (cc as Record<string, unknown>).parentToolUseId
+              if (typeof pid === "string") parentId = pid
+            }
+          }
+          if (!parentId) {
+            const cbParent = (meta as Record<string, unknown>)[
+              "codebuddy.ai/parentToolCallId"
+            ]
+            if (typeof cbParent === "string") parentId = cbParent
           }
         }
 
-        // Use explicit parentToolUseId when available, positional fallback
-        // only for in-progress agents
+        // Use explicit parent id when available, positional fallback only for
+        // in-progress agents.
         const resolvedParent =
           parentId && agentIds.has(parentId) ? parentId : positionalAgentId
 

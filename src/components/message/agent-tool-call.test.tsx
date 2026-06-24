@@ -76,4 +76,32 @@ describe("AgentToolCallPart title", () => {
     )
     expect(screen.getByText("codex: do the thing")).toBeInTheDocument()
   })
+
+  it("ignores non-string subagent_type / description (no React-child crash)", () => {
+    // Some hosts (e.g. CodeBuddy) can hand us a tool input where these fields
+    // are objects, not strings. Rendering them directly would throw "Objects
+    // are not valid as a React child"; they must be treated as absent.
+    expect(() =>
+      renderCard(
+        basePart(
+          JSON.stringify({ subagent_type: {}, description: {} }),
+          "input-available"
+        )
+      )
+    ).not.toThrow()
+    expect(screen.getByText("Sub-agent starting…")).toBeInTheDocument()
+  })
+
+  it("keeps a string description when subagent_type is a non-string object", () => {
+    renderCard(
+      basePart(
+        JSON.stringify({
+          subagent_type: { nested: true },
+          description: "build",
+        }),
+        "input-available"
+      )
+    )
+    expect(screen.getByText("build")).toBeInTheDocument()
+  })
 })

@@ -39,6 +39,15 @@ function adaptToolCalls(
   )
 }
 
+// A parsed JSON field is only usable here if it's a non-empty STRING. Some
+// hosts (e.g. CodeBuddy) hand us inputs where `subagent_type` / `description`
+// arrive as objects (or empty `{}`); the old `as string` casts let those leak
+// straight into the rendered `title`, crashing React with "Objects are not
+// valid as a React child". Coerce so a non-string field is treated as absent.
+function asText(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null
+}
+
 // ── main component ────────────────────────────────────────────────────
 
 export const AgentToolCallPart = memo(function AgentToolCallPart({
@@ -84,11 +93,11 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
 
   const subagentType = useMemo(
     () =>
-      (parsed?.subagent_type as string | undefined) ??
+      asText(parsed?.subagent_type) ??
       // Codex's live `spawn_agent` payload labels the agent with `agent_type`
       // instead of `subagent_type` (the historical parser already maps it
       // across). Read both so the prefix shows during streaming too.
-      (parsed?.agent_type as string | undefined) ??
+      asText(parsed?.agent_type) ??
       (part.input ? extractJsonField(part.input, "subagent_type") : null) ??
       (part.input ? extractJsonField(part.input, "agent_type") : null),
     [parsed, part.input]
@@ -96,21 +105,21 @@ export const AgentToolCallPart = memo(function AgentToolCallPart({
 
   const description = useMemo(
     () =>
-      (parsed?.description as string | undefined) ??
+      asText(parsed?.description) ??
       (part.input ? extractJsonField(part.input, "description") : null),
     [parsed, part.input]
   )
 
   const prompt = useMemo(
     () =>
-      (parsed?.prompt as string | undefined) ??
+      asText(parsed?.prompt) ??
       (part.input ? extractJsonField(part.input, "prompt") : null),
     [parsed, part.input]
   )
 
   const model = useMemo(
     () =>
-      (parsed?.model as string | undefined) ??
+      asText(parsed?.model) ??
       (part.input ? extractJsonField(part.input, "model") : null),
     [parsed, part.input]
   )

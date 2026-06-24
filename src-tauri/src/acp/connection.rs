@@ -1637,10 +1637,13 @@ async fn run_connection(
                                         ) {
                                             // Historical-replay path only
                                             // forwards AvailableCommandsUpdate,
-                                            // which never carries tool output
-                                            // — a throwaway cache is fine.
+                                            // which never carries tool output or
+                                            // tool-call titles — throwaway state
+                                            // is fine.
                                             let mut replay_cache =
                                                 ToolCallOutputCache::default();
+                                            let mut replay_cb_state =
+                                                CodeBuddyLiveState::default();
                                             emit_conversation_update(
                                                 &st,
                                                 &h,
@@ -1648,6 +1651,7 @@ async fn run_connection(
                                                 notif.update,
                                                 None,
                                                 &mut replay_cache,
+                                                &mut replay_cb_state,
                                             )
                                             .await;
                                         }
@@ -2980,6 +2984,13 @@ async fn run_conversation_loop<'a>(
     // into incremental deltas. Shared across the idle loop and the active
     // turn loop so tool calls that span turns stay consistent.
     let mut raw_output_cache = ToolCallOutputCache::default();
+    // Session-scoped CodeBuddy live state: authoritative title rewrites
+    // (tool_call_id → "agent" / inner `mcp__…` name) so a later status-only
+    // update can't downgrade an Agent / delegation card mid-stream, plus the
+    // open-sub-agent window used to suppress a sub-agent's interleaved
+    // thought/message chunks. See `emit_conversation_update`. Shared across the
+    // idle and turn loops.
+    let mut cb_state = CodeBuddyLiveState::default();
     loop {
         // Wait for either a user command or a session update (e.g. available_commands_update)
         let cmd = loop {
@@ -2996,7 +3007,7 @@ async fn run_conversation_loop<'a>(
                             let _ = MatchDispatch::new(dispatch)
                                 .if_notification(
                                     async |notif: SessionNotification| {
-                                        emit_conversation_update(&st, &h, agent_type, notif.update, cwd_opt, &mut raw_output_cache).await;
+                                        emit_conversation_update(&st, &h, agent_type, notif.update, cwd_opt, &mut raw_output_cache, &mut cb_state).await;
                                         Ok(())
                                     },
                                 )
@@ -3095,6 +3106,15 @@ async fn run_conversation_loop<'a>(
                 // reason so the user gets an error toast instead of a
                 // confusing `PendingReview` on a blank conversation.
                 let mut turn_had_agent_output = false;
+                // A CodeBuddy native sub-agent's full lifecycle (Agent tool call
+                // open → completed) happens within one turn, so reset the
+                // suppression window at each turn start. This bounds the tracking
+                // sets and guarantees a sub-agent that ended without a terminal
+                // frame (cancel/abort) can never suppress the NEXT turn's
+                // main-agent thinking. `title_overrides` intentionally persists
+                // (a card's identity is session-stable).
+                cb_state.open_subagents.clear();
+                cb_state.closed_subagents.clear();
 
                 // Read updates until turn completes.
                 // We must also listen for commands (e.g. RespondPermission)
@@ -3127,7 +3147,7 @@ async fn run_conversation_loop<'a>(
                                                 if is_agent_output_update(&notif.update) {
                                                     turn_had_agent_output = true;
                                                 }
-                                                emit_conversation_update(&st, &h, agent_type, notif.update, cwd_opt, &mut raw_output_cache).await;
+                                                emit_conversation_update(&st, &h, agent_type, notif.update, cwd_opt, &mut raw_output_cache, &mut cb_state).await;
                                                 if should_poll_now {
                                                     poll_tracked_terminal_tool_calls(
                                                         runtime.as_ref(),
@@ -3737,19 +3757,21 @@ fn json_value_to_text(val: &Option<serde_json::Value>) -> Option<String> {
     }
 }
 
-/// Mirrors `parsers/opencode.rs:425-429` so streaming and reload-from-DB
-/// render the same Agent card. The SQLite-side condition is
-/// `tool == "task" && state.input.subagent_type IS NOT NULL`, where
-/// `tool` is the OpenCode **internal** tool name. ACP only exposes a
-/// user-facing `title` (e.g. "Explore project structure") rather than
-/// the internal tool name, so we cannot replicate the `tool == "task"`
-/// half of the AND here. We instead anchor on
-/// `agent_type == OpenCode` (avoiding any cross-agent collision a generic
-/// `subagent_type` field could cause) plus the non-empty
-/// `subagent_type` string in `raw_input` — together these uniquely
-/// identify an OpenCode sub-agent invocation in practice.
-fn is_opencode_subagent_invocation(agent_type: AgentType, raw_input: &Option<String>) -> bool {
-    if agent_type != AgentType::OpenCode {
+/// Mirrors `parsers/opencode.rs:425-429` (and `parsers/codebuddy.rs`'s
+/// `subagent_type → "Agent"` rewrite) so streaming and reload-from-DB render the
+/// same Agent card. The SQLite-side condition is
+/// `tool == "task" && state.input.subagent_type IS NOT NULL`, where `tool` is the
+/// agent's **internal** tool name. ACP only exposes a user-facing `title` (e.g.
+/// "Explore project structure") rather than the internal tool name, so we cannot
+/// replicate the `tool == "task"` half of the AND here. We instead anchor on a
+/// known sub-agent-capable `agent_type` (OpenCode and CodeBuddy — both surface a
+/// description-style title and the standard `{…, subagent_type}` input, and never
+/// emit a bare top-level `subagent_type` for anything but a sub-agent) plus the
+/// non-empty `subagent_type` string in `raw_input` — together these uniquely
+/// identify a sub-agent invocation in practice. Other agents stay excluded to
+/// avoid any cross-agent collision a generic `subagent_type` field could cause.
+fn is_subagent_invocation(agent_type: AgentType, raw_input: &Option<String>) -> bool {
+    if !matches!(agent_type, AgentType::OpenCode | AgentType::CodeBuddy) {
         return false;
     }
     let Some(text) = raw_input.as_deref() else {
@@ -3768,6 +3790,267 @@ fn is_opencode_subagent_invocation(agent_type: AgentType, raw_input: &Option<Str
         .and_then(|v| v.as_str())
         .map(|s| !s.is_empty())
         .unwrap_or(false)
+}
+
+/// CodeBuddy routes MCP tools through its `DeferExecuteTool` virtualization
+/// layer, which surfaces over ACP as a tool call whose `raw_input` wraps the real
+/// call as `{ "toolName": "mcp__…", "params": { … } }`. Return that inner
+/// `toolName` so the caller can rewrite the live `title` to it — making the
+/// frontend resolve the dedicated card (delegation / question / …), mirroring the
+/// historical unwrap in `parsers/codebuddy.rs`. `raw_input` is left untouched
+/// (the cards peel `params` themselves, and that keeps `inferFromInput` from
+/// misclassifying `cancel_delegation`'s `{task_id}` as a generic task).
+fn codebuddy_deferred_tool_name(agent_type: AgentType, raw_input: &Option<String>) -> Option<String> {
+    if agent_type != AgentType::CodeBuddy {
+        return None;
+    }
+    let text = raw_input.as_deref()?;
+    // Cheap substring guard before parsing a potentially large payload.
+    if !text.contains("toolName") {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    crate::parsers::codebuddy::deferred_tool_name(&value).map(|s| s.to_string())
+}
+
+/// CodeBuddy ships a deferred MCP tool's RESULT as a single re-serialized
+/// `{ "type": "text", "text": <inner> }` content part (the OpenAI-Agents content
+/// shape), where `<inner>` is the MCP `CallToolResult` content text — for the
+/// delegation companion, the compact report / `{ "tasks": [...] }` JSON. The
+/// dedicated cards (`parseStatusReport` / `parseToolOutput`) expect that bare
+/// inner payload (the content-only host shape they already handle for Claude
+/// Code), NOT this wrapper, so a live `get_delegation_status` / `cancel_delegation`
+/// poll otherwise renders as raw JSON text. Peel the wrapper to its inner `text`,
+/// mirroring the historical `deferred_result_envelope` normalization in
+/// `parsers/codebuddy.rs`.
+///
+/// Gated on CodeBuddy + the exact wrapper shape (`type == "text"` with a string
+/// `text`): a non-deferred result (Bash/Read/ToolSearch/…) is never a lone
+/// `{type,text}` object, and no delegation report carries a top-level `type`, so
+/// those pass through untouched. Unlike the title rewrite, this needs no
+/// `raw_input`, so it also normalizes a result-only `ToolCallUpdate` that omits it.
+fn unwrap_codebuddy_deferred_output(agent_type: AgentType, text: &str) -> Option<String> {
+    if agent_type != AgentType::CodeBuddy {
+        return None;
+    }
+    // Cheap substring guard before parsing a potentially large payload.
+    if !text.contains("\"type\"") {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let obj = value.as_object()?;
+    if obj.get("type").and_then(|t| t.as_str()) != Some("text") {
+        return None;
+    }
+    obj.get("text").and_then(|t| t.as_str()).map(str::to_string)
+}
+
+/// True when a CodeBuddy tool call's ACP `_meta` identifies it as a native
+/// sub-agent (`Agent`) invocation. CodeBuddy tags this in `_meta` from the FIRST
+/// frame (`codebuddy.ai/toolName == "Agent"`) and later adds
+/// `codebuddy.ai/isSubagent` / `subagentType` — whereas the `subagent_type`
+/// field in `raw_input` (see `is_subagent_invocation`) only streams in dozens of
+/// frames later. Reading the meta lets the title rewrite fire on frame 1, so the
+/// Agent pill never spends an opening window classified as a generic tool (and
+/// its child tool calls, which carry `codebuddy.ai/parentToolCallId` every frame,
+/// nest from the start). Gated on CodeBuddy so the generic `codebuddy.ai/*` keys
+/// can never affect another agent.
+fn codebuddy_meta_marks_subagent(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if agent_type != AgentType::CodeBuddy {
+        return false;
+    }
+    let Some(meta) = meta else {
+        return false;
+    };
+    if meta.get("codebuddy.ai/toolName").and_then(|v| v.as_str()) == Some("Agent") {
+        return true;
+    }
+    if meta.get("codebuddy.ai/isSubagent").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    meta.get("codebuddy.ai/subagentType")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// True when a CodeBuddy sub-agent tool call's `_meta` marks it as a BACKGROUND
+/// sub-agent (`codebuddy.ai/isBackground == true`). A background sub-agent runs
+/// concurrently with the main agent, so the suppression-window invariant (parent
+/// blocked → only sub-agent chunks in the window) does NOT hold for it — see
+/// `track_subagent_window`, which excludes it from the window. Gated on CodeBuddy.
+fn codebuddy_meta_marks_background(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if agent_type != AgentType::CodeBuddy {
+        return false;
+    }
+    meta.and_then(|m| m.get("codebuddy.ai/isBackground"))
+        .and_then(|v| v.as_bool())
+        == Some(true)
+}
+
+/// True when a CodeBuddy thought/message `ContentChunk`'s own `_meta` marks the
+/// chunk as sub-agent output (`codebuddy.ai/isSubagent`, or a
+/// `codebuddy.ai/parentToolCallId` link to the Agent call). This is a precision
+/// supplement to the open-sub-agent window — CodeBuddy is not confirmed to
+/// populate chunk `_meta`, so suppression never relies on it alone. Gated on
+/// CodeBuddy.
+fn codebuddy_chunk_marks_subagent(
+    agent_type: AgentType,
+    meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if agent_type != AgentType::CodeBuddy {
+        return false;
+    }
+    let Some(meta) = meta else {
+        return false;
+    };
+    if meta.get("codebuddy.ai/isSubagent").and_then(|v| v.as_bool()) == Some(true) {
+        return true;
+    }
+    meta.get("codebuddy.ai/parentToolCallId")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// Whether a live thought/message chunk should be dropped from the top-level
+/// stream because it belongs to a CodeBuddy sub-agent (whose work is already
+/// represented by the Agent pill + its nested tool calls). Matches Claude Code,
+/// which never streams a sub-agent's internal reasoning onto the main session.
+///
+/// Suppress while we're inside an open sub-agent window OR when the chunk's own
+/// meta marks it. The window safety rests on a structural invariant: the window
+/// only ever holds FOREGROUND (blocking) sub-agents — a synchronous `Agent` tool
+/// call suspends the parent model until the tool returns its result, so between
+/// that call's open frame and its terminal frame the main session carries ONLY
+/// the sub-agent's chunks, never main-agent output. BACKGROUND sub-agents (which
+/// run concurrently and could interleave main-agent output) are deliberately
+/// excluded from the window by `track_subagent_window`, so `window_open` can
+/// never cause a main-agent chunk to be dropped. Gated on CodeBuddy; every other
+/// agent always emits.
+fn should_suppress_subagent_chunk(
+    agent_type: AgentType,
+    window_open: bool,
+    chunk_meta: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if agent_type != AgentType::CodeBuddy {
+        return false;
+    }
+    window_open || codebuddy_chunk_marks_subagent(agent_type, chunk_meta)
+}
+
+/// Maintain the set of OPEN CodeBuddy sub-agent tool calls (`open`). `is_agent`
+/// is true once `resolve_rewritten_title` classified this `tool_call_id` as a
+/// native sub-agent (`"agent"`). A non-final status opens the window; a final
+/// status (`completed` / `failed`) closes it and records the id in `closed`, so a
+/// stray late non-final frame can't re-open an already-finished sub-agent.
+///
+/// `is_background` (from `codebuddy_meta_marks_background`) EXCLUDES a sub-agent
+/// from the window: a background sub-agent runs concurrently with the main agent,
+/// so the "window holds only sub-agent chunks" invariant that makes
+/// `should_suppress_subagent_chunk` safe would not hold. We treat a background
+/// marker exactly like a terminal frame (remove + record closed) so it can never
+/// suppress interleaved main-agent output. (`isBackground` can stream in a frame
+/// or two after the call opens, so a background sub-agent's earliest chunks may be
+/// briefly suppressed before the marker arrives — an accepted, rare imperfection;
+/// the user-reported case is foreground, where the marker is `false`.)
+///
+/// Gated on CodeBuddy so a single-agent-type connection of any other agent stays
+/// inert.
+fn track_subagent_window(
+    agent_type: AgentType,
+    is_agent: bool,
+    is_background: bool,
+    status: Option<&str>,
+    tool_call_id: &str,
+    open: &mut HashSet<String>,
+    closed: &mut HashSet<String>,
+) {
+    if agent_type != AgentType::CodeBuddy || !is_agent {
+        return;
+    }
+    let is_final = matches!(status, Some("completed") | Some("failed"));
+    if is_final || is_background {
+        open.remove(tool_call_id);
+        closed.insert(tool_call_id.to_string());
+    } else if !closed.contains(tool_call_id) {
+        open.insert(tool_call_id.to_string());
+    }
+}
+
+/// Per-session CodeBuddy live-stream state threaded through
+/// `emit_conversation_update`. Consolidates the authoritative title rewrites and
+/// the open-sub-agent suppression window so CodeBuddy's sparse, multi-frame
+/// sub-agent stream resolves to a stable Agent pill (whose children nest) with
+/// its interleaved thought/message chunks suppressed. Created per connection,
+/// shared across the idle and active-turn loops; the historical-replay path uses
+/// a throwaway instance. Mirrors `ToolCallOutputCache`'s lifetime.
+#[derive(Default)]
+struct CodeBuddyLiveState {
+    /// tool_call_id → authoritative title: `"agent"` for a native sub-agent, or
+    /// the inner `mcp__…` name for a `DeferExecuteTool` MCP call. Re-asserted on
+    /// every later frame so a status-only update can't downgrade the card.
+    title_overrides: HashMap<String, String>,
+    /// Sub-agent tool calls currently OPEN (classified, not yet completed/failed).
+    /// While non-empty, interleaved thought/message chunks belong to a sub-agent
+    /// and are suppressed from the top-level stream (matching Claude Code).
+    open_subagents: HashSet<String>,
+    /// Sub-agent tool calls that already reached a final status — guards against a
+    /// stray late non-final frame re-opening a finished sub-agent.
+    closed_subagents: HashSet<String>,
+}
+
+/// Resolve a tool call's title, honoring an authoritative rewrite recorded for
+/// the session in `overrides` (tool_call_id → resolved title).
+///
+/// Returns `Some(name)` when this event identifies a CodeBuddy `DeferExecuteTool`
+/// (the inner `mcp__…` name, from `raw_input`) or a sub-agent invocation
+/// (`"agent"`) — recording it — OR when a PRIOR event already classified this
+/// `tool_call_id` and this event lost the marker (the override is re-asserted).
+/// Returns `None` only when the call was never classified, so the caller falls
+/// back to the event's own title.
+///
+/// Sub-agent detection fires on EITHER `raw_input.subagent_type`
+/// (`is_subagent_invocation`) OR `meta_marks_subagent` — the precomputed
+/// `codebuddy_meta_marks_subagent` result. The meta signal is what makes the pill
+/// stable: CodeBuddy carries `codebuddy.ai/toolName == "Agent"` from the very
+/// first frame, whereas `subagent_type` only reaches `raw_input` dozens of frames
+/// later, so meta-first detection records the override immediately and every
+/// later (sparse) frame re-asserts it.
+///
+/// The re-assertion is the fix for CodeBuddy's status-only `ToolCallUpdate`s:
+/// they arrive without the original `subagent_type`/`toolName` payload but WITH
+/// the agent's raw (non-agent) title. Without it the frontend
+/// (`inferLiveToolName` → `getToolName`) downgrades the Agent / delegation card
+/// back to a generic tool call mid-stream — which also un-nests its children.
+/// `on_update` only tunes the (PII-safe, id-only) trace wording.
+fn resolve_rewritten_title(
+    agent_type: AgentType,
+    raw_input: &Option<String>,
+    tool_call_id: &str,
+    on_update: bool,
+    meta_marks_subagent: bool,
+    overrides: &mut HashMap<String, String>,
+) -> Option<String> {
+    if let Some(inner) = codebuddy_deferred_tool_name(agent_type, raw_input) {
+        tracing::info!(
+            "[ACP][{agent_type}] unwrapped DeferExecuteTool to its real MCP tool (tool_call_id={tool_call_id}, on_update={on_update})"
+        );
+        overrides.insert(tool_call_id.to_string(), inner.clone());
+        return Some(inner);
+    }
+    if is_subagent_invocation(agent_type, raw_input) || meta_marks_subagent {
+        tracing::info!(
+            "[ACP][{agent_type}] subagent detected, rewrote tool title to 'agent' (tool_call_id={tool_call_id}, on_update={on_update})"
+        );
+        overrides.insert(tool_call_id.to_string(), "agent".to_string());
+        return Some("agent".to_string());
+    }
+    overrides.get(tool_call_id).cloned()
 }
 
 fn map_plan_priority(priority: &PlanEntryPriority) -> String {
@@ -3875,6 +4158,12 @@ fn fix_usage_update_nulls(mut dispatch: Dispatch) -> Dispatch {
 /// `raw_output_cache` is a per-session cache used to detect cumulative
 /// snapshots from agents and convert them into incremental deltas so the
 /// event pipeline never carries a full N-MB tool output more than once.
+///
+/// `cb_state` is the per-session `CodeBuddyLiveState`: the authoritative
+/// title-rewrite map (so a status-only update can't downgrade an Agent /
+/// delegation card and un-nest its children) plus the open-sub-agent window used
+/// to suppress a CodeBuddy sub-agent's interleaved thought/message chunks.
+/// Mirrors `raw_output_cache`'s lifetime.
 async fn emit_conversation_update(
     state: &Arc<RwLock<SessionState>>,
     emitter: &EventEmitter,
@@ -3882,6 +4171,7 @@ async fn emit_conversation_update(
     update: SessionUpdate,
     cwd: Option<&str>,
     raw_output_cache: &mut ToolCallOutputCache,
+    cb_state: &mut CodeBuddyLiveState,
 ) {
     match update {
         SessionUpdate::UserMessageChunk(_) => {
@@ -3890,25 +4180,47 @@ async fn emit_conversation_update(
         }
         SessionUpdate::AgentMessageChunk(ContentChunk {
             content: ContentBlock::Text(text),
+            meta,
             ..
         }) => {
-            emit_with_state(state, emitter, AcpEvent::ContentDelta { text: text.text }).await;
+            // Drop a CodeBuddy sub-agent's interleaved message text — it belongs
+            // to the Agent pill, not the main thread (see
+            // `should_suppress_subagent_chunk`). No-op for every other agent.
+            if !should_suppress_subagent_chunk(
+                agent_type,
+                !cb_state.open_subagents.is_empty(),
+                meta.as_ref(),
+            ) {
+                emit_with_state(state, emitter, AcpEvent::ContentDelta { text: text.text }).await;
+            }
         }
         SessionUpdate::AgentMessageChunk(_) => {
             // Non-text chunks are currently not surfaced in live streaming UI.
         }
         SessionUpdate::AgentThoughtChunk(ContentChunk {
             content: ContentBlock::Text(text),
+            meta,
             ..
         }) => {
-            emit_with_state(state, emitter, AcpEvent::Thinking { text: text.text }).await;
+            // Same suppression for a sub-agent's interleaved reasoning.
+            if !should_suppress_subagent_chunk(
+                agent_type,
+                !cb_state.open_subagents.is_empty(),
+                meta.as_ref(),
+            ) {
+                emit_with_state(state, emitter, AcpEvent::Thinking { text: text.text }).await;
+            }
         }
         SessionUpdate::AgentThoughtChunk(_) => {
             // Non-text thought chunks are currently ignored.
         }
         SessionUpdate::ToolCall(tc) => {
             let tool_call_id = tc.tool_call_id.to_string();
-            let content = serialize_tool_call_content(&tc.content);
+            // CodeBuddy double-wraps a deferred MCP result as a `{type,text}`
+            // content part; peel it (in both the content and raw_output channels)
+            // so the dedicated delegation cards parse it instead of showing raw JSON.
+            let content = serialize_tool_call_content(&tc.content)
+                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c));
             let images = extract_tool_call_images(&tc.content);
             let raw_input =
                 json_value_to_text(&tc.raw_input).map(|text| resolve_live_tool_input(&text, cwd));
@@ -3916,6 +4228,7 @@ async fn emit_conversation_update(
             // treats `raw_output` as a full replacement, so we bypass
             // the diff path and seed the cache with the current snapshot.
             let raw_output = json_value_to_text(&tc.raw_output)
+                .map(|text| unwrap_codebuddy_deferred_output(agent_type, &text).unwrap_or(text))
                 .map(|text| structurize_live_output(&text))
                 .and_then(|text| raw_output_cache.seed(&tool_call_id, &text));
             let locations = if tc.locations.is_empty() {
@@ -3923,21 +4236,43 @@ async fn emit_conversation_update(
             } else {
                 serde_json::to_value(&tc.locations).ok()
             };
+            // Read the CodeBuddy sub-agent markers from `_meta` BEFORE it's moved
+            // into the emitted `Value` below — `meta_marks_subagent` is the early,
+            // reliable signal (frame 1) that keeps the Agent pill from flickering;
+            // `meta_marks_background` keeps a concurrent sub-agent out of the
+            // suppression window (see fn docs).
+            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tc.meta.as_ref());
+            let meta_marks_background = codebuddy_meta_marks_background(agent_type, tc.meta.as_ref());
             let meta = tc.meta.map(serde_json::Value::Object);
             let status = format!("{:?}", tc.status).to_lowercase();
             raw_output_cache.remove_if_final(&tool_call_id, Some(status.as_str()));
-            let title = if is_opencode_subagent_invocation(agent_type, &raw_input) {
-                // Avoid logging `tc.title` — it can be a model-generated user
-                // task description (PII-adjacent) and would create noise in
-                // server-mode log sinks. The opaque tool_call_id is enough
-                // to correlate this event with downstream traces.
-                tracing::info!(
-                    "[ACP][{agent_type}] subagent detected, rewrote tool title to 'agent' (tool_call_id={tool_call_id})"
-                );
-                "agent".to_string()
-            } else {
-                tc.title
-            };
+            // Avoid logging titles/payloads below — they can be model-generated
+            // user task descriptions (PII-adjacent) and would create noise in
+            // server-mode log sinks. The opaque tool_call_id is enough to
+            // correlate these events with downstream traces.
+            // Resolve (and record) any authoritative title rewrite so a later
+            // status-only update can't downgrade this card (see fn doc).
+            let title = resolve_rewritten_title(
+                agent_type,
+                &raw_input,
+                &tool_call_id,
+                false,
+                meta_marks_subagent,
+                &mut cb_state.title_overrides,
+            )
+            .unwrap_or(tc.title);
+            // Open/close the sub-agent suppression window for this call. `title ==
+            // "agent"` iff this is a classified native sub-agent (DeferExecuteTool
+            // rewrites to an `mcp__…` name, never "agent").
+            track_subagent_window(
+                agent_type,
+                title == "agent",
+                meta_marks_background,
+                Some(status.as_str()),
+                &tool_call_id,
+                &mut cb_state.open_subagents,
+                &mut cb_state.closed_subagents,
+            );
             emit_with_state(
                 state,
                 emitter,
@@ -3958,11 +4293,14 @@ async fn emit_conversation_update(
         }
         SessionUpdate::ToolCallUpdate(tcu) => {
             let tool_call_id = tcu.tool_call_id.to_string();
+            // Peel CodeBuddy's `{type,text}` deferred-MCP wrapper here too — the
+            // result often arrives on an update (see raw_output below).
             let content = tcu
                 .fields
                 .content
                 .as_deref()
-                .and_then(serialize_tool_call_content);
+                .and_then(serialize_tool_call_content)
+                .map(|c| unwrap_codebuddy_deferred_output(agent_type, &c).unwrap_or(c));
             let images = tcu
                 .fields
                 .content
@@ -3977,6 +4315,7 @@ async fn emit_conversation_update(
             // problem to O(N) while capping any single emitted chunk to
             // MAX_SINGLE_EMIT_BYTES.
             let raw_output_text = json_value_to_text(&tcu.fields.raw_output)
+                .map(|text| unwrap_codebuddy_deferred_output(agent_type, &text).unwrap_or(text))
                 .map(|text| structurize_live_output(&text));
             let (raw_output, raw_output_append) = match raw_output_text {
                 Some(text) => match raw_output_cache.consume(&tool_call_id, &text) {
@@ -3991,23 +4330,39 @@ async fn emit_conversation_update(
                 .as_ref()
                 .filter(|l| !l.is_empty())
                 .and_then(|l| serde_json::to_value(l).ok());
+            let meta_marks_subagent = codebuddy_meta_marks_subagent(agent_type, tcu.meta.as_ref());
+            let meta_marks_background = codebuddy_meta_marks_background(agent_type, tcu.meta.as_ref());
             let meta = tcu.meta.clone().map(serde_json::Value::Object);
             let status = tcu.fields.status.map(|s| format!("{:?}", s).to_lowercase());
             raw_output_cache.remove_if_final(&tool_call_id, status.as_deref());
-            // When this update carries the subagent payload, force-override the
-            // title — regardless of whether the update itself provides a title —
-            // so the frontend reducer replaces any earlier non-agent title set
-            // by the initial ToolCall (whose raw_input may have been empty).
-            // Logging mirrors the ToolCall arm: we deliberately omit the
-            // incoming title (user-generated content) to keep server logs clean.
-            let title = if is_opencode_subagent_invocation(agent_type, &raw_input) {
-                tracing::info!(
-                    "[ACP][{agent_type}] subagent detected, rewrote tool title to 'agent' (tool_call_id={tool_call_id}, on update)"
-                );
-                Some("agent".to_string())
-            } else {
-                tcu.fields.title
-            };
+            // Re-assert any authoritative title rewrite (see fn doc): an update
+            // that carries the subagent/deferred marker classifies (and records)
+            // the card, and — the key fix — a later status-only update that LOST
+            // the marker but carries the agent's raw (non-agent) title still
+            // resolves to the recorded override, so the Agent/delegation card and
+            // its child nesting (`getToolName === "agent"`) don't revert to a
+            // generic tool call mid-stream. Falls back to the event's own title
+            // for never-classified tool calls.
+            let title = resolve_rewritten_title(
+                agent_type,
+                &raw_input,
+                &tool_call_id,
+                true,
+                meta_marks_subagent,
+                &mut cb_state.title_overrides,
+            )
+            .or(tcu.fields.title);
+            // Keep/close the sub-agent suppression window by status (an update
+            // resolving to "agent" is a classified native sub-agent).
+            track_subagent_window(
+                agent_type,
+                title.as_deref() == Some("agent"),
+                meta_marks_background,
+                status.as_deref(),
+                &tool_call_id,
+                &mut cb_state.open_subagents,
+                &mut cb_state.closed_subagents,
+            );
             emit_with_state(
                 state,
                 emitter,
@@ -4491,7 +4846,7 @@ mod tests {
         assert!(out.len() <= 6); // at most 2 chars (6 bytes)
     }
 
-    // ─── is_opencode_subagent_invocation ─────────────────────────────────
+    // ─── is_subagent_invocation ─────────────────────────────────
 
     #[test]
     fn subagent_detects_opencode_with_subagent_type_regardless_of_title() {
@@ -4503,19 +4858,19 @@ mod tests {
         // solely on agent_type + subagent_type. Verify the detection
         // triggers regardless of the title shape.
         let input = Some(r#"{"subagent_type":"researcher","prompt":"x"}"#.to_string());
-        assert!(is_opencode_subagent_invocation(AgentType::OpenCode, &input));
+        assert!(is_subagent_invocation(AgentType::OpenCode, &input));
     }
 
     #[test]
-    fn subagent_rejects_when_agent_is_not_opencode() {
-        // Cross-agent isolation: even if a Claude/Codex tool happens to
-        // embed `subagent_type` in its input, we never rewrite the title.
+    fn subagent_gates_on_supported_agent_types() {
+        // OpenCode and CodeBuddy both rewrite a `subagent_type`-bearing call to
+        // the Agent card; other agents stay excluded so a generic `subagent_type`
+        // field never triggers a cross-agent collision.
         let input = Some(r#"{"subagent_type":"x"}"#.to_string());
-        assert!(!is_opencode_subagent_invocation(
-            AgentType::ClaudeCode,
-            &input
-        ));
-        assert!(!is_opencode_subagent_invocation(AgentType::Codex, &input));
+        assert!(is_subagent_invocation(AgentType::OpenCode, &input));
+        assert!(is_subagent_invocation(AgentType::CodeBuddy, &input));
+        assert!(!is_subagent_invocation(AgentType::ClaudeCode, &input));
+        assert!(!is_subagent_invocation(AgentType::Codex, &input));
     }
 
     #[test]
@@ -4527,7 +4882,7 @@ mod tests {
             r#"{"subagent_type":["a"]}"#,
         ] {
             assert!(
-                !is_opencode_subagent_invocation(AgentType::OpenCode, &Some(raw.to_string())),
+                !is_subagent_invocation(AgentType::OpenCode, &Some(raw.to_string())),
                 "expected false for raw_input={raw}"
             );
         }
@@ -4535,7 +4890,7 @@ mod tests {
 
     #[test]
     fn subagent_rejects_none_malformed_or_non_object_root() {
-        assert!(!is_opencode_subagent_invocation(AgentType::OpenCode, &None));
+        assert!(!is_subagent_invocation(AgentType::OpenCode, &None));
         for raw in [
             "not json",
             "{}",
@@ -4550,7 +4905,7 @@ mod tests {
             r#"{"note":"contains the word subagent_type as text"}"#,
         ] {
             assert!(
-                !is_opencode_subagent_invocation(AgentType::OpenCode, &Some(raw.to_string())),
+                !is_subagent_invocation(AgentType::OpenCode, &Some(raw.to_string())),
                 "expected false for raw_input={raw}"
             );
         }
@@ -4564,7 +4919,7 @@ mod tests {
         // returns false. Regression guard against any future "optimisation"
         // that conflates the substring check with the field check.
         let input = Some(r#"{"description":"use subagent_type=foo"}"#.to_string());
-        assert!(!is_opencode_subagent_invocation(
+        assert!(!is_subagent_invocation(
             AgentType::OpenCode,
             &input
         ));
@@ -4579,7 +4934,366 @@ mod tests {
             r#"{"description":"Explore project structure","prompt":"Look at the repo layout and summarise the stack.","subagent_type":"general-purpose"}"#
                 .to_string(),
         );
-        assert!(is_opencode_subagent_invocation(AgentType::OpenCode, &input));
+        assert!(is_subagent_invocation(AgentType::OpenCode, &input));
+    }
+
+    // ─── codebuddy_deferred_tool_name ────────────────────────────────────
+
+    #[test]
+    fn deferred_unwraps_codebuddy_mcp_tool_name() {
+        // CodeBuddy wraps MCP calls as `{toolName, params}` via DeferExecuteTool.
+        let input = Some(
+            r#"{"params":{"agent_type":"codex","task":"build"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+                .to_string(),
+        );
+        assert_eq!(
+            codebuddy_deferred_tool_name(AgentType::CodeBuddy, &input).as_deref(),
+            Some("mcp__codeg-mcp__delegate_to_agent")
+        );
+    }
+
+    #[test]
+    fn deferred_gates_on_codebuddy_and_shape() {
+        let wrapped = Some(
+            r#"{"params":{"task_id":"a"},"toolName":"mcp__codeg-mcp__cancel_delegation"}"#
+                .to_string(),
+        );
+        // Only CodeBuddy is unwrapped.
+        assert!(codebuddy_deferred_tool_name(AgentType::OpenCode, &wrapped).is_none());
+        // Missing `params`, missing/blank `toolName`, or non-wrapper shapes → None.
+        for raw in [
+            r#"{"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#, // no params
+            r#"{"params":{"x":1},"toolName":""}"#,                 // blank toolName
+            r#"{"params":{"x":1}}"#,                               // no toolName
+            r#"{"command":"ls"}"#,                                 // plain tool
+            "not json",
+        ] {
+            assert!(
+                codebuddy_deferred_tool_name(AgentType::CodeBuddy, &Some(raw.to_string())).is_none(),
+                "expected None for raw_input={raw}"
+            );
+        }
+        assert!(codebuddy_deferred_tool_name(AgentType::CodeBuddy, &None).is_none());
+    }
+
+    // ─── unwrap_codebuddy_deferred_output ────────────────────────────────
+
+    #[test]
+    fn deferred_output_peels_codebuddy_content_wrapper() {
+        // The exact live shape from the bug report: a `get_delegation_status`
+        // batch result double-wrapped as a `{text,type}` content part, whose
+        // inner `text` is the compact `{tasks:[...]}` JSON. Peeling it yields the
+        // bare report JSON the frontend `parseStatusReports` already understands.
+        let inner = r#"{"tasks":[{"status":"completed","task_id":"666da381","child_conversation_id":18,"text":"ok"}]}"#;
+        let wrapped = serde_json::json!({ "text": inner, "type": "text" }).to_string();
+        assert_eq!(
+            unwrap_codebuddy_deferred_output(AgentType::CodeBuddy, &wrapped).as_deref(),
+            Some(inner)
+        );
+    }
+
+    #[test]
+    fn deferred_output_gates_on_codebuddy_and_wrapper_shape() {
+        let wrapped =
+            serde_json::json!({ "text": "{\"status\":\"running\"}", "type": "text" }).to_string();
+        // Only CodeBuddy is unwrapped — the wrapper is a CodeBuddy quirk.
+        assert!(unwrap_codebuddy_deferred_output(AgentType::OpenCode, &wrapped).is_none());
+        assert!(unwrap_codebuddy_deferred_output(AgentType::ClaudeCode, &wrapped).is_none());
+        for raw in [
+            // Plain (non-deferred) tool output passes through untouched.
+            "build succeeded",
+            // A delegation report has no top-level `type` discriminator.
+            r#"{"status":"completed","task_id":"x","text":"done"}"#,
+            // A batch envelope is already in the bare shape — no `type` either.
+            r#"{"tasks":[{"status":"completed","task_id":"x"}]}"#,
+            // Wrong discriminator value.
+            r#"{"type":"image","text":"x"}"#,
+            // Missing inner `text`.
+            r#"{"type":"text"}"#,
+            "not json",
+        ] {
+            assert!(
+                unwrap_codebuddy_deferred_output(AgentType::CodeBuddy, raw).is_none(),
+                "expected pass-through (None) for output={raw}"
+            );
+        }
+    }
+
+    // ─── resolve_rewritten_title (title state across updates) ────────────
+
+    #[test]
+    fn rewritten_title_persists_across_status_only_updates() {
+        let mut overrides: HashMap<String, String> = HashMap::new();
+        let subagent = Some(
+            r#"{"description":"Run pnpm build","subagent_type":"general-purpose"}"#.to_string(),
+        );
+        // Initial event carrying the subagent marker → "agent", recorded.
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &subagent, "tc1", false, false, &mut overrides)
+                .as_deref(),
+            Some("agent")
+        );
+        // The bug: a later status-only update lost the marker (raw_input None).
+        // The override must be RE-ASSERTED, not downgraded to the event's title.
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", true, false, &mut overrides)
+                .as_deref(),
+            Some("agent"),
+            "a status-only update must not downgrade the Agent card mid-stream"
+        );
+        // Even an update whose raw_input looks like a different tool keeps it.
+        let bash = Some(r#"{"command":"ls"}"#.to_string());
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &bash, "tc1", true, false, &mut overrides)
+                .as_deref(),
+            Some("agent")
+        );
+        // A never-classified tool call returns None → caller uses its own title.
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc2", true, false, &mut overrides),
+            None
+        );
+        // Deferred MCP tool: inner name recorded, then re-asserted on a bare update.
+        let deferred = Some(
+            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+                .to_string(),
+        );
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &deferred, "tc3", false, false, &mut overrides)
+                .as_deref(),
+            Some("mcp__codeg-mcp__delegate_to_agent")
+        );
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc3", true, false, &mut overrides)
+                .as_deref(),
+            Some("mcp__codeg-mcp__delegate_to_agent")
+        );
+        // Non-CodeBuddy agent with no prior classification: never rewritten.
+        assert_eq!(
+            resolve_rewritten_title(AgentType::OpenCode, &None, "tc9", true, false, &mut overrides),
+            None
+        );
+    }
+
+    // ─── codebuddy_meta_marks_subagent ───────────────────────────────────
+
+    #[test]
+    fn meta_marks_subagent_reads_codebuddy_keys() {
+        // Any one of the three CodeBuddy sub-agent markers is sufficient.
+        let tool_name = serde_json::json!({ "codebuddy.ai/toolName": "Agent" });
+        let is_sub = serde_json::json!({ "codebuddy.ai/isSubagent": true });
+        let sub_type = serde_json::json!({ "codebuddy.ai/subagentType": "general-purpose" });
+        for meta in [&tool_name, &is_sub, &sub_type] {
+            assert!(codebuddy_meta_marks_subagent(
+                AgentType::CodeBuddy,
+                meta.as_object()
+            ));
+        }
+        // Gated on CodeBuddy: the generic `codebuddy.ai/*` keys can't classify
+        // another agent.
+        assert!(!codebuddy_meta_marks_subagent(
+            AgentType::OpenCode,
+            tool_name.as_object()
+        ));
+        // Negative shapes: non-Agent toolName, empty subagentType, absent meta.
+        let other = serde_json::json!({
+            "codebuddy.ai/toolName": "Bash",
+            "codebuddy.ai/subagentType": "",
+            "codebuddy.ai/isSubagent": false,
+        });
+        assert!(!codebuddy_meta_marks_subagent(
+            AgentType::CodeBuddy,
+            other.as_object()
+        ));
+        assert!(!codebuddy_meta_marks_subagent(AgentType::CodeBuddy, None));
+    }
+
+    #[test]
+    fn rewritten_title_fires_on_meta_before_raw_input() {
+        let mut overrides: HashMap<String, String> = HashMap::new();
+        // Frame 1: `raw_input` has NO `subagent_type` yet, but `_meta` already
+        // marks it (the early, reliable signal). Title must already be "agent".
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", false, true, &mut overrides)
+                .as_deref(),
+            Some("agent")
+        );
+        // Later sparse frames carry NEITHER signal — the override is re-asserted,
+        // so the pill never flickers back to a generic tool mid-stream.
+        assert_eq!(
+            resolve_rewritten_title(AgentType::CodeBuddy, &None, "tc1", true, false, &mut overrides)
+                .as_deref(),
+            Some("agent"),
+            "meta-classified Agent pill must stay 'agent' across signal-less frames"
+        );
+        // DeferExecuteTool still wins over the meta path (distinct mechanism).
+        let deferred = Some(
+            r#"{"params":{"agent_type":"codex","task":"x"},"toolName":"mcp__codeg-mcp__delegate_to_agent"}"#
+                .to_string(),
+        );
+        assert_eq!(
+            resolve_rewritten_title(
+                AgentType::CodeBuddy,
+                &deferred,
+                "tc2",
+                false,
+                false,
+                &mut overrides
+            )
+            .as_deref(),
+            Some("mcp__codeg-mcp__delegate_to_agent")
+        );
+    }
+
+    // ─── track_subagent_window / should_suppress_subagent_chunk ──────────
+
+    #[test]
+    fn subagent_window_opens_and_closes_by_status() {
+        let mut open: HashSet<String> = HashSet::new();
+        let mut closed: HashSet<String> = HashSet::new();
+        let fg = false; // foreground (not background)
+        // A non-final foreground agent frame opens the window.
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            true,
+            fg,
+            Some("in_progress"),
+            "a",
+            &mut open,
+            &mut closed,
+        );
+        assert!(open.contains("a"));
+        // A final frame closes it.
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            true,
+            fg,
+            Some("completed"),
+            "a",
+            &mut open,
+            &mut closed,
+        );
+        assert!(!open.contains("a"));
+        // A stray late non-final frame must NOT re-open a finished sub-agent.
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            true,
+            fg,
+            Some("in_progress"),
+            "a",
+            &mut open,
+            &mut closed,
+        );
+        assert!(!open.contains("a"), "completed sub-agent must not re-open");
+        // Non-agent tool calls never enter the window.
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            false,
+            fg,
+            Some("in_progress"),
+            "b",
+            &mut open,
+            &mut closed,
+        );
+        assert!(!open.contains("b"));
+        // Other agents are inert.
+        track_subagent_window(
+            AgentType::OpenCode,
+            true,
+            fg,
+            Some("in_progress"),
+            "c",
+            &mut open,
+            &mut closed,
+        );
+        assert!(!open.contains("c"));
+    }
+
+    #[test]
+    fn subagent_window_excludes_background_subagents() {
+        // A BACKGROUND sub-agent runs concurrently with the main agent, so it must
+        // never open the suppression window — otherwise interleaved MAIN-agent
+        // chunks would be wrongly dropped (the case the reviewer flagged).
+        let mut open: HashSet<String> = HashSet::new();
+        let mut closed: HashSet<String> = HashSet::new();
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            true,
+            true, // is_background
+            Some("in_progress"),
+            "bg",
+            &mut open,
+            &mut closed,
+        );
+        assert!(
+            !open.contains("bg"),
+            "a background sub-agent must not open the window"
+        );
+        // And once known-background, a later (still non-final, no-longer-marked)
+        // frame must not re-open it either.
+        track_subagent_window(
+            AgentType::CodeBuddy,
+            true,
+            false,
+            Some("in_progress"),
+            "bg",
+            &mut open,
+            &mut closed,
+        );
+        assert!(
+            !open.contains("bg"),
+            "a sub-agent seen as background must stay excluded"
+        );
+    }
+
+    #[test]
+    fn suppress_subagent_chunk_by_window_or_chunk_meta() {
+        // Inside an open FOREGROUND window → suppress. This is safe because the
+        // window only ever holds foreground (blocking) sub-agents, during which
+        // the parent model is suspended — so every chunk in the window is the
+        // sub-agent's, never main-agent output (background sub-agents, which could
+        // interleave main output, are excluded from the window upstream).
+        assert!(should_suppress_subagent_chunk(AgentType::CodeBuddy, true, None));
+        // Window closed and no chunk meta → emit (e.g. main-agent text before the
+        // sub-agent opens or after it closes).
+        assert!(!should_suppress_subagent_chunk(
+            AgentType::CodeBuddy,
+            false,
+            None
+        ));
+        // Window closed but the chunk's own meta marks it → suppress (precision
+        // supplement; never relied on alone).
+        let sub = serde_json::json!({ "codebuddy.ai/isSubagent": true });
+        let parented = serde_json::json!({ "codebuddy.ai/parentToolCallId": "call_x" });
+        for meta in [&sub, &parented] {
+            assert!(should_suppress_subagent_chunk(
+                AgentType::CodeBuddy,
+                false,
+                meta.as_object()
+            ));
+        }
+        // Other agents never suppress, even inside a (spurious) open window.
+        assert!(!should_suppress_subagent_chunk(AgentType::OpenCode, true, None));
+    }
+
+    #[test]
+    fn meta_marks_background_reads_codebuddy_flag() {
+        let bg = serde_json::json!({ "codebuddy.ai/isBackground": true });
+        let fg = serde_json::json!({ "codebuddy.ai/isBackground": false });
+        assert!(codebuddy_meta_marks_background(
+            AgentType::CodeBuddy,
+            bg.as_object()
+        ));
+        // Foreground (the user-reported case), absent flag, and other agents → false.
+        assert!(!codebuddy_meta_marks_background(
+            AgentType::CodeBuddy,
+            fg.as_object()
+        ));
+        assert!(!codebuddy_meta_marks_background(AgentType::CodeBuddy, None));
+        assert!(!codebuddy_meta_marks_background(
+            AgentType::OpenCode,
+            bg.as_object()
+        ));
     }
 
     // ─── inject_codeg_mcp: enabled=false short-circuit ──────────
