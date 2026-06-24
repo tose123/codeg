@@ -15,7 +15,8 @@ use std::path::Path;
 
 use codeg_lib::parsers::{
     claude::ClaudeParser, cline::ClineParser, codex::CodexParser, gemini::GeminiParser,
-    hermes::HermesParser, openclaw::OpenClawParser, opencode::OpenCodeParser, AgentParser,
+    hermes::HermesParser, kimi_code::KimiCodeParser, openclaw::OpenClawParser,
+    opencode::OpenCodeParser, AgentParser,
 };
 use insta::assert_json_snapshot;
 use serde_json::json;
@@ -739,6 +740,86 @@ fn hermes_minimal_session_snapshot() {
         .get_conversation(session_id)
         .expect("get conversation");
     assert_json_snapshot!("hermes_detail", detail, {
+        ".**.started_at" => "[ts]",
+        ".**.ended_at" => "[ts]",
+        ".**.timestamp" => "[ts]",
+        ".**.completed_at" => "[ts]",
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Kimi Code
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn kimi_code_minimal_session_snapshot() {
+    let temp = tempfile::tempdir().expect("create tempdir");
+    let home = temp.path().to_path_buf();
+    // Kimi stores `<home>/sessions/<workDirKey>/<sessionId>/…`; the parser's
+    // base_dir is the `sessions` directory and `session_index.jsonl` sits at the
+    // home root (the only source of the session's working directory).
+    let base = home.join("sessions");
+    let bucket = "wd_demo_abcdef123456";
+    let session_id = "session_kimi_001";
+    let session_dir = base.join(bucket).join(session_id);
+
+    // state.json carries the title (and no cwd — that is by design).
+    write(
+        &session_dir.join("state.json"),
+        &json!({
+            "title": "build the app",
+            "createdAt": "2026-03-01T10:00:00Z",
+            "isCustomTitle": false
+        })
+        .to_string(),
+    );
+    // session_index.jsonl → working directory.
+    write(
+        &home.join("session_index.jsonl"),
+        &format!(
+            "{}\n",
+            json!({"sessionId": session_id, "sessionDir": "ignored", "workDir": "/tmp/demo"})
+        ),
+    );
+    // The session log is the only place the real model id appears.
+    write(
+        &session_dir.join("logs").join("kimi-code.log"),
+        "2026-03-01T10:00:00.000Z INFO  llm config  provider=kimi model=kimi-k2.7-code modelAlias=codeg-managed\n",
+    );
+
+    // The wire event stream: prompt → think → Read tool → result → text, with a
+    // per-step usage record for each of the two steps.
+    let wire = [
+        json!({"type":"metadata","protocol_version":"1.4","created_at":1772359200000i64}),
+        json!({"type":"config.update","modelAlias":"codeg-managed","thinkingLevel":"high","time":1772359200000i64}),
+        json!({"type":"turn.prompt","input":[{"type":"text","text":"build the app"}],"origin":{"kind":"user"},"time":1772359201000i64}),
+        json!({"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>ignored</system-reminder>"}],"origin":{"kind":"injection"}},"time":1772359201001i64}),
+        json!({"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"inspect the entry file first"}},"time":1772359202000i64}),
+        json!({"type":"context.append_loop_event","event":{"type":"tool.call","toolCallId":"Read_0","name":"Read","args":{"file_path":"/tmp/demo/app.ts"}},"time":1772359203000i64}),
+        json!({"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"Read_0","toolCallId":"Read_0","result":{"output":"   1→export const x = 1\n   2→export const y = 2"}},"time":1772359204000i64}),
+        json!({"type":"usage.record","model":"codeg-managed","usage":{"inputOther":1200,"output":40,"inputCacheRead":800,"inputCacheCreation":0},"usageScope":"turn","time":1772359204500i64}),
+        json!({"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"The app exports x and y."}},"time":1772359205000i64}),
+        json!({"type":"usage.record","model":"codeg-managed","usage":{"inputOther":60,"output":80,"inputCacheRead":2000,"inputCacheCreation":0},"usageScope":"turn","time":1772359205500i64}),
+    ];
+    let wire_text = wire
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(
+        &session_dir.join("agents").join("main").join("wire.jsonl"),
+        &format!("{wire_text}\n"),
+    );
+
+    let parser = KimiCodeParser::with_base_dir(base);
+    let summaries = parser.list_conversations().expect("list kimi");
+    let detail = parser.get_conversation(session_id).expect("detail kimi");
+
+    assert_json_snapshot!("kimi_code_list", summaries, {
+        ".**.started_at" => "[ts]",
+        ".**.ended_at" => "[ts]",
+    });
+    assert_json_snapshot!("kimi_code_detail", detail, {
         ".**.started_at" => "[ts]",
         ".**.ended_at" => "[ts]",
         ".**.timestamp" => "[ts]",

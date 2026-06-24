@@ -103,6 +103,17 @@ pub fn external_transcript_sources() -> Vec<ExternalSource> {
             is_file: false,
             include_top: None,
         },
+        ExternalSource {
+            // Kimi Code keeps a directory-per-session transcript store under
+            // `~/.kimi-code/sessions/` plus a `session_index.jsonl` (the only
+            // source of each session's working directory). Archive both, but
+            // allowlist them so the sibling `config.toml` / `credentials/` /
+            // `oauth/` are excluded (see `parsers::kimi_code`).
+            agent: "kimi-code",
+            root: kimi_code::resolve_kimi_code_home_dir(),
+            is_file: false,
+            include_top: Some(&["sessions", "session_index.jsonl"]),
+        },
     ];
     if let Some(home) = dirs::home_dir() {
         sources.push(ExternalSource {
@@ -423,6 +434,9 @@ pub fn infer_context_window_max_tokens(model: Option<&str>) -> Option<u64> {
     }
     if normalized.starts_with("gemini") {
         return Some(1_000_000);
+    }
+    if normalized.starts_with("kimi") {
+        return Some(262_144);
     }
 
     match normalized.as_str() {
