@@ -396,6 +396,13 @@ Next.js 16 (Static Export) + React 19
 
 - Obrigado à comunidade [LinuxDO](https://linux.do) pelo apoio
 
+## Coffee
+
+- Se o Codeg foi útil para você, considere me pagar um café
+
+<img src="../images/weixin-sponsor-light.jpg#gh-light-mode-only" alt="Apoiar o Codeg" width="240" />
+<img src="../images/weixin-sponsor-dark.jpg#gh-dark-mode-only" alt="Apoiar o Codeg" width="240" />
+
 ## Agradecimentos
 
 - [ACP](https://agentclientprotocol.com) — o Agent Client Protocol (ACP) é a base que permite ao Codeg conectar-se a múltiplos agentes

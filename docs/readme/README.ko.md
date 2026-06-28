@@ -396,6 +396,13 @@ Next.js 16 (Static Export) + React 19
 
 - [LinuxDO](https://linux.do) 커뮤니티의 지원에 감사드립니다
 
+## Coffee
+
+- Codeg가 도움이 되었다면 커피 한 잔을 후원해 주세요
+
+<img src="../images/weixin-sponsor-light.jpg#gh-light-mode-only" alt="Codeg 후원" width="240" />
+<img src="../images/weixin-sponsor-dark.jpg#gh-dark-mode-only" alt="Codeg 후원" width="240" />
+
 ## 감사의 말
 
 - [ACP](https://agentclientprotocol.com) — Agent Client Protocol(ACP)은 Codeg가 여러 에이전트에 연결할 수 있게 해주는 기반입니다

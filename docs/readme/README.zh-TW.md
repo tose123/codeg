@@ -396,6 +396,13 @@ Next.js 16 (Static Export) + React 19
 
 - 感謝 [LinuxDO](https://linux.do) 社群的支持
 
+## Coffee
+
+- 如果 Codeg 對你有幫助，不如請我喝杯咖啡吧
+
+<img src="../images/weixin-sponsor-light.jpg#gh-light-mode-only" alt="贊助 Codeg" width="240" />
+<img src="../images/weixin-sponsor-dark.jpg#gh-dark-mode-only" alt="贊助 Codeg" width="240" />
+
 ## 致謝
 
 - [ACP](https://agentclientprotocol.com)：智能體客戶端協定 (ACP) 是 codeg 實現多智能體連接的基礎
