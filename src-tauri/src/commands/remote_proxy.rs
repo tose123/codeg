@@ -361,7 +361,7 @@ pub async fn remote_http_call(
 /// the file I/O cost — the remote `/api/upload_attachment` enforces the
 /// same cap regardless, but a 100 MB read followed by a base64 encode and
 /// an IPC trip would be a noticeable waste compared to early rejection.
-const UPLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const UPLOAD_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Maximum tolerated base64 payload length, pre-decode. Exactly
 /// `ceil(UPLOAD_MAX_BYTES / 3) * 4` — that formula already accounts for

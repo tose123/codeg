@@ -191,7 +191,7 @@ pub async fn create_file_tree_entry(
 /// The check inside the streaming loop is defense-in-depth: axum's
 /// `DefaultBodyLimit` rejects the request before reaching here, but a future
 /// limit change must not silently allow oversized writes to disk.
-pub const UPLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const UPLOAD_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Env-controlled cap on the *total* bytes resident under
 /// `uploads_root/`. Per-file `UPLOAD_MAX_BYTES` bounds one payload; this

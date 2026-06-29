@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 
 const FS_MAX_CONCURRENT_OPS: usize = 8;
 const FS_IO_TIMEOUT: Duration = Duration::from_secs(30);
-const FS_MAX_FILE_SIZE_BYTES: u64 = 16 * 1024 * 1024;
+const FS_MAX_FILE_SIZE_BYTES: u64 = 25 * 1024 * 1024;
 const FS_MAX_READ_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const FS_MAX_WRITE_BYTES: usize = 2 * 1024 * 1024;
 const FS_SLOW_OPERATION_MS: u128 = 200;
