@@ -10,6 +10,7 @@ import { DirectoryBrowserDialog } from "./directory-browser-dialog"
 // Only the two filesystem reads the dialog performs are mocked; path-utils is
 // left real so the production parentFsPath logic is exercised end to end.
 const api = vi.hoisted(() => ({
+  createFolderDirectory: vi.fn(),
   getHomeDirectory: vi.fn(),
   listDirectoryEntries: vi.fn(),
 }))
@@ -65,6 +66,8 @@ beforeEach(() => {
   setOpenExternal = () => {}
   api.getHomeDirectory.mockReset()
   api.getHomeDirectory.mockResolvedValue("/home/me")
+  api.createFolderDirectory.mockReset()
+  api.createFolderDirectory.mockResolvedValue(undefined)
   api.listDirectoryEntries.mockReset()
   api.listDirectoryEntries.mockResolvedValue([])
 })
@@ -103,6 +106,33 @@ describe("DirectoryBrowserDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select" }))
     await screen.findByDisplayValue("/home/me/work")
     expect(onSelect).toHaveBeenCalledWith("/home/me/work")
+  })
+
+  it("creates a new directory and selects it when enabled", async () => {
+    api.listDirectoryEntries.mockImplementation((p: string) =>
+      p === "/home/me/new-work" ? Promise.resolve([]) : Promise.resolve([])
+    )
+    render(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <DirectoryBrowserDialog
+          open
+          onOpenChange={onOpenChange}
+          onSelect={onSelect}
+          initialPath="/home/me"
+          allowCreateDirectory
+        />
+      </NextIntlClientProvider>
+    )
+    await screen.findByDisplayValue("/home/me")
+
+    fireEvent.click(screen.getByRole("button", { name: "New Folder" }))
+    fireEvent.change(screen.getByPlaceholderText("Folder name"), {
+      target: { value: "new-work" },
+    })
+    fireEvent.click(screen.getByTitle("Create"))
+
+    await screen.findByDisplayValue("/home/me/new-work")
+    expect(api.createFolderDirectory).toHaveBeenCalledWith("/home/me/new-work")
   })
 
   it("keeps the dialog open and shows an error when the typed path is invalid", async () => {

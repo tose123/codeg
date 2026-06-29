@@ -2671,6 +2671,9 @@
     "loading": "Loading...",
     "emptyDirectory": "This directory is empty",
     "errorLoadingDir": "Failed to load directory",
+    "newFolder": "New Folder",
+    "folderNamePlaceholder": "Folder name",
+    "create": "Create",
     "permissionDenied": "Permission denied"
   },
   "ServerFileBrowser": {

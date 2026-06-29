@@ -2671,6 +2671,9 @@
     "loading": "로딩 중...",
     "emptyDirectory": "이 디렉토리는 비어 있습니다",
     "errorLoadingDir": "디렉토리 로딩 실패",
+    "newFolder": "새 폴더",
+    "folderNamePlaceholder": "폴더 이름",
+    "create": "만들기",
     "permissionDenied": "권한이 없습니다"
   },
   "ChatChannelSettings": {

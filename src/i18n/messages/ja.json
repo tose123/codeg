@@ -2671,6 +2671,9 @@
     "loading": "読み込み中...",
     "emptyDirectory": "このディレクトリは空です",
     "errorLoadingDir": "ディレクトリの読み込みに失敗しました",
+    "newFolder": "新しいフォルダ",
+    "folderNamePlaceholder": "フォルダ名",
+    "create": "作成",
     "permissionDenied": "アクセス権がありません"
   },
   "ChatChannelSettings": {

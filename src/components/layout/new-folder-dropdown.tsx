@@ -74,6 +74,7 @@ export function NewFolderDropdown() {
       <DirectoryBrowserDialog
         open={browserOpen}
         onOpenChange={setBrowserOpen}
+        allowCreateDirectory
         onSelect={(path) => {
           openFolder(path).catch((err) => {
             console.error("[NewFolderDropdown] failed to open folder:", err)

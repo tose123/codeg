@@ -2025,6 +2025,7 @@ export function SidebarConversationList({
       <DirectoryBrowserDialog
         open={browserOpen}
         onOpenChange={setBrowserOpen}
+        allowCreateDirectory
         onSelect={handleBrowserSelect}
       />
     </div>

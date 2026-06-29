@@ -2671,6 +2671,9 @@
     "loading": "Wird geladen...",
     "emptyDirectory": "Dieses Verzeichnis ist leer",
     "errorLoadingDir": "Verzeichnis konnte nicht geladen werden",
+    "newFolder": "Neuer Ordner",
+    "folderNamePlaceholder": "Ordnername",
+    "create": "Erstellen",
     "permissionDenied": "Zugriff verweigert"
   },
   "ChatChannelSettings": {

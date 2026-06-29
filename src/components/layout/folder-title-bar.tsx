@@ -332,6 +332,7 @@ export function FolderTitleBar() {
       <DirectoryBrowserDialog
         open={browserOpen}
         onOpenChange={setBrowserOpen}
+        allowCreateDirectory
         onSelect={(path) => {
           openFolder(path).catch((err) => {
             console.error("[FolderTitleBar] failed to open folder:", err)

@@ -2671,6 +2671,9 @@
     "loading": "載入中...",
     "emptyDirectory": "此目錄為空",
     "errorLoadingDir": "載入目錄失敗",
+    "newFolder": "新建資料夾",
+    "folderNamePlaceholder": "資料夾名",
+    "create": "建立",
     "permissionDenied": "權限不足"
   },
   "ChatChannelSettings": {

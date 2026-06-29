@@ -2671,6 +2671,9 @@
     "loading": "جاري التحميل...",
     "emptyDirectory": "هذا المجلد فارغ",
     "errorLoadingDir": "فشل في تحميل المجلد",
+    "newFolder": "مجلد جديد",
+    "folderNamePlaceholder": "اسم المجلد",
+    "create": "إنشاء",
     "permissionDenied": "تم رفض الإذن"
   },
   "ChatChannelSettings": {

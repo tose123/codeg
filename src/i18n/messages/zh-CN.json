@@ -2671,6 +2671,9 @@
     "loading": "加载中...",
     "emptyDirectory": "此目录为空",
     "errorLoadingDir": "加载目录失败",
+    "newFolder": "新建文件夹",
+    "folderNamePlaceholder": "文件夹名",
+    "create": "创建",
     "permissionDenied": "权限不足"
   },
   "ServerFileBrowser": {

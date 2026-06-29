@@ -9,12 +9,15 @@ import {
 } from "react"
 import { useTranslations } from "next-intl"
 import {
+  Check,
   ChevronRight,
   ChevronUp,
   FolderIcon,
+  FolderPlus,
   FolderOpenIcon,
   Home,
   Loader2,
+  X,
 } from "lucide-react"
 import {
   Dialog,
@@ -27,8 +30,12 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import { getHomeDirectory, listDirectoryEntries } from "@/lib/api"
-import { parentFsPath } from "@/lib/path-utils"
+import {
+  createFolderDirectory,
+  getHomeDirectory,
+  listDirectoryEntries,
+} from "@/lib/api"
+import { joinFsPath, parentFsPath } from "@/lib/path-utils"
 import type { DirectoryEntry } from "@/lib/types"
 
 interface DirectoryBrowserDialogProps {
@@ -37,6 +44,7 @@ interface DirectoryBrowserDialogProps {
   onSelect: (path: string) => void
   title?: string
   initialPath?: string
+  allowCreateDirectory?: boolean
 }
 
 /**
@@ -58,6 +66,7 @@ export function DirectoryBrowserDialog({
   onSelect,
   title,
   initialPath,
+  allowCreateDirectory = false,
 }: DirectoryBrowserDialogProps) {
   const t = useTranslations("DirectoryBrowser")
 
@@ -70,6 +79,9 @@ export function DirectoryBrowserDialog({
   const [loading, setLoading] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
+  const [createDirectoryOpen, setCreateDirectoryOpen] = useState(false)
+  const [creatingDirectory, setCreatingDirectory] = useState(false)
+  const [createDirectoryName, setCreateDirectoryName] = useState("")
 
   const initialized = useRef(false)
   // Monotonic session id, bumped synchronously on every real open/close
@@ -168,6 +180,9 @@ export function DirectoryBrowserDialog({
     setError(null)
     setLoading(new Set())
     setConfirming(false)
+    setCreateDirectoryOpen(false)
+    setCreatingDirectory(false)
+    setCreateDirectoryName("")
 
     const init = async () => {
       try {
@@ -264,6 +279,51 @@ export function DirectoryBrowserDialog({
       }
     },
     [pathInput, navigateTo]
+  )
+
+  const handleCreateDirectory = useCallback(async () => {
+    const parentPath = pathInput.trim()
+    const name = createDirectoryName.trim()
+    if (!parentPath || !name || creatingDirectory) return
+
+    const targetPath = joinFsPath(parentPath, name)
+    const gen = sessionGen.current
+    setCreatingDirectory(true)
+    setError(null)
+    try {
+      await createFolderDirectory(targetPath)
+      if (gen !== sessionGen.current) return
+      setEntries((prev) => {
+        const next = new Map(prev)
+        next.delete(parentPath)
+        return next
+      })
+      setCreateDirectoryName("")
+      setCreateDirectoryOpen(false)
+      setCreatingDirectory(false)
+      await navigateTo(targetPath)
+    } catch {
+      if (gen === sessionGen.current) {
+        setError(t("errorLoadingDir"))
+        setCreatingDirectory(false)
+      }
+    }
+  }, [createDirectoryName, creatingDirectory, navigateTo, pathInput, t])
+
+  const handleCreateDirectoryKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === "Enter") {
+        e.preventDefault()
+        handleCreateDirectory()
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setCreateDirectoryName("")
+        setCreateDirectoryOpen(false)
+        setCreatingDirectory(false)
+      }
+    },
+    [handleCreateDirectory]
   )
 
   const handleDoubleClick = useCallback(
@@ -409,21 +469,80 @@ export function DirectoryBrowserDialog({
           </ScrollArea>
         </div>
 
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            type="button"
-          >
-            {t("cancel")}
-          </Button>
-          <Button
-            onClick={handleConfirm}
-            disabled={!pathInput.trim() || confirming}
-            type="button"
-          >
-            {t("select")}
-          </Button>
+        <DialogFooter className="items-center gap-2 sm:justify-between">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {allowCreateDirectory &&
+              (createDirectoryOpen ? (
+                <>
+                  <Input
+                    value={createDirectoryName}
+                    onChange={(e) => setCreateDirectoryName(e.target.value)}
+                    onKeyDown={handleCreateDirectoryKeyDown}
+                    placeholder={t("folderNamePlaceholder")}
+                    className="h-8 min-w-0 flex-1 text-sm"
+                    disabled={creatingDirectory}
+                    autoFocus
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-8 shrink-0"
+                    onClick={handleCreateDirectory}
+                    disabled={!createDirectoryName.trim() || creatingDirectory}
+                    title={t("create")}
+                    type="button"
+                  >
+                    {creatingDirectory ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Check className="size-4" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-8 shrink-0"
+                    onClick={() => {
+                      setCreateDirectoryName("")
+                      setCreateDirectoryOpen(false)
+                    }}
+                    disabled={creatingDirectory}
+                    title={t("cancel")}
+                    type="button"
+                  >
+                    <X className="size-4" />
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2"
+                  onClick={() => setCreateDirectoryOpen(true)}
+                  disabled={!pathInput.trim()}
+                  type="button"
+                >
+                  <FolderPlus className="size-4" />
+                  {t("newFolder")}
+                </Button>
+              ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              type="button"
+            >
+              {t("cancel")}
+            </Button>
+            <Button
+              onClick={handleConfirm}
+              disabled={!pathInput.trim() || confirming}
+              type="button"
+            >
+              {t("select")}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

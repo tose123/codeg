@@ -2671,6 +2671,9 @@
     "loading": "Cargando...",
     "emptyDirectory": "Este directorio está vacío",
     "errorLoadingDir": "Error al cargar el directorio",
+    "newFolder": "Nueva carpeta",
+    "folderNamePlaceholder": "Nombre de carpeta",
+    "create": "Crear",
     "permissionDenied": "Permiso denegado"
   },
   "ChatChannelSettings": {
