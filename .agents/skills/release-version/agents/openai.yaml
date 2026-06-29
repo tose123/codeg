@@ -1,4 +1,4 @@
 interface:
   display_name: "发布版本"
-  short_description: "按中国标准时间创建版本标签并推送当前分支与标签到远端仓库"
-  default_prompt: "使用 $release-version 为当前 HEAD 创建中国标准时间版本 tag，并推送代码和 tag 到 origin。"
+  short_description: "同步应用版本并创建中国时间版本标签"
+  default_prompt: "使用 $release-version 同步应用版本，创建中国标准时间版本 tag，并推送代码和 tag 到 origin。"
