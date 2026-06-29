@@ -313,8 +313,45 @@ jobs:
           fi
           ls -la "$file"
 
-      - name: Import Apple Developer ID certificate
+      - name: Detect Apple signing availability
         if: contains(matrix.target, 'apple-darwin')
+        id: apple-signing
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for name in \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            KEYCHAIN_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Apple signing + notarization enabled for ${{ matrix.target }}"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            printf 'Apple signing disabled for %s; missing secret(s): %s\n' \
+              "${{ matrix.target }}" \
+              "${missing[*]}"
+          fi
+
+      - name: Import Apple Developer ID certificate
+        if: contains(matrix.target, 'apple-darwin') && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -389,7 +426,7 @@ jobs:
           security find-identity -v -p codesigning "$keychain_path"
 
       - name: Resolve Apple Developer ID identity
-        if: contains(matrix.target, 'apple-darwin')
+        if: contains(matrix.target, 'apple-darwin') && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -490,7 +527,7 @@ jobs:
           retryAttempts: 2
 
       - name: Build, sign, notarize, and upload to draft release (macOS)
-        if: contains(matrix.target, 'apple-darwin')
+        if: contains(matrix.target, 'apple-darwin') && steps.apple-signing.outputs.enabled == 'true'
         uses: tauri-apps/tauri-action@v0.6.1
         env:
           # The matrix-target sidecar is already staged and verified above.
@@ -514,8 +551,30 @@ jobs:
           includeUpdaterJson: true
           retryAttempts: 2
 
+      - name: Build and upload to draft release (macOS unsigned)
+        if: contains(matrix.target, 'apple-darwin') && steps.apple-signing.outputs.enabled != 'true'
+        uses: tauri-apps/tauri-action@v0.6.1
+        env:
+          # The matrix-target sidecar is already staged and verified above.
+          # Skip the duplicate beforeBuildCommand sidecar pass so cross builds
+          # do not fall back to the runner host triple.
+          CODEG_SKIP_SIDECAR: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-draft-release.outputs.release_id }}
+          tagName: ${{ github.ref_name }}
+          releaseBody: ${{ needs.create-draft-release.outputs.release_body }}
+          releaseDraft: true
+          prerelease: ${{ needs.create-draft-release.outputs.prerelease }}
+          tauriScript: pnpm tauri
+          args: --target ${{ matrix.target }} --no-sign
+          includeUpdaterJson: true
+          retryAttempts: 2
+
       - name: Delete Apple signing keychain
-        if: always() && contains(matrix.target, 'apple-darwin')
+        if: always() && contains(matrix.target, 'apple-darwin') && steps.apple-signing.outputs.enabled == 'true'
         shell: bash
         run: |
           if [ -n "${APPLE_ORIGINAL_DEFAULT_KEYCHAIN:-}" ]; then
