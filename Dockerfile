@@ -45,7 +45,7 @@ COPY --from=backend /app/src-tauri/target/release/codeg-mcp /usr/local/bin/codeg
 COPY --from=frontend /app/out /app/web
 
 ENV CODEG_STATIC_DIR=/app/web
-ENV CODEG_DATA_DIR=/data
+ENV CODEG_DATA_DIR=/root/.local/share/codeg
 ENV CODEG_PORT=3080
 ENV CODEG_HOST=0.0.0.0
 ENV SHELL=/bin/bash
@@ -54,6 +54,10 @@ ENV SHELL=/bin/bash
 # supervisor waits before relaunching the worker after an upgrade.
 ENV CODEG_RUNTIME=docker
 ENV CODEG_RESTART_DELAY_MS=2000
+
+ENV NPM_CONFIG_PREFIX=/root/.npm-global
+ENV PATH=$NPM_CONFIG_PREFIX/bin:$PATH
+RUN mkdir -p "$NPM_CONFIG_PREFIX"
 
 EXPOSE 3080
 VOLUME /data
