@@ -1,25 +1,18 @@
 services:
-  codeg:
-    build: .
-    # Or use a pre-built image:
-    # image: xintaofei/codeg:latest
-    ports:
-      - "3080:3080"
-    volumes:
-      - codeg-data:/data
-      # Mount your project directories (optional):
-      # - /path/to/projects:/projects
+  codeg-user1:
+    image: ghcr.io/tose123/codeg:latest
+    container_name: codeg-user1
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     environment:
       - CODEG_TOKEN=${CODEG_TOKEN:-}
       - CODEG_PORT=3080
-      - CODEG_HOST=0.0.0.0
-    # In-place upgrades (Settings → Software Update) rewrite the binaries and
-    # web assets inside this container's writable layer, not the image. The
-    # codeg-data volume persists, but an upgrade lives only in the running
-    # container: recreating it (`--force-recreate`, or recreating after a
-    # `docker pull`) starts from the image again and drops the upgrade. Build or
-    # pull an image at the new version and recreate to make it permanent.
+      - CODEG_UPLOAD_MAX_TOTAL_BYTES=2147483648 # 2GiB
+    ports:
+      - 3080:3080
+    volumes:
+      - ./data/user1:/root
     restart: unless-stopped
-
-volumes:
-  codeg-data:
