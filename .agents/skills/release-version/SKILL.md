@@ -1,21 +1,21 @@
 ---
 name: release-version
-description: Create and push a timestamped release tag for this repository. Use when the user asks to publish a version, run "/release-version" or "release-version", says "发布版本", "发版", "打 tag", or wants a China Standard Time format vYY.MMDD.HHMM release tag, with src-tauri/tauri.conf.json version synchronized and committed when needed, then pushed to origin with the current branch.
+description: Create and push a semver-compatible timestamped release tag for this repository. Use when the user asks to publish a version, run "/release-version" or "release-version", says "发布版本", "发版", "打 tag", or wants a China Standard Time semver release tag, with all release-owned version files synchronized to the tag (including `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the `codeg` package entry in `src-tauri/Cargo.lock`) and committed when needed, then pushed to origin with the current branch.
 ---
 
 # Release Version
 
 ## Purpose
 
-Publish the current repository state by creating a China Standard Time release tag, ensuring `src-tauri/tauri.conf.json` has a matching version first, then pushing the current branch and the new tag to `origin`.
+Publish the current repository state by creating a China Standard Time semver-compatible release tag, ensuring all release-owned version files match it first, then pushing the current branch and the new tag to `origin`.
 
 Tag format is always:
 
 ```bash
-vYY.MMDD.HHMM
+vYY.M.DHHMM
 ```
 
-Example: `v26.0601.2355`.
+Example: `v26.6.292023`.
 
 ## Workflow
 
@@ -45,16 +45,51 @@ Rules:
 Generate the tag with China Standard Time explicitly, regardless of the machine's local timezone:
 
 ```bash
-tag="$(TZ=Asia/Shanghai date '+v%y.%m%d.%H%M')"
+tag="$(TZ=Asia/Shanghai node -e '
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  process.stdout.write(`v${yy}.${month}.${day}${hh}${mm}`);
+')"
 ```
 
 Validate the tag shape:
 
 ```bash
-case "$tag" in
-  v[0-9][0-9].[0-9][0-9][0-9][0-9].[0-9][0-9][0-9][0-9]) ;;
-  *) echo "Invalid release tag: $tag"; exit 1 ;;
-esac
+TAG="$tag" node -e '
+  const tag = process.env.TAG;
+  const match = /^v(\d{2})\.(\d+)\.(\d+)$/.exec(tag);
+  if (!match) {
+    throw new Error(`Invalid release tag: ${tag}`);
+  }
+
+  const month = Number(match[2]);
+  const patch = Number(match[3]);
+  const day = Math.floor(patch / 10000);
+  const hhmm = patch % 10000;
+  const hour = Math.floor(hhmm / 100);
+  const minute = hhmm % 100;
+
+  if (
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    throw new Error(`Invalid release tag: ${tag}`);
+  }
+'
 ```
 
 Before creating it, verify the tag does not already exist locally or on `origin`:
@@ -67,39 +102,123 @@ git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && echo
 
 If the tag already exists because another release happened in the same minute, wait until the next China Standard Time minute, regenerate the tag, and re-run the checks. Do not reuse or move the existing tag.
 
-### 3. Synchronize the app version
+### 3. Synchronize all release-owned version files
 
-Before creating the tag, verify that the candidate tag matches the Tauri app version:
+Before creating the tag, verify that all release-owned version files match the candidate tag, then update only those owned version fields to the new tag version:
 
 ```bash
-version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-if [ "v$version" != "$tag" ]; then
-  new_version="${tag#v}"
-  NEW_VERSION="$new_version" node -e '
+new_version="${tag#v}"
+package_version="$(node -p "require('./package.json').version")"
+cargo_version="$(node -e '
+  const fs = require("fs");
+  const text = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+  const match = text.match(/^version = "([^"]+)"/m);
+  if (!match) {
+    throw new Error("version field not found in src-tauri/Cargo.toml");
+  }
+  process.stdout.write(match[1]);
+')"
+tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+lock_version="$(node -e '
+  const fs = require("fs");
+  const text = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
+  const match = text.match(/\[\[package\]\]\nname = "codeg"\nversion = "([^"]+)"/);
+  if (!match) {
+    throw new Error("codeg package version not found in src-tauri/Cargo.lock");
+  }
+  process.stdout.write(match[1]);
+')"
+
+if [ "$package_version" != "$new_version" ] || \
+   [ "$cargo_version" != "$new_version" ] || \
+   [ "$tauri_version" != "$new_version" ] || \
+   [ "$lock_version" != "$new_version" ]; then
+  NEW_VERSION="$new_version" \
+  node -e '
     const fs = require("fs");
-    const path = "src-tauri/tauri.conf.json";
-    const version = process.env.NEW_VERSION;
-    const text = fs.readFileSync(path, "utf8");
-    if (!/"version"\s*:\s*"[^"]+"/.test(text)) {
-      throw new Error("version field not found in src-tauri/tauri.conf.json");
+
+    const updates = [
+      {
+        path: "package.json",
+        pattern: /"version"\s*:\s*"[^"]+"/,
+        replacement: `"version": "${process.env.NEW_VERSION}"`,
+        missing: "version field not found in package.json",
+      },
+      {
+        path: "src-tauri/Cargo.toml",
+        pattern: /^version = "[^"]+"/m,
+        replacement: `version = "${process.env.NEW_VERSION}"`,
+        missing: "version field not found in src-tauri/Cargo.toml",
+      },
+      {
+        path: "src-tauri/tauri.conf.json",
+        pattern: /"version"\s*:\s*"[^"]+"/,
+        replacement: `"version": "${process.env.NEW_VERSION}"`,
+        missing: "version field not found in src-tauri/tauri.conf.json",
+      },
+      {
+        path: "src-tauri/Cargo.lock",
+        pattern: /(\[\[package\]\]\nname = "codeg"\nversion = ")[^"]+(")/,
+        replacement: `$1${process.env.NEW_VERSION}$2`,
+        missing: "codeg package version not found in src-tauri/Cargo.lock",
+      },
+    ];
+
+    for (const update of updates) {
+      const text = fs.readFileSync(update.path, "utf8");
+      if (!update.pattern.test(text)) {
+        throw new Error(update.missing);
+      }
+
+      fs.writeFileSync(
+        update.path,
+        text.replace(update.pattern, update.replacement),
+      );
     }
-    fs.writeFileSync(
-      path,
-      text.replace(/"version"\s*:\s*"[^"]+"/, `"version": "${version}"`),
-    );
   '
 
-  git diff --check -- src-tauri/tauri.conf.json
-  git diff -- src-tauri/tauri.conf.json
-  git add src-tauri/tauri.conf.json
+  package_version="$(node -p "require('./package.json').version")"
+  cargo_version="$(node -e '
+    const fs = require("fs");
+    const text = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+    const match = text.match(/^version = "([^"]+)"/m);
+    if (!match) {
+      throw new Error("version field not found in src-tauri/Cargo.toml");
+    }
+    process.stdout.write(match[1]);
+  ')"
+  tauri_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+  lock_version="$(node -e '
+    const fs = require("fs");
+    const text = fs.readFileSync("src-tauri/Cargo.lock", "utf8");
+    const match = text.match(/\[\[package\]\]\nname = "codeg"\nversion = "([^"]+)"/);
+    if (!match) {
+      throw new Error("codeg package version not found in src-tauri/Cargo.lock");
+    }
+    process.stdout.write(match[1]);
+  ')"
+
+  if [ "$package_version" != "$new_version" ] || \
+     [ "$cargo_version" != "$new_version" ] || \
+     [ "$tauri_version" != "$new_version" ] || \
+     [ "$lock_version" != "$new_version" ]; then
+    echo "Failed to synchronize all release-owned version files"
+    exit 1
+  fi
+
+  git diff --check -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
+  git diff -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
+  git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock
   git commit -m "chore(release): bump version to $new_version"
 fi
 ```
 
 Rules:
 
-- The release tag is the source of truth. `src-tauri/tauri.conf.json.version` must equal the tag without the leading `v`.
-- If the version does not match, commit only `src-tauri/tauri.conf.json` before creating the tag.
+- The release tag is the source of truth. `package.json.version`, `src-tauri/Cargo.toml.version`, `src-tauri/tauri.conf.json.version`, and the `codeg` package version in `src-tauri/Cargo.lock` must all equal the tag without the leading `v`.
+- The tag format itself must already be valid semver after removing the leading `v`.
+- Update only release-owned version fields. Do not replace third-party dependency versions that happen to equal the old app version, such as unrelated entries in `Cargo.lock`.
+- If the version does not match, commit the synchronized version files before creating the tag.
 - Use the latest commit after the version bump as the tag target.
 - If the version already matches, do not create a version bump commit.
 - If the version update introduces unexpected file changes, stop and report the diff instead of committing.

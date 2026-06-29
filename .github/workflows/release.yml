@@ -52,20 +52,6 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Verify tag matches app version
-        shell: bash
-        run: |
-          APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          if [[ "v$APP_VERSION" != "${GITHUB_REF_NAME}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match app version v$APP_VERSION"
-            exit 1
-          fi
-
       - id: release
         name: Create or reuse draft release
         uses: actions/github-script@v7
