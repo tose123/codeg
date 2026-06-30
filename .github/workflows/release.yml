@@ -607,7 +607,7 @@ jobs:
             fi
           done
 
-  build-server:
+  build-server-linux:
     needs: create-draft-release
     name: Server ${{ matrix.name }}
     permissions:
@@ -624,6 +624,148 @@ jobs:
             runner: "ubuntu-22.04"
             target: "aarch64-unknown-linux-gnu"
             artifact: "codeg-server-linux-arm64"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: server-${{ matrix.target }}
+
+      - name: Install Linux arm64 cross compiler
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          cat > /tmp/sources.list << 'EOF'
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse
+          deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse
+          deb [arch=amd64] http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+          EOF
+          sudo mv /etc/apt/sources.list /etc/apt/sources.list.default
+          sudo mv /tmp/sources.list /etc/apt/sources.list
+
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          # libssl3 is Multi-Arch: same; align the preinstalled :amd64 copy
+          # with the version libssl-dev:arm64 pins so the cross install isn't
+          # blocked by a held-back amd64 copy (same failure mode as the desktop
+          # arm64 build — see the build-tauri step for the full rationale).
+          sudo apt-get install -y --only-upgrade libssl3
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libssl-dev:arm64
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc-ar" >> "$GITHUB_ENV"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build server + codeg-mcp companion
+        working-directory: src-tauri
+        # `codeg-mcp` is the stdio MCP companion the runtime injects per
+        # session (see acp/delegation/companion.rs). Built with the same
+        # `--no-default-features --target` flags as the server so it shares
+        # the cross-compile env (Linux arm64) without dragging in tauri
+        # runtime deps.
+        run: |
+          cargo build --release --bin codeg-server --no-default-features --target ${{ matrix.target }}
+          cargo build --release --bin codeg-mcp --no-default-features --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        run: |
+          mkdir -p dist/${{ matrix.artifact }}
+          cp src-tauri/target/${{ matrix.target }}/release/codeg-server dist/${{ matrix.artifact }}/
+          cp src-tauri/target/${{ matrix.target }}/release/codeg-mcp dist/${{ matrix.artifact }}/
+          chmod +x dist/${{ matrix.artifact }}/codeg-server dist/${{ matrix.artifact }}/codeg-mcp
+          cp -r out dist/${{ matrix.artifact }}/web
+          cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Smoke test packaged artifact (Unix)
+        run: |
+          set -euo pipefail
+          test -x "dist/${{ matrix.artifact }}/codeg-server"
+          test -x "dist/${{ matrix.artifact }}/codeg-mcp"
+          # `codeg-mcp --help` exits 0 without flags and prints the usage
+          # line. Only run it for native targets; cross-compiled arm64
+          # binaries on x64 runners can't execute.
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            "dist/${{ matrix.artifact }}/codeg-mcp" --help | grep -F 'codeg-mcp --parent-connection-id'
+          else
+            echo "skipping codeg-mcp --help on cross-target ${{ matrix.target }}"
+          fi
+
+      - name: Upload artifact for Docker build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 1
+
+      # Sign the server bundle with the SAME minisign key the desktop
+      # updater uses (`tauri signer sign` writes `<file>.sig`). The server's
+      # `update::verify` module verifies this signature against the embedded
+      # public key before installing — see src-tauri/src/update/verify.rs.
+      - name: Sign and checksum bundle (Unix)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          pnpm tauri signer sign "dist/${{ matrix.artifact }}.tar.gz"
+          test -f "dist/${{ matrix.artifact }}.tar.gz.sig"
+          ( cd dist && shasum -a 256 "${{ matrix.artifact }}.tar.gz" > "${{ matrix.artifact }}.tar.gz.sha256" )
+
+      - name: Upload to release (Unix)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "dist/${{ matrix.artifact }}.tar.gz" \
+            "dist/${{ matrix.artifact }}.tar.gz.sig" \
+            "dist/${{ matrix.artifact }}.tar.gz.sha256" \
+            --clobber
+
+  build-server:
+    needs: create-draft-release
+    name: Server ${{ matrix.name }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - name: "macOS x64"
             runner: "macos-latest"
             target: "x86_64-apple-darwin"
@@ -824,7 +966,7 @@ jobs:
   build-docker:
     needs:
       - create-draft-release
-      - build-server
+      - build-server-linux
     name: Build Docker image
     runs-on: ubuntu-22.04
     permissions:
@@ -894,9 +1036,10 @@ jobs:
     needs:
       - create-draft-release
       - build-tauri
+      - build-server-linux
       - build-server
       - build-docker
-    if: ${{ needs.build-tauri.result == 'success' && needs.build-server.result == 'success' && needs.build-docker.result == 'success' }}
+    if: ${{ needs.build-tauri.result == 'success' && needs.build-server-linux.result == 'success' && needs.build-server.result == 'success' && needs.build-docker.result == 'success' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
