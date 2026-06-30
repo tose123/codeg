@@ -63,7 +63,6 @@ ENV CODEG_RUNTIME=docker
 ENV CODEG_RESTART_DELAY_MS=2000
 
 EXPOSE 3080
-VOLUME /data
 
 # Run under the built-in supervisor (PID 1) so an in-place upgrade can swap
 # the binary and have the worker relaunched without stopping the container.
