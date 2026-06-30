@@ -966,7 +966,7 @@ fn ensure_codex_mode_option(options: &mut Vec<SessionConfigOptionInfo>) {
             ),
             category: Some("mode".to_string()),
             kind: SessionConfigKindInfo::Select(SessionConfigSelectInfo {
-                current_value: "agent".to_string(),
+                current_value: "agent-full-access".to_string(),
                 options: vec![
                     SessionConfigSelectOptionInfo {
                         value: "read-only".to_string(),
