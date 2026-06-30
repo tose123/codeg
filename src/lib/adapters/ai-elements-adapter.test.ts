@@ -12,6 +12,10 @@ import {
   type AdaptedContentPart,
   type AdaptedToolCallPart,
 } from "./ai-elements-adapter"
+import {
+  appendFeedbackReminder,
+  FEEDBACK_REMINDER_SENTINEL,
+} from "@/lib/feedback-reminder"
 
 function poll(toolName: string, taskId?: string): AdaptedToolCallPart {
   return {
@@ -131,6 +135,29 @@ describe("groupConsecutiveToolCalls", () => {
       "tool-group",
       "tool-call",
     ])
+  })
+
+  it("leaves plan-mode tools standalone (no '思考 N 次' tool-group)", () => {
+    const out = groupConsecutiveToolCalls([
+      poll("read"),
+      poll("EnterPlanMode"),
+      poll("read"),
+    ])
+
+    expect(out.map((p) => p.type)).toEqual([
+      "tool-group",
+      "tool-call",
+      "tool-group",
+    ])
+  })
+
+  it("does not wrap a lone plan-mode tool into a group", () => {
+    expect(
+      groupConsecutiveToolCalls([poll("EnterPlanMode")]).map((p) => p.type)
+    ).toEqual(["tool-call"])
+    expect(
+      groupConsecutiveToolCalls([poll("switch_mode")]).map((p) => p.type)
+    ).toEqual(["tool-call"])
   })
 })
 
@@ -636,6 +663,53 @@ describe("adaptMessageTurn plan handling", () => {
     ])
   })
 
+  it("drops an empty redacted-thinking block and renders EnterPlanMode standalone (history)", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "plan-mode",
+        role: "assistant",
+        timestamp: "2026-06-29T00:00:00.000Z",
+        blocks: [
+          { type: "thinking", text: "" },
+          { type: "text", text: "I'll plan it first" },
+          {
+            type: "tool_use",
+            tool_use_id: "epm-1",
+            tool_name: "EnterPlanMode",
+            input_preview: "{}",
+          },
+        ],
+      },
+      msgText,
+      false
+    )
+
+    // Empty thinking is dropped; EnterPlanMode is a standalone tool-call (not a
+    // "思考 N 次" tool-group).
+    expect(adapted.content.map((p) => p.type)).toEqual(["text", "tool-call"])
+    const tc = adapted.content[1]
+    if (tc.type !== "tool-call") throw new Error("expected a tool-call")
+    expect(tc.toolName).toBe("EnterPlanMode")
+  })
+
+  it("keeps an empty thinking block while streaming (live Thinking… indicator)", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "plan-mode-live",
+        role: "assistant",
+        timestamp: "2026-06-29T00:00:00.000Z",
+        blocks: [{ type: "thinking", text: "" }],
+      },
+      msgText,
+      true
+    )
+
+    expect(adapted.content.map((p) => p.type)).toEqual(["reasoning"])
+    const reasoning = adapted.content[0]
+    if (reasoning.type !== "reasoning") throw new Error("expected a reasoning")
+    expect(reasoning.isStreaming).toBe(true)
+  })
+
   it("converts a persisted TodoWrite tool_use (+ its result) into a single plan part with no orphan tool-result", () => {
     const adapted = adaptMessageTurn(
       {
@@ -722,6 +796,89 @@ describe("adaptMessageTurn plan handling", () => {
 
     expect(adapted.content.every((p) => p.type !== "plan")).toBe(true)
   })
+
+  it("converts a persisted Kimi Code TodoList write (title/status shape) into a single plan part", () => {
+    const adapted = adaptMessageTurn(
+      {
+        id: "hist-kimi-plan",
+        role: "assistant",
+        timestamp: "2026-06-02T00:00:00.000Z",
+        blocks: [
+          {
+            type: "tool_use",
+            tool_use_id: "kc-todo-1",
+            tool_name: "TodoList",
+            input_preview: JSON.stringify({
+              todos: [
+                { status: "in_progress", title: "Confirm 401 behavior" },
+                { status: "pending", title: "Unify request.js" },
+                { status: "done", title: "Verify changes" },
+              ],
+            }),
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "kc-todo-1",
+            output_preview: "Todo list updated.",
+            is_error: false,
+          },
+        ],
+      },
+      msgText,
+      false
+    )
+
+    expect(adapted.content.map((p) => p.type)).toEqual(["plan"])
+    expect(adapted.content.some((p) => p.type === "tool-result")).toBe(false)
+    const plan = adapted.content[0]
+    if (plan.type !== "plan") throw new Error("expected a plan part")
+    expect(plan.entries).toEqual([
+      {
+        content: "Confirm 401 behavior",
+        status: "in_progress",
+        priority: "medium",
+      },
+      { content: "Unify request.js", status: "pending", priority: "medium" },
+      { content: "Verify changes", status: "completed", priority: "medium" },
+    ])
+  })
+
+  it.each([
+    ["read", "{}"],
+    ["clear", JSON.stringify({ todos: [] })],
+  ])(
+    "keeps a persisted Kimi TodoList %s (no entries) as a tool card, not a plan part",
+    (_label, inputPreview) => {
+      const adapted = adaptMessageTurn(
+        {
+          id: "hist-kimi-noop",
+          role: "assistant",
+          timestamp: "2026-06-02T00:00:00.000Z",
+          blocks: [
+            {
+              type: "tool_use",
+              tool_use_id: "kc-todo-1",
+              tool_name: "TodoList",
+              input_preview: inputPreview,
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "kc-todo-1",
+              output_preview: "Todo list (empty).",
+              is_error: false,
+            },
+          ],
+        },
+        msgText,
+        false
+      )
+
+      expect(adapted.content.every((p) => p.type !== "plan")).toBe(true)
+      // The non-write TodoList renders through the normal tool-card path
+      // (wrapped in a tool-group by groupConsecutiveToolCalls).
+      expect(adapted.content.some((p) => p.type === "tool-group")).toBe(true)
+    }
+  )
 })
 
 describe("adaptMessageTurn — image tool results", () => {
@@ -1136,5 +1293,66 @@ describe("adaptMessageTurn — user reference resources", () => {
       .join("\n")
     expect(joined).toContain("[#42](codeg://session/codex_abc)")
     expect(joined).toContain("[foo.ts](file:///x/foo.ts)")
+  })
+})
+
+describe("adaptMessageTurn — live-feedback reminder stripping", () => {
+  const msgText = {
+    attachedResources: "Attached resources",
+    toolCallFailed: "Tool failed",
+  }
+  const reminder = "Periodically check for my live feedback."
+
+  it("strips the auto-injected reminder from a user turn so it never shows", () => {
+    // Exactly what the send chokepoint puts on the wire — appendFeedbackReminder
+    // brackets the reminder with the sentinel. On reload the user turn is
+    // reparsed with it attached; the adapter must hide it again.
+    const original = "refactor the auth module"
+    const blocks = appendFeedbackReminder(
+      [{ type: "text", text: original }],
+      reminder
+    )
+    const adapted = adaptMessageTurn(
+      { id: "u1", role: "user", timestamp: "2026-06-11T00:00:00.000Z", blocks },
+      msgText
+    )
+
+    expect(adapted.content).toHaveLength(1)
+    const part = adapted.content[0]
+    if (part.type !== "text") throw new Error("expected a text part")
+    expect(part.text).toBe(original)
+    expect(part.text).not.toContain(FEEDBACK_REMINDER_SENTINEL)
+    expect(part.text).not.toContain(reminder)
+  })
+
+  it("drops the text part entirely when the message was only the reminder", () => {
+    // Attachments-only send: appendFeedbackReminder adds a trailing text block
+    // that is nothing but the reminder. After stripping it collapses to empty
+    // and must not leave a blank text bubble behind.
+    const blocks = appendFeedbackReminder([], reminder)
+    const adapted = adaptMessageTurn(
+      { id: "u2", role: "user", timestamp: "2026-06-11T00:00:00.000Z", blocks },
+      msgText
+    )
+
+    expect(adapted.content.some((p) => p.type === "text")).toBe(false)
+  })
+
+  it("does not strip the sentinel from an assistant turn (user-only)", () => {
+    const text = `here you go\n\n${FEEDBACK_REMINDER_SENTINEL} ${reminder}`
+    const adapted = adaptMessageTurn(
+      {
+        id: "a1",
+        role: "assistant",
+        timestamp: "2026-06-11T00:00:00.000Z",
+        blocks: [{ type: "text", text }],
+      },
+      msgText
+    )
+
+    const joined = adapted.content
+      .map((p) => (p.type === "text" ? p.text : ""))
+      .join("\n")
+    expect(joined).toContain(FEEDBACK_REMINDER_SENTINEL)
   })
 })

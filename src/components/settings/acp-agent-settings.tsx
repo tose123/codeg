@@ -120,6 +120,7 @@ import {
   type OpenCodeModelOptionGroup,
 } from "@/lib/opencode-connect"
 import { toErrorMessage } from "@/lib/app-error"
+import { getInstallErrorHintKey } from "@/lib/agent-install-error"
 import { useAgentInstallStream } from "@/hooks/use-agent-install-stream"
 import { OpencodePluginsModal } from "./opencode-plugins-modal"
 import { CodeBuddyConfigPanel } from "./codebuddy-config-panel"
@@ -4334,13 +4335,14 @@ export function AcpAgentSettings() {
         )
       } catch (err) {
         const message = toErrorMessage(err)
+        const hintKey = getInstallErrorHintKey(message)
         toast.error(
           t("toasts.agentActionFailed", {
             name: agent.name,
             action: actionLabel,
           }),
           {
-            description: message,
+            description: hintKey ? t(hintKey, { name: agent.name }) : message,
           }
         )
         if (cleanFirst) {
@@ -4406,8 +4408,9 @@ export function AcpAgentSettings() {
         })
       } catch (err) {
         const message = toErrorMessage(err)
+        const hintKey = getInstallErrorHintKey(message)
         toast.error(t("toasts.uninstallFailed", { name: agent.name }), {
-          description: message,
+          description: hintKey ? t(hintKey, { name: agent.name }) : message,
         })
         throw err
       } finally {

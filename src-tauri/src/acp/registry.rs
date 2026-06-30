@@ -159,8 +159,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Claude Code",
             description: "ACP wrapper for Anthropic's Claude",
             distribution: AgentDistribution::Npx {
-                version: "0.52.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.52.0",
+                version: "0.53.0",
+                package: "@agentclientprotocol/claude-agent-acp@0.53.0",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -174,13 +174,14 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             description: "ACP adapter for OpenAI's coding assistant",
             // codex-acp moved from zed-industries (Rust binary) to the
             // agentclientprotocol org (TypeScript rewrite, npx-distributed).
-            // 1.0.1 bundles `@openai/codex` 0.142.2 and drives `codex
-            // app-server`; it also resolves the resumed `model_provider` from
-            // `~/.codex/config.toml` (#224), so codeg no longer injects
-            // `MODEL_PROVIDER` to keep resumed sessions on the custom provider.
+            // 1.0.2 bundles `@openai/codex` 0.142.4 and drives `codex
+            // app-server`; since 1.0.1 it also resolves the resumed
+            // `model_provider` from `~/.codex/config.toml` (#224), so codeg no
+            // longer injects `MODEL_PROVIDER` to keep resumed sessions on the
+            // custom provider.
             distribution: AgentDistribution::Npx {
-                version: "1.0.1",
-                package: "@agentclientprotocol/codex-acp@1.0.1",
+                version: "1.0.2",
+                package: "@agentclientprotocol/codex-acp@1.0.2",
                 cmd: "codex-acp",
                 args: &[],
                 env: &[],
@@ -223,8 +224,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.31",
-                package: "cline@3.0.31",
+                version: "3.0.33",
+                package: "cline@3.0.33",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -297,8 +298,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "CodeBuddy",
             description: "Tencent Cloud's official AI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "2.112.1",
-                package: "@tencent-ai/codebuddy-code@2.112.1",
+                version: "2.114.0",
+                package: "@tencent-ai/codebuddy-code@2.114.0",
                 cmd: "codebuddy",
                 args: &["--acp"],
                 env: &[],
@@ -311,8 +312,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "0.20.1",
-                package: "@moonshot-ai/kimi-code@0.20.1",
+                version: "0.20.2",
+                package: "@moonshot-ai/kimi-code@0.20.2",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -437,8 +438,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.52.0",
-            "@agentclientprotocol/claude-agent-acp@0.52.0",
+            "0.53.0",
+            "@agentclientprotocol/claude-agent-acp@0.53.0",
             None,
         );
         assert_npx_version(
@@ -453,23 +454,23 @@ mod tests {
             "openclaw@2026.6.10",
             Some("22.19.0"),
         );
-        assert_npx_version(AgentType::Cline, "3.0.31", "cline@3.0.31", None);
+        assert_npx_version(AgentType::Cline, "3.0.33", "cline@3.0.33", None);
         assert_npx_version(
             AgentType::CodeBuddy,
-            "2.112.1",
-            "@tencent-ai/codebuddy-code@2.112.1",
+            "2.114.0",
+            "@tencent-ai/codebuddy-code@2.114.0",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::KimiCode,
-            "0.20.1",
-            "@moonshot-ai/kimi-code@0.20.1",
+            "0.20.2",
+            "@moonshot-ai/kimi-code@0.20.2",
             Some("22.19.0"),
         );
         assert_npx_version(
             AgentType::Codex,
-            "1.0.1",
-            "@agentclientprotocol/codex-acp@1.0.1",
+            "1.0.2",
+            "@agentclientprotocol/codex-acp@1.0.2",
             None,
         );
         assert_npx_version(AgentType::Pi, "0.0.31", "pi-acp@0.0.31", Some("22.0.0"));

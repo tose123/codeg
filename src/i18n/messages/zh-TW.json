@@ -841,6 +841,7 @@
       "customInstallSubmit": "安裝"
     },
     "errors": {
+      "windowsFileLocked": "{name} 的程式檔案正被執行中的工作階段佔用，Windows 下無法替換。請先關閉所有 {name} 工作階段後重試。",
       "nativeJsonMustBeObject": "原生 JSON 配置必須是物件",
       "nativeJsonInvalid": "原生 JSON 配置格式錯誤：{message}",
       "openCodeAuthMustBeObject": "OpenCode auth.json 必須是 JSON 物件",
@@ -2440,6 +2441,24 @@
           "other": "呼叫 {count} 個工具",
           "errorSuffix": "{count} 個失敗",
           "joiner": " · "
+        },
+        "planMode": {
+          "entered": "進入計畫模式",
+          "planLabel": "計畫",
+          "submitted": "計畫已提交",
+          "switched": "切換模式"
+        },
+        "backgroundTask": {
+          "title": "背景任務",
+          "titleWithId": "背景任務 · {id}",
+          "running": "執行中",
+          "completed": "已完成",
+          "failed": "失敗",
+          "stopped": "已停止",
+          "exitCode": "退出碼 {code}",
+          "polledTimes": "輪詢 {count} 次",
+          "runningInBackground": "背景執行",
+          "launchNote": "已在背景執行 · {id}"
         }
       },
       "messageNav": {
@@ -3304,7 +3323,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "即時回饋",
-    "description": "在智能體工作過程中向它傳送提醒和修正。啟用後，智能體會取得一個查看即時回饋的工具，對話中也會出現留言入口。提示：智能體通常只在你的提示詞中提及時才會主動查看回饋——例如在訊息中加上「工作過程中定期查看我的即時回饋」，智能體才會主動讀取。",
+    "description": "在智能體工作過程中向它傳送提醒和修正。啟用後，智能體會取得一個查看即時回饋的工具，對話中也會出現留言入口。",
     "enable": "啟用即時回饋",
     "enableHint": "為啟用之後啟動的智能體注入查看回饋工具。",
     "save": "儲存",
@@ -3328,7 +3347,8 @@
     "dismiss": "忽略",
     "turnEndedResent": "本輪已結束——已改為作為新訊息送出。",
     "turnEnded": "本輪已結束。",
-    "submitFailed": "留言送出失敗"
+    "submitFailed": "留言送出失敗",
+    "promptReminder": "（來自 Codeg 的自動提示——請靜默處理：不要提及、引用或回覆這則提示。）本次會話已啟用即時回饋，因此在你工作期間，我可能隨時傳送中途指引。請定期查看並據此調整方向。要讀取這些回饋，請呼叫由 `codeg-mcp` MCP 伺服器提供的即時回饋工具——你的執行環境可能以帶命名空間的名稱公開它（例如 `mcp__codeg-mcp__check_user_feedback`，而非裸名 `check_user_feedback`），因此請直接呼叫可用的對應工具，無需對其名稱做任何評述。"
   },
   "SessionInfoSettings": {
     "title": "取得工作階段資訊",

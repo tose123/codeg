@@ -6,6 +6,17 @@ import { PermissionDialog } from "./permission-dialog"
 import enMessages from "@/i18n/messages/en.json"
 import type { PendingPermission } from "@/contexts/acp-connections-context"
 
+// MessageResponse (Streamdown) pulls in async Shiki highlighting + the
+// link-safety hook — too heavy for this unit test, and its Markdown correctness
+// is covered elsewhere. Stub it to a sentinel that echoes its source so we can
+// assert the agent's content text is routed THROUGH the Markdown renderer
+// rather than dumped as raw JSON.
+vi.mock("@/components/ai-elements/message", () => ({
+  MessageResponse: ({ children }: { children: string }) => (
+    <div data-testid="markdown-response">{children}</div>
+  ),
+}))
+
 function renderWithIntl(ui: React.ReactElement) {
   return render(
     <NextIntlClientProvider locale="en" messages={enMessages}>
@@ -86,5 +97,38 @@ describe("PermissionDialog", () => {
     expect(pre).not.toBeNull()
     expect(pre?.textContent).toContain("hello")
     expect(pre?.textContent).toContain("world")
+  })
+
+  it("renders the agent description from ACP content text instead of raw JSON", () => {
+    // Kimi Code carries the request description in the ACP `content` array
+    // (`{ type: "content", content: { type: "text", text } }`) and populates
+    // nothing in rawInput. The dialog should surface that text via the Markdown
+    // renderer rather than dumping the whole tool_call as raw JSON.
+    const permission: PendingPermission = {
+      request_id: "req-kimi",
+      tool_call: {
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Requesting approval to Running: mkdir -p app/todo-test",
+            },
+          },
+        ],
+        title: "Bash",
+        toolCallId: "0:Bash_8",
+        kind: "execute",
+      },
+      options: baseOptions,
+    }
+    const { container } = renderWithIntl(
+      <PermissionDialog permission={permission} onRespond={() => {}} />
+    )
+    const markdown = screen.getByTestId("markdown-response")
+    expect(markdown).toHaveTextContent(
+      "Requesting approval to Running: mkdir -p app/todo-test"
+    )
+    expect(container.querySelector("pre")).toBeNull()
   })
 })

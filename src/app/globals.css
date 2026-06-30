@@ -1119,6 +1119,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Streamdown mermaid: keep diagrams crisp when zoomed.
+   The pan/zoom container applies `transform: scale()` together with an inline
+   `will-change: transform`. That pins it to a composited layer rasterized once
+   at 1x, and the GPU then upscales that bitmap on zoom — in WKWebView (Tauri)
+   this blurs the whole SVG (shapes + labels), worst at max zoom. Dropping
+   will-change lets the browser repaint the SVG vectors at the actual zoom level.
+   The component's inline style is not !important, so this rule wins the cascade.
+   Covers both the inline and fullscreen views (both render the same container). */
+[data-streamdown="mermaid"] [role="application"] {
+  will-change: auto !important;
+}
+
 /* Tool collapsible: fade-in on expand (height must change instantly for virtualizer) */
 .tool-collapsible-content[data-state="open"] > * {
   animation: tool-content-fade 150ms ease-out;

@@ -42,6 +42,7 @@ export interface ParsedPermissionToolCall {
   url: string | null
   query: string | null
   prompt: string | null
+  contentText: string | null
   jsonPreview: string
 }
 
@@ -465,6 +466,53 @@ function extractContentDiffChanges(
   return changes
 }
 
+/**
+ * Pull the agent's human-readable description out of the ACP `content` array.
+ *
+ * Some agents (e.g. Kimi Code) populate nothing in `rawInput` and instead carry
+ * the request description as a `ToolCallContent::Content` item — shaped
+ * `{ type: "content", content: { type: "text", text: "..." } }`. Without this,
+ * `parsePermissionToolCall` finds no structured fields and the dialog falls back
+ * to dumping raw JSON. ACP says clients SHOULD render this text as Markdown.
+ *
+ * Defensive about shape: also accepts a flattened `{ type: "text", text }` item
+ * and a directly-stringified `content`. Diff-like payloads are skipped here —
+ * they are handled by `extractContentDiffChanges`.
+ */
+function extractContentText(toolCallObj: ObjectLike | null): string | null {
+  if (!toolCallObj) return null
+  const content = asArray(toolCallObj.content)
+  if (!content) return null
+
+  const parts: string[] = []
+  for (const item of content) {
+    const record = asObject(item)
+    if (!record) continue
+    const type = pickString(record, ["type"])?.toLowerCase()
+    // Only consider text-bearing items; skip diff / terminal / image / audio.
+    if (type && type !== "content" && type !== "text") continue
+
+    let text: string | null = null
+    const inner = asObject(record.content)
+    if (inner) {
+      const innerType = pickString(inner, ["type"])?.toLowerCase()
+      if (!innerType || innerType === "text") {
+        text = pickString(inner, ["text"])
+      }
+    } else if (typeof record.content === "string") {
+      const trimmed = record.content.trim()
+      text = trimmed.length > 0 ? trimmed : null
+    }
+    if (!text) text = pickString(record, ["text"])
+    if (!text || looksLikeDiffPayload(text)) continue
+    parts.push(text)
+  }
+
+  if (parts.length === 0) return null
+  const joined = parts.join("\n\n").trim()
+  return joined.length > 0 ? joined : null
+}
+
 function collectLocationPaths(toolCallObj: ObjectLike | null): string[] {
   if (!toolCallObj) return []
   const locations = asArray(toolCallObj.locations)
@@ -711,6 +759,8 @@ export function parsePermissionToolCall(
   const prompt =
     pickString(rawInputObj, ["prompt"]) ?? pickString(toolCallObj, ["prompt"])
 
+  const contentText = extractContentText(toolCallObj)
+
   const title =
     pickString(toolCallObj, ["title", "tool_name", "toolName", "name"]) ??
     formatFallbackTitle(normalizedKind)
@@ -732,6 +782,7 @@ export function parsePermissionToolCall(
     url,
     query,
     prompt,
+    contentText,
     jsonPreview: stringifyJson(toolCallObj ?? toolCall),
   }
 }

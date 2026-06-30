@@ -72,6 +72,10 @@ export function PanelPermissionCard({
         <div className="mt-1 font-mono text-[11px] text-muted-foreground">
           {changeSummary}
         </div>
+      ) : parsed.contentText ? (
+        <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+          {parsed.contentText}
+        </div>
       ) : null}
 
       <div className="mt-2 flex flex-wrap gap-1.5">

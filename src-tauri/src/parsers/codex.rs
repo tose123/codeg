@@ -811,6 +811,16 @@ impl CodexParser {
         // and as `response_item.image_generation_call`, sharing the same call_id/id.
         // Emit at most one ContentBlock::Image per id to avoid duplicate display.
         let mut emitted_image_ids: HashSet<String> = HashSet::new();
+        // Streaming reasoning buffer. Codex emits one `event_msg.agent_reasoning`
+        // per reasoning section, then groups the same sections into a single
+        // `response_item.reasoning.summary`. We buffer the per-section events and
+        // let the grouped summary supersede them (one 思考 card per turn, live
+        // parity); the buffer is only flushed on its own — as one joined Thinking
+        // block — when no grouped summary arrives (interrupted/older rollouts),
+        // so streaming reasoning is never lost. `pending_reasoning_ts` stamps the
+        // fallback block with the last buffered section's time.
+        let mut pending_reasoning: Vec<String> = Vec::new();
+        let mut pending_reasoning_ts: Option<DateTime<Utc>> = None;
 
         for line in reader.lines() {
             let line = match line {
@@ -869,6 +879,19 @@ impl CodexParser {
                             payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
                         let timestamp = parse_codex_timestamp(&value).unwrap_or_else(Utc::now);
+
+                        // A new reasoning section keeps buffering; `token_count` is
+                        // metadata with no visible message and never splits a run.
+                        // Anything else closes an open reasoning run — flush any
+                        // buffered streaming reasoning that never got a grouped
+                        // summary so it isn't lost or reordered behind this event.
+                        if payload_type != "agent_reasoning" && payload_type != "token_count" {
+                            flush_pending_reasoning(
+                                &mut messages,
+                                &mut pending_reasoning,
+                                pending_reasoning_ts,
+                            );
+                        }
 
                         match payload_type {
                             "task_started" if context_window_max_tokens.is_none() => {
@@ -963,25 +986,21 @@ impl CodexParser {
                                 });
                             }
                             "agent_reasoning" => {
-                                // Parent reasoning, same rationale as agent_message
-                                // above: not gated on active_agent_count so
-                                // between-capsule reasoning survives.
+                                // Buffer this streaming reasoning section. The grouped
+                                // `response_item.reasoning.summary` (parsed in the
+                                // `response_item` match below) normally arrives right
+                                // after the section events and supersedes the buffer,
+                                // so history shows ONE 思考 card per turn (live parity)
+                                // instead of one card per section. If no grouped
+                                // summary arrives (interrupted/older rollouts), the
+                                // buffer is flushed on its own and nothing is lost.
                                 let text = payload
                                     .get("text")
                                     .and_then(|t| t.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if !text.is_empty() {
-                                    messages.push(UnifiedMessage {
-                                        id: format!("thinking-{}", messages.len()),
-                                        role: MessageRole::Assistant,
-                                        content: vec![ContentBlock::Thinking { text }],
-                                        timestamp,
-                                        usage: None,
-                                        duration_ms: None,
-                                        model: None,
-                                        completed_at: Some(timestamp),
-                                    });
+                                    .unwrap_or("");
+                                if !text.trim().is_empty() {
+                                    pending_reasoning.push(text.to_string());
+                                    pending_reasoning_ts = Some(timestamp);
                                 }
                             }
                             "image_generation_end" => {
@@ -1112,7 +1131,65 @@ impl CodexParser {
                             payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         let timestamp = parse_codex_timestamp(&value).unwrap_or_else(Utc::now);
 
+                        // A `reasoning` item resolves the buffered streaming sections
+                        // (handled in its arm). Any other response item closes an open
+                        // reasoning run — flush buffered streaming reasoning that never
+                        // got a grouped summary so it isn't lost or reordered.
+                        if payload_type != "reasoning" {
+                            flush_pending_reasoning(
+                                &mut messages,
+                                &mut pending_reasoning,
+                                pending_reasoning_ts,
+                            );
+                        }
+
                         match payload_type {
+                            "reasoning" => {
+                                // Codex records a reasoning turn as a `summary` array
+                                // of `{type:"summary_text", text}` parts — one part per
+                                // section — grouping the same sections the streaming
+                                // `event_msg.agent_reasoning` events carry one-by-one
+                                // (buffered in `pending_reasoning`). Join the parts into
+                                // ONE Thinking block (live parity: a single 思考 card
+                                // per turn) and discard the buffer it supersedes. An
+                                // empty summary (encrypted-only reasoning, the common
+                                // case) carries no surfaced text, so fall back to any
+                                // buffered streaming sections (interrupted/older
+                                // rollouts) and otherwise emit nothing.
+                                let text = payload
+                                    .get("summary")
+                                    .and_then(|s| s.as_array())
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|p| {
+                                                p.get("text").and_then(|t| t.as_str())
+                                            })
+                                            .filter(|t| !t.trim().is_empty())
+                                            .collect::<Vec<_>>()
+                                            .join("\n\n")
+                                    })
+                                    .unwrap_or_default();
+                                if !text.is_empty() {
+                                    pending_reasoning.clear();
+                                    messages.push(UnifiedMessage {
+                                        id: format!("thinking-{}", messages.len()),
+                                        role: MessageRole::Assistant,
+                                        content: vec![ContentBlock::Thinking { text }],
+                                        timestamp,
+                                        usage: None,
+                                        duration_ms: None,
+                                        model: None,
+                                        completed_at: Some(timestamp),
+                                    });
+                                } else {
+                                    flush_pending_reasoning(
+                                        &mut messages,
+                                        &mut pending_reasoning,
+                                        pending_reasoning_ts,
+                                    );
+                                }
+                            }
                             "function_call" | "custom_tool_call" => {
                                 let tool_use_id = payload
                                     .get("call_id")
@@ -1501,6 +1578,11 @@ impl CodexParser {
             }
         }
 
+        // Streaming reasoning at the very end of a truncated/interrupted rollout
+        // (the `agent_reasoning` events were written but the file ended before the
+        // grouped `response_item.reasoning` summary) — flush it so it isn't lost.
+        flush_pending_reasoning(&mut messages, &mut pending_reasoning, pending_reasoning_ts);
+
         // Fill in subagent tool call stats (and, only as a fallback, the result)
         // on each spawn execution capsule.
         if !agent_id_to_spawn_call_id.is_empty() {
@@ -1752,6 +1834,34 @@ fn parse_codex_timestamp(value: &serde_json::Value) -> Option<DateTime<Utc>> {
         .get("timestamp")
         .and_then(|t| t.as_str())
         .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+}
+
+/// Emit any buffered streaming `agent_reasoning` sections as a single Thinking
+/// message and clear the buffer. No-op when the buffer is empty. Used only as a
+/// fallback when the grouped `response_item.reasoning.summary` (which normally
+/// supersedes and clears the buffer) is absent — e.g. an interrupted rollout —
+/// so streaming reasoning is preserved as one 思考 card instead of being lost.
+fn flush_pending_reasoning(
+    messages: &mut Vec<UnifiedMessage>,
+    pending: &mut Vec<String>,
+    ts: Option<DateTime<Utc>>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let text = pending.join("\n\n");
+    pending.clear();
+    let timestamp = ts.unwrap_or_else(Utc::now);
+    messages.push(UnifiedMessage {
+        id: format!("thinking-{}", messages.len()),
+        role: MessageRole::Assistant,
+        content: vec![ContentBlock::Thinking { text }],
+        timestamp,
+        usage: None,
+        duration_ms: None,
+        model: None,
+        completed_at: Some(timestamp),
+    });
 }
 
 fn agents_instructions_regex() -> &'static Regex {
@@ -2575,10 +2685,12 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
-    /// Subagents in codex run inside the parent's JSONL — their
-    /// agent_message / agent_reasoning events are filtered while
-    /// `active_agent_count > 0`. image_generation events must follow the
-    /// same rule, otherwise a subagent's generated image leaks into the
+    /// Subagents in codex run inside the parent's JSONL, but their own
+    /// transcripts are written to a separate `agent-<id>.jsonl`, so parent
+    /// narration (messages / reasoning) is never gated on `active_agent_count`.
+    /// image_generation is the exception: a generated image carries no agent
+    /// attribution, so one emitted inside a subagent window must be suppressed
+    /// (`active_agent_count > 0`), otherwise the subagent's image leaks into the
     /// parent timeline as an inline ContentBlock::ImageGeneration.
     #[test]
     fn image_generation_inside_subagent_is_suppressed_in_parent() {
@@ -2661,6 +2773,225 @@ mod tests {
 
     fn rollout_line(ts: &str, msg_type: &str, payload: serde_json::Value) -> String {
         serde_json::json!({ "timestamp": ts, "type": msg_type, "payload": payload }).to_string()
+    }
+
+    fn thinking_texts(detail: &crate::models::ConversationDetail) -> Vec<String> {
+        detail
+            .turns
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .filter_map(|b| match b {
+                ContentBlock::Thinking { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Codex surfaces one reasoning turn twice: as per-section
+    /// `event_msg.agent_reasoning` events (one per `**Header**` section) AND as a
+    /// single `response_item.reasoning` whose `summary` array groups the same
+    /// sections. History must render ONE 思考 card per turn (live parity), so the
+    /// grouped summary is parsed and the split events are ignored — never one card
+    /// per section.
+    #[test]
+    fn reasoning_summary_groups_sections_into_single_thinking_block() {
+        let lines = vec![
+            rollout_line(
+                "2026-06-29T08:40:00Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "继续"}),
+            ),
+            // Streaming per-section events (must NOT each become a card).
+            rollout_line(
+                "2026-06-29T08:42:33.517Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "agent_reasoning",
+                    "text": "**Creating curl command**\n\nFirst section body."
+                }),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:33.529Z",
+                "event_msg",
+                serde_json::json!({
+                    "type": "agent_reasoning",
+                    "text": "**Crafting the command**\n\nSecond section body."
+                }),
+            ),
+            // Grouped summary written at the end of the reasoning turn.
+            rollout_line(
+                "2026-06-29T08:42:33.530Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [
+                        {"type": "summary_text", "text": "**Creating curl command**\n\nFirst section body."},
+                        {"type": "summary_text", "text": "**Crafting the command**\n\nSecond section body."}
+                    ]
+                }),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:33.943Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "done"}),
+            ),
+        ];
+        let path = write_temp_rollout("reasoning-group", &lines);
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "reasoning-group")
+            .expect("parse ok");
+
+        let thinking = thinking_texts(&detail);
+        assert_eq!(
+            thinking.len(),
+            1,
+            "consecutive reasoning sections must render as ONE thinking block, got {}",
+            thinking.len()
+        );
+        assert_eq!(
+            thinking[0],
+            "**Creating curl command**\n\nFirst section body.\n\n**Crafting the command**\n\nSecond section body."
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    /// A reasoning item with an empty (encrypted-only) summary carries no
+    /// surfaced text — the common case in real rollouts — and must produce no
+    /// thinking card.
+    #[test]
+    fn empty_reasoning_summary_emits_no_thinking_block() {
+        let lines = vec![
+            rollout_line(
+                "2026-06-29T08:40:00Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "hi"}),
+            ),
+            rollout_line(
+                "2026-06-29T08:41:00Z",
+                "response_item",
+                serde_json::json!({
+                    "type": "reasoning",
+                    "id": "rs_empty",
+                    "summary": [],
+                    "encrypted_content": "gAAAredacted"
+                }),
+            ),
+            rollout_line(
+                "2026-06-29T08:41:01Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "hello"}),
+            ),
+        ];
+        let path = write_temp_rollout("reasoning-empty", &lines);
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "reasoning-empty")
+            .expect("parse ok");
+
+        assert!(
+            thinking_texts(&detail).is_empty(),
+            "empty reasoning summary must not emit a thinking block"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    /// Defensive fallback: an interrupted rollout whose `agent_reasoning` events
+    /// were written but that ended before the grouped `response_item.reasoning`
+    /// summary must still surface the streaming reasoning — flushed at EOF as ONE
+    /// joined Thinking block, not lost.
+    #[test]
+    fn streaming_reasoning_without_summary_flushes_as_one_block() {
+        let lines = vec![
+            rollout_line(
+                "2026-06-29T08:40:00Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "go"}),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:00Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_reasoning", "text": "**One**\n\nbody A"}),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:01Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_reasoning", "text": "**Two**\n\nbody B"}),
+            ),
+            // No response_item/reasoning — the file ends here (interruption).
+        ];
+        let path = write_temp_rollout("reasoning-nosummary", &lines);
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "reasoning-nosummary")
+            .expect("parse ok");
+
+        let thinking = thinking_texts(&detail);
+        assert_eq!(
+            thinking.len(),
+            1,
+            "buffered streaming reasoning must flush as ONE block, got {}",
+            thinking.len()
+        );
+        assert_eq!(thinking[0], "**One**\n\nbody A\n\n**Two**\n\nbody B");
+
+        let _ = fs::remove_file(path);
+    }
+
+    /// Same fallback, but the reasoning is followed by more content with no
+    /// grouped summary (schema drift): the flushed Thinking block must stay in
+    /// order — before the assistant message that follows it, never appended last.
+    #[test]
+    fn streaming_reasoning_without_summary_keeps_order_before_next_message() {
+        let lines = vec![
+            rollout_line(
+                "2026-06-29T08:40:00Z",
+                "event_msg",
+                serde_json::json!({"type": "user_message", "message": "go"}),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:00Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_reasoning", "text": "**Plan**\n\nthinking"}),
+            ),
+            rollout_line(
+                "2026-06-29T08:42:01Z",
+                "event_msg",
+                serde_json::json!({"type": "agent_message", "message": "the answer"}),
+            ),
+        ];
+        let path = write_temp_rollout("reasoning-order", &lines);
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "reasoning-order")
+            .expect("parse ok");
+
+        // Flatten assistant-side blocks in document order: the buffered reasoning
+        // must be flushed as a Thinking block BEFORE the agent_message answer.
+        let ordered: Vec<&str> = detail
+            .turns
+            .iter()
+            .flat_map(|t| t.blocks.iter())
+            .filter_map(|b| match b {
+                ContentBlock::Thinking { .. } => Some("thinking"),
+                ContentBlock::Text { text } if text == "the answer" => Some("answer"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec!["thinking", "answer"],
+            "buffered reasoning must flush before the following assistant message"
+        );
+        assert_eq!(
+            thinking_texts(&detail),
+            vec!["**Plan**\n\nthinking".to_string()]
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     /// Multi-wait, no close (the real codex polling pattern): every parent

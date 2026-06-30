@@ -46,7 +46,7 @@ export function PermissionDialog({
   const hasPlanMarkdown = Boolean(parsed.planMarkdown)
   const hasAllowedPrompts = parsed.allowedPrompts.length > 0
   const hasWeb = Boolean(parsed.url) || Boolean(parsed.query)
-  const hasStructured =
+  const hasOtherStructured =
     Boolean(parsed.command) ||
     hasFileChanges ||
     hasPlan ||
@@ -54,6 +54,12 @@ export function PermissionDialog({
     hasAllowedPrompts ||
     Boolean(parsed.modeTarget) ||
     hasWeb
+  // Agent-provided description (ACP `content` text). Shown only when no richer
+  // structured view exists, so it replaces the raw-JSON fallback for agents
+  // like Kimi Code that carry the request text in `content` rather than
+  // `rawInput`, while leaving command/diff/plan dialogs untouched.
+  const hasContentText = Boolean(parsed.contentText)
+  const hasStructured = hasOtherStructured || hasContentText
 
   return (
     <div className="mx-4 mb-3 rounded-xl border border-border/70 bg-card/95 p-3 shadow-sm">
@@ -186,6 +192,12 @@ export function PermissionDialog({
                 <MessageResponse>{parsed.prompt}</MessageResponse>
               </div>
             )}
+          </div>
+        )}
+
+        {!hasOtherStructured && parsed.contentText && (
+          <div className="rounded-md border border-border/60 bg-muted/20 p-2 text-xs text-foreground/90">
+            <MessageResponse>{parsed.contentText}</MessageResponse>
           </div>
         )}
 
