@@ -78,6 +78,7 @@ import {
 } from "@/lib/types"
 import {
   getSavedModeId,
+  saveRecentConversationAgent,
   saveModePreference,
 } from "@/lib/selector-prefs-storage"
 import {
@@ -914,6 +915,7 @@ const ConversationTabView = memo(function ConversationTabView({
             )
             newConversationId = res.conversationId
             sendFolderId = res.folderId
+            saveRecentConversationAgent(selectedAgent)
             dbConvIdRef.current = newConversationId
             setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
             if (!mountedRef.current) {
@@ -942,6 +944,7 @@ const ConversationTabView = memo(function ConversationTabView({
               selectedAgent,
               title
             )
+            saveRecentConversationAgent(selectedAgent)
             dbConvIdRef.current = newConversationId
             // Set external ID on the stable virtual session (no migration needed —
             // effectiveConversationId never changes, so the session stays in place).

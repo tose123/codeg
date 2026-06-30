@@ -25,6 +25,7 @@ import {
   saveLastActiveContext,
   clearLastActiveContext,
 } from "@/lib/last-active-context-storage"
+import { readRecentConversationAgent } from "@/lib/selector-prefs-storage"
 import {
   TABS_CHANGED_EVENT,
   type AgentType,
@@ -433,10 +434,12 @@ export function TabProvider({ children }: TabProviderProps) {
           ? folderDefaultOverride
           : (foldersRef.current.find((f) => f.id === folderId)
               ?.default_agent_type ?? null)
+      const recentAgent = readRecentConversationAgent()
       return resolveDefaultAgent({
         folderDefault,
         inherit,
         sortedTypes: sortedAvailableAgentsRef.current,
+        recentAgent,
         fresh: agentsFreshRef.current,
       })
     },

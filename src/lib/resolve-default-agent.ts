@@ -14,6 +14,8 @@ export interface ResolveDefaultAgentInput {
    * before the first successful `acpListAgents()` call.
    */
   sortedTypes: AgentType[]
+  /** Most recently used agent for a successfully-created new conversation. */
+  recentAgent: AgentType | null
   /** True once `acpListAgents()` has succeeded at least once this session. */
   fresh: boolean
 }
@@ -40,24 +42,28 @@ export interface ResolveDefaultAgentResult {
  *   1. `folderDefault` — the user explicitly pinned a default on this folder.
  *   2. `inherit` — "new conversation" launched from inside an existing
  *      conversation should produce another conversation with the same agent.
- *   3. `sortedTypes[0]` — first entry of the user-managed drag-sorted list.
- *   4. `AGENT_DISPLAY_ORDER[0]` — final fallback when even the sorted list
+ *   3. `recentAgent` — most recently used agent for a successful new
+ *      conversation.
+ *   4. `sortedTypes[0]` — first entry of the user-managed drag-sorted list.
+ *   5. `AGENT_DISPLAY_ORDER[0]` — final fallback when even the sorted list
  *      isn't available yet (cold start).
  *
- * The result is marked `provisional: true` for cases 3 and 4 when `fresh`
- * is false — i.e. the sorted list might still be stale or empty seed data
- * from localStorage, and the caller should re-resolve once fresh data
- * arrives.
+ * The result is marked `provisional: true` for cases 3-5 when `fresh` is
+ * false — i.e. the sorted list might still be stale or empty seed data from
+ * localStorage, and the caller should re-resolve once fresh data arrives.
  */
 export function resolveDefaultAgent(
   input: ResolveDefaultAgentInput
 ): ResolveDefaultAgentResult {
-  const { folderDefault, inherit, sortedTypes, fresh } = input
+  const { folderDefault, inherit, sortedTypes, recentAgent, fresh } = input
   if (folderDefault) {
     return { agentType: folderDefault, provisional: false }
   }
   if (inherit) {
     return { agentType: inherit, provisional: false }
+  }
+  if (recentAgent && (!fresh || sortedTypes.includes(recentAgent))) {
+    return { agentType: recentAgent, provisional: !fresh }
   }
   if (sortedTypes.length > 0) {
     return { agentType: sortedTypes[0], provisional: !fresh }

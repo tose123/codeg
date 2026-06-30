@@ -17,9 +17,15 @@
  * incoming event and overwrite locally" path.
  */
 
-import type { SessionModeStateInfo } from "@/lib/types"
+import {
+  AGENT_DISPLAY_ORDER,
+  type AgentType,
+  type SessionModeStateInfo,
+} from "@/lib/types"
 
 const STORAGE_KEY = "codeg:selector-prefs"
+const RECENT_CONVERSATION_AGENT_KEY = "codeg:recent-conversation-agent:v1"
+const VALID_AGENT_TYPES = new Set<string>(AGENT_DISPLAY_ORDER)
 
 interface SelectorPrefs {
   modeId?: string
@@ -97,6 +103,26 @@ export function getSavedPrefsForConnect(agentType: string): {
   return {
     modeId: prefs.modeId ?? null,
     configValues,
+  }
+}
+
+export function readRecentConversationAgent(): AgentType | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = localStorage.getItem(RECENT_CONVERSATION_AGENT_KEY)
+    if (!raw || !VALID_AGENT_TYPES.has(raw)) return null
+    return raw as AgentType
+  } catch {
+    return null
+  }
+}
+
+export function saveRecentConversationAgent(agentType: AgentType) {
+  if (typeof window === "undefined") return
+  try {
+    localStorage.setItem(RECENT_CONVERSATION_AGENT_KEY, agentType)
+  } catch {
+    /* ignore */
   }
 }
 
