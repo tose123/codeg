@@ -466,8 +466,8 @@ export function compareAgentType(a: AgentType, b: AgentType): number {
 }
 
 export const ALL_AGENT_TYPES: AgentType[] = [
-  "claude_code",
   "codex",
+  "claude_code",
   "open_code",
   "gemini",
   "open_claw",
@@ -479,8 +479,8 @@ export const ALL_AGENT_TYPES: AgentType[] = [
 ]
 
 export const MODEL_PROVIDER_AGENT_TYPES: AgentType[] = [
-  "claude_code",
   "codex",
+  "claude_code",
   "gemini",
 ]
 
