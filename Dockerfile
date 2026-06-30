@@ -31,6 +31,13 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     libicu72 \
+    python-is-python3 \
+    pandoc \
+    libreoffice \
+    poppler-utils \
+    qpdf \
+    pdftk-java \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 # libicu72: OfficeCLI ships as a self-contained binary with an embedded .NET
 # runtime, which requires the system ICU library at startup. node:*-bookworm-slim
