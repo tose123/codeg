@@ -1,0 +1,4 @@
+interface:
+  display_name: "同步 codeg main"
+  short_description: "拉取上游 codeg/main、合并并总结测试重点"
+  default_prompt: "使用 $sync-codeg-main 拉取 codeg/main 并合并到本地 main；如果与本地 main 存在同功能冲突，默认保留本地 main 行为，只在确实无法安全落地时再列出方案给我选择。同步完成后总结前后端主要更新点，并提醒我需要重点测试的内容。"
