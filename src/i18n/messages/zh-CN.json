@@ -2447,6 +2447,18 @@
           "planLabel": "计划",
           "submitted": "计划已提交",
           "switched": "切换模式"
+        },
+        "backgroundTask": {
+          "title": "后台任务",
+          "titleWithId": "后台任务 · {id}",
+          "running": "运行中",
+          "completed": "已完成",
+          "failed": "失败",
+          "stopped": "已停止",
+          "exitCode": "退出码 {code}",
+          "polledTimes": "轮询 {count} 次",
+          "runningInBackground": "后台运行",
+          "launchNote": "已在后台运行 · {id}"
         }
       },
       "messageNav": {

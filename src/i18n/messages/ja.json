@@ -2447,6 +2447,18 @@
           "planLabel": "計画",
           "submitted": "計画を送信しました",
           "switched": "モードを切り替え"
+        },
+        "backgroundTask": {
+          "title": "バックグラウンドタスク",
+          "titleWithId": "バックグラウンドタスク · {id}",
+          "running": "実行中",
+          "completed": "完了",
+          "failed": "失敗",
+          "stopped": "停止しました",
+          "exitCode": "終了コード {code}",
+          "polledTimes": "{count} 回ポーリング",
+          "runningInBackground": "バックグラウンド",
+          "launchNote": "バックグラウンドで実行中 · {id}"
         }
       },
       "messageNav": {

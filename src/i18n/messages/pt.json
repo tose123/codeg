@@ -2447,6 +2447,18 @@
           "planLabel": "Plano",
           "submitted": "Plano enviado",
           "switched": "Modo alterado"
+        },
+        "backgroundTask": {
+          "title": "Tarefa em segundo plano",
+          "titleWithId": "Tarefa em segundo plano · {id}",
+          "running": "Em execução",
+          "completed": "Concluída",
+          "failed": "Falhou",
+          "stopped": "Interrompida",
+          "exitCode": "saída {code}",
+          "polledTimes": "Consultada {count} vezes",
+          "runningInBackground": "Segundo plano",
+          "launchNote": "Em execução em segundo plano · {id}"
         }
       },
       "messageNav": {

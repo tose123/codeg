@@ -2447,6 +2447,18 @@
           "planLabel": "Plan",
           "submitted": "Plan eingereicht",
           "switched": "Modus gewechselt"
+        },
+        "backgroundTask": {
+          "title": "Hintergrundaufgabe",
+          "titleWithId": "Hintergrundaufgabe · {id}",
+          "running": "Läuft",
+          "completed": "Abgeschlossen",
+          "failed": "Fehlgeschlagen",
+          "stopped": "Gestoppt",
+          "exitCode": "Exit {code}",
+          "polledTimes": "{count}-mal abgefragt",
+          "runningInBackground": "Hintergrund",
+          "launchNote": "Läuft im Hintergrund · {id}"
         }
       },
       "messageNav": {

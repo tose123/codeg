@@ -2447,6 +2447,18 @@
           "planLabel": "الخطة",
           "submitted": "تم إرسال الخطة",
           "switched": "تم تبديل الوضع"
+        },
+        "backgroundTask": {
+          "title": "مهمة في الخلفية",
+          "titleWithId": "مهمة في الخلفية · {id}",
+          "running": "قيد التشغيل",
+          "completed": "اكتملت",
+          "failed": "فشلت",
+          "stopped": "متوقفة",
+          "exitCode": "رمز الخروج {code}",
+          "polledTimes": "تم الاستعلام {count} مرة",
+          "runningInBackground": "في الخلفية",
+          "launchNote": "قيد التشغيل في الخلفية · {id}"
         }
       },
       "messageNav": {

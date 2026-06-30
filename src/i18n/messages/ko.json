@@ -2447,6 +2447,18 @@
           "planLabel": "계획",
           "submitted": "계획 제출됨",
           "switched": "모드 전환됨"
+        },
+        "backgroundTask": {
+          "title": "백그라운드 작업",
+          "titleWithId": "백그라운드 작업 · {id}",
+          "running": "실행 중",
+          "completed": "완료됨",
+          "failed": "실패",
+          "stopped": "중지됨",
+          "exitCode": "종료 코드 {code}",
+          "polledTimes": "{count}회 폴링",
+          "runningInBackground": "백그라운드",
+          "launchNote": "백그라운드에서 실행 중 · {id}"
         }
       },
       "messageNav": {

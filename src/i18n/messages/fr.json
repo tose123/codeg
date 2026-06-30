@@ -2447,6 +2447,18 @@
           "planLabel": "Plan",
           "submitted": "Plan soumis",
           "switched": "Mode changé"
+        },
+        "backgroundTask": {
+          "title": "Tâche en arrière-plan",
+          "titleWithId": "Tâche en arrière-plan · {id}",
+          "running": "En cours",
+          "completed": "Terminée",
+          "failed": "Échouée",
+          "stopped": "Arrêtée",
+          "exitCode": "sortie {code}",
+          "polledTimes": "Interrogée {count} fois",
+          "runningInBackground": "Arrière-plan",
+          "launchNote": "En cours d'exécution en arrière-plan · {id}"
         }
       },
       "messageNav": {

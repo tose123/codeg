@@ -2447,6 +2447,18 @@
           "planLabel": "計畫",
           "submitted": "計畫已提交",
           "switched": "切換模式"
+        },
+        "backgroundTask": {
+          "title": "背景任務",
+          "titleWithId": "背景任務 · {id}",
+          "running": "執行中",
+          "completed": "已完成",
+          "failed": "失敗",
+          "stopped": "已停止",
+          "exitCode": "退出碼 {code}",
+          "polledTimes": "輪詢 {count} 次",
+          "runningInBackground": "背景執行",
+          "launchNote": "已在背景執行 · {id}"
         }
       },
       "messageNav": {

@@ -7,6 +7,7 @@ import {
 } from "@/lib/adapters/tool-kind-classifier"
 import type { MessageRole, PlanEntryInfo } from "@/lib/types"
 import { normalizeToolName } from "@/lib/tool-call-normalization"
+import { parseBackgroundLaunch } from "@/lib/background-task"
 import { normalizePriority, normalizeStatus } from "@/lib/plan-parse"
 import { isDelegateToAgentToolName } from "@/lib/delegation-card"
 import { useTranslations } from "next-intl"
@@ -46,6 +47,7 @@ import { COLLAB_AGENT_TOOL_NAME } from "@/lib/collab-tool"
 import { DelegatedSubThread } from "./delegated-sub-thread"
 import { DelegationStatusCard } from "./delegation-status-card"
 import { DelegationStatusGroupCard } from "./delegation-status-group-card"
+import { BackgroundTaskCard } from "./background-task-card"
 import { GeneratedImagesBlock } from "./generated-images-block"
 import { GoalRunPart, GoalToolCallPart } from "./goal-tool-call"
 import { PlanCard, PlanEntriesList } from "./plan-card"
@@ -2104,6 +2106,17 @@ const ToolCallPart = memo(function ToolCallPart({
   const isCommandLikeTool = isCommandTool || toolNameLower === "apply_patch"
   const isRunning =
     part.state === "input-available" || part.state === "input-streaming"
+  // A `Bash(run_in_background: true)` launch — its result is just the task id +
+  // an "output is being written to …" notice. Flag the command card as a
+  // background launch (header badge + concise body) instead of dumping that
+  // notice; the actual run surfaces later in a <BackgroundTaskCard>.
+  const backgroundLaunch = useMemo(
+    () =>
+      isCommandTool
+        ? parseBackgroundLaunch(part.output ?? part.errorText ?? null)
+        : null,
+    [isCommandTool, part.output, part.errorText]
+  )
   const title = useMemo(() => {
     const rawTitle =
       deriveToolTitle(
@@ -2167,10 +2180,19 @@ const ToolCallPart = memo(function ToolCallPart({
     const hasStats =
       lineChangeStats &&
       (lineChangeStats.additions > 0 || lineChangeStats.deletions > 0)
-    if (!hasStats && !wallTime) return null
+    if (!hasStats && !wallTime && !backgroundLaunch) return null
 
     return (
       <span className="flex items-center gap-1.5 text-xs font-medium">
+        {backgroundLaunch && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+            title={backgroundLaunch.taskId}
+          >
+            <TerminalIcon className="size-3" />
+            {t("backgroundTask.runningInBackground")}
+          </span>
+        )}
         {hasStats && lineChangeStats.additions > 0 && (
           <span className="inline-flex items-center gap-0.5 text-green-600 dark:text-green-400">
             <PlusIcon className="size-3" />
@@ -2190,7 +2212,7 @@ const ToolCallPart = memo(function ToolCallPart({
         )}
       </span>
     )
-  }, [lineChangeStats, wallTime])
+  }, [lineChangeStats, wallTime, backgroundLaunch, t])
 
   const icon = useMemo(
     () => getToolIcon(normalizedToolName, part.input),
@@ -2240,10 +2262,21 @@ const ToolCallPart = memo(function ToolCallPart({
       (typeof displayCommand === "string" && displayCommand.length > 0))
   const terminalOutput = useMemo(() => {
     if (!shouldRenderCommandTerminal) return ""
+    if (backgroundLaunch) {
+      // Replace the verbose "Output is being written to <tmp path>…" notice
+      // with a concise localized line; the real run shows in its own card.
+      return buildCommandTerminalOutput(
+        displayCommand,
+        t("backgroundTask.launchNote", { id: backgroundLaunch.taskId }),
+        false
+      )
+    }
     const output = hasLiveOutput ? (liveOutput ?? "") : (commandOutput ?? "")
     return buildCommandTerminalOutput(displayCommand, output, isRunning)
   }, [
     shouldRenderCommandTerminal,
+    backgroundLaunch,
+    t,
     hasLiveOutput,
     liveOutput,
     commandOutput,
@@ -2658,6 +2691,10 @@ export const ContentPartsRenderer = memo(function ContentPartsRenderer({
       return (
         <DelegationStatusGroupCard key={`dsg-${keyId}`} polls={part.polls} />
       )
+    }
+
+    if (part.type === "background-task-group") {
+      return <BackgroundTaskCard key={`btg-${keyId}`} polls={part.polls} />
     }
 
     if (part.type === "tool-result") {

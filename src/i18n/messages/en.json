@@ -2447,6 +2447,18 @@
           "planLabel": "Plan",
           "submitted": "Plan submitted",
           "switched": "Switched mode"
+        },
+        "backgroundTask": {
+          "title": "Background task",
+          "titleWithId": "Background task · {id}",
+          "running": "Running",
+          "completed": "Completed",
+          "failed": "Failed",
+          "stopped": "Stopped",
+          "exitCode": "exit {code}",
+          "polledTimes": "Polled {count} times",
+          "runningInBackground": "Background",
+          "launchNote": "Running in background · {id}"
         }
       },
       "messageNav": {
