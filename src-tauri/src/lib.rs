@@ -166,7 +166,21 @@ mod tauri_app {
         }));
 
         builder
-            .plugin(tauri_plugin_window_state::Builder::new().build())
+            // Persist every window flag EXCEPT decorations. Decorations are a
+            // per-platform decision made by `apply_platform_window_style`
+            // (undecorated on Windows/Linux so the app draws its own chrome),
+            // not a user preference. Restoring a stale `decorated: true` saved
+            // by an older build would call `set_decorations(true)` after the
+            // window is built and re-add the native title bar on top of the
+            // app's own toolbar — the Linux "double title bar".
+            .plugin(
+                tauri_plugin_window_state::Builder::new()
+                    .with_state_flags(
+                        tauri_plugin_window_state::StateFlags::all()
+                            & !tauri_plugin_window_state::StateFlags::DECORATIONS,
+                    )
+                    .build(),
+            )
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_updater::Builder::new().build())

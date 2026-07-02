@@ -96,6 +96,7 @@ function makeSummary(
     git_branch: null,
     external_id: null,
     message_count: 0,
+    child_count: 0,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     pinned_at: null,

@@ -1143,11 +1143,15 @@
       "reorderHandle": "اسحب لإعادة الترتيب",
       "openFolder": "فتح مجلد",
       "searchPlaceholder": "بحث عن محادثات...",
+      "viewOptions": "خيارات العرض",
       "showCompleted": "عرض المحادثات المكتملة",
       "moreOptions": "المزيد من الخيارات",
       "sortBy": "الترتيب حسب",
       "sortByCreatedAt": "وقت الإنشاء",
       "sortByUpdatedAt": "وقت التحديث",
+      "sectionOrder": "ترتيب الأقسام",
+      "sectionOrderFoldersFirst": "المجلدات في الأعلى",
+      "sectionOrderChatsFirst": "المحادثة في الأعلى",
       "statusRunningBadge": "قيد التشغيل",
       "statusCancelledBadge": "ملغى",
       "conversationCountUnit": "{count} محادثة",
@@ -1192,7 +1196,8 @@
       "sectionChats": "محادثة",
       "noChats": "لا توجد محادثات",
       "newChatAction": "محادثة جديدة",
-      "automations": "الأتمتة"
+      "automations": "الأتمتة",
+      "loadingSubsessions": "جارٍ تحميل المحادثات الفرعية…"
     },
     "conversation": {
       "reloadFailed": "فشل إعادة تحميل المحادثة: {message}",
@@ -1281,7 +1286,9 @@
       "pin": "تثبيت",
       "unpin": "إلغاء التثبيت",
       "markCompleted": "وضع علامة كمكتمل",
-      "reopen": "إعادة فتح"
+      "reopen": "إعادة فتح",
+      "expandSubsessions": "توسيع المحادثات الفرعية",
+      "collapseSubsessions": "طي المحادثات الفرعية"
     },
     "search": {
       "dialogTitle": "بحث",
@@ -2469,6 +2476,16 @@
         "remove": "إزالة",
         "noDiffDataAvailable": "لا توجد بيانات diff متاحة لـ {filePath}"
       },
+      "replyArtifacts": {
+        "title": "الملفات المتغيرة",
+        "fileCount": "{count, plural, one {# ملف} other {# ملفات}}",
+        "newFilesTitle": "ملفات جديدة",
+        "revealInFolder": "عرض في مدير الملفات",
+        "openFile": "فتح {filePath}",
+        "openInEditor": "فتح في المحرر",
+        "remove": "إزالة",
+        "noDiffDataAvailable": "لا توجد بيانات diff متاحة لـ {filePath}"
+      },
       "askQuestion": {
         "title": "يحتاج الوكيل إلى اختيارك",
         "subtitle": "أجب ثم أرسل. يمكنك التخطّي في أي وقت.",
@@ -3323,7 +3340,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "ملاحظات مباشرة",
-    "description": "أرسل ملاحظات وتصحيحات إلى الوكيل أثناء عمله. عند التفعيل، يحصل الوكيل على أداة للتحقق من ملاحظاتك المباشرة، وتعرض المحادثات حقل إدخال للملاحظات.",
+    "description": "أرسل ملاحظات وتصحيحات إلى الوكيل أثناء عمله. عند التفعيل، يحصل الوكيل على أداة للتحقق من ملاحظاتك المباشرة، وتعرض المحادثات حقل إدخال للملاحظات. نصيحة: عادةً ما يتحقق الوكيل من الملاحظات فقط عند ذكرها في رسالتك — مثلاً أضف \"تحقق من ملاحظاتي المباشرة بانتظام أثناء العمل\" إلى رسالتك.",
     "enable": "تفعيل الملاحظات المباشرة",
     "enableHint": "يضيف أداة للتحقق من الملاحظات إلى الوكلاء الذين يبدؤون بعد التفعيل.",
     "save": "حفظ",
@@ -3347,8 +3364,7 @@
     "dismiss": "تجاهل",
     "turnEndedResent": "انتهت الجولة — تم الإرسال كرسالة جديدة بدلاً من ذلك.",
     "turnEnded": "انتهت الجولة بالفعل.",
-    "submitFailed": "تعذّر إرسال ملاحظتك",
-    "promptReminder": "(ملاحظة تلقائية من Codeg — تعامل معها بصمت: لا تذكرها أو تقتبسها أو ترد عليها.) التغذية الراجعة المباشرة مُفعّلة، لذا قد أرسل إليك أثناء عملك توجيهات في منتصف المهمة في أي وقت. تحقق منها دوريًا وعدّل مسارك. لقراءتها، استدعِ أداة التغذية الراجعة المباشرة التي يوفرها خادم MCP باسم `codeg-mcp` — قد تعرضها بيئتك باسم يحمل مساحة أسماء مثل `mcp__codeg-mcp__check_user_feedback` بدلًا من الاسم المجرد `check_user_feedback`، لذا استدعِ الأداة المطابقة المتاحة دون التعليق على اسمها."
+    "submitFailed": "تعذّر إرسال ملاحظتك"
   },
   "SessionInfoSettings": {
     "title": "الحصول على معلومات الجلسة",

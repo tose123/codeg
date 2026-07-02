@@ -1,7 +1,7 @@
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, Set,
+    QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 use crate::db::entities::conversation::ConversationKind;
@@ -296,6 +296,9 @@ fn conv_to_summary(r: conversation::Model) -> DbConversationSummary {
         git_branch: r.git_branch,
         external_id: r.external_id,
         message_count: r.message_count as u32,
+        // Pure mapper: `child_count` is backfilled by `fill_child_counts` over
+        // the returned set, never queried per-row here.
+        child_count: 0,
         created_at: r.created_at,
         updated_at: r.updated_at,
         pinned_at: r.pinned_at,
@@ -303,6 +306,43 @@ fn conv_to_summary(r: conversation::Model) -> DbConversationSummary {
         parent_tool_use_id: r.parent_tool_use_id,
         delegation_call_id: r.delegation_call_id,
     }
+}
+
+/// Backfill each summary's `child_count` with its number of direct, non-deleted
+/// delegation children using ONE `GROUP BY` aggregate over the whole set (never
+/// per-row — no N+1). `child_count > 0` iff `list_children` would return rows
+/// (same `parent_id == id AND deleted_at IS NULL` predicate), so the sidebar
+/// chevron neither expands to nothing nor hides a real subtree. No-op on an
+/// empty slice (avoids an `IN ()`).
+async fn fill_child_counts(
+    conn: &DatabaseConnection,
+    summaries: &mut [DbConversationSummary],
+) -> Result<(), DbError> {
+    if summaries.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i32> = summaries.iter().map(|s| s.id).collect();
+    let pairs: Vec<(Option<i32>, i64)> = conversation::Entity::find()
+        .select_only()
+        .column(conversation::Column::ParentId)
+        .column_as(conversation::Column::Id.count(), "cnt")
+        .filter(conversation::Column::ParentId.is_in(ids))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .group_by(conversation::Column::ParentId)
+        .into_tuple()
+        .all(conn)
+        .await?;
+    let mut counts: std::collections::HashMap<i32, u32> =
+        std::collections::HashMap::with_capacity(pairs.len());
+    for (parent_id, cnt) in pairs {
+        if let Some(pid) = parent_id {
+            counts.insert(pid, cnt.max(0) as u32);
+        }
+    }
+    for s in summaries.iter_mut() {
+        s.child_count = counts.get(&s.id).copied().unwrap_or(0);
+    }
+    Ok(())
 }
 
 pub async fn get_by_id(
@@ -315,7 +355,9 @@ pub async fn get_by_id(
         .await?
         .ok_or_else(|| DbError::Migration(format!("Conversation not found: {conversation_id}")))?;
 
-    Ok(conv_to_summary(conv))
+    let mut summary = conv_to_summary(conv);
+    fill_child_counts(conn, std::slice::from_mut(&mut summary)).await?;
+    Ok(summary)
 }
 
 /// Look up a child conversation by its `delegation_call_id` (the broker's
@@ -381,7 +423,8 @@ pub async fn list_by_folder(
 
     let rows = query.all(conn).await?;
 
-    let summaries: Vec<DbConversationSummary> = rows.into_iter().map(conv_to_summary).collect();
+    let mut summaries: Vec<DbConversationSummary> = rows.into_iter().map(conv_to_summary).collect();
+    fill_child_counts(conn, &mut summaries).await?;
 
     Ok(summaries)
 }
@@ -462,7 +505,9 @@ pub async fn list_all(
     };
 
     let rows = query.all(conn).await?;
-    Ok(rows.into_iter().map(conv_to_summary).collect())
+    let mut summaries: Vec<DbConversationSummary> = rows.into_iter().map(conv_to_summary).collect();
+    fill_child_counts(conn, &mut summaries).await?;
+    Ok(summaries)
 }
 
 /// List delegation children of a single parent conversation, oldest first.
@@ -479,7 +524,9 @@ pub async fn list_children(
         .order_by_asc(conversation::Column::CreatedAt)
         .all(conn)
         .await?;
-    Ok(rows.into_iter().map(conv_to_summary).collect())
+    let mut summaries: Vec<DbConversationSummary> = rows.into_iter().map(conv_to_summary).collect();
+    fill_child_counts(conn, &mut summaries).await?;
+    Ok(summaries)
 }
 
 #[cfg(test)]
@@ -568,6 +615,77 @@ mod tests {
         );
         assert_eq!(rows[0].id, child_a);
         assert_eq!(rows[0].parent_id, Some(parent_a));
+    }
+
+    #[tokio::test]
+    async fn child_count_reflects_direct_children() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-child-count-direct").await;
+        let (parent, child) = seed_parent_with_child(&db.conn, folder).await;
+
+        // The root listing carries the parent's direct-child count so the
+        // sidebar knows to show a chevron; the leaf child carries 0.
+        let roots = list_all(&db.conn, None, None, None, None, None, false)
+            .await
+            .expect("list");
+        let parent_row = roots.iter().find(|r| r.id == parent).expect("parent row");
+        assert_eq!(parent_row.child_count, 1, "parent has one delegation child");
+
+        let children = list_children(&db.conn, parent).await.expect("children");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, child);
+        assert_eq!(children[0].child_count, 0, "leaf child has no children");
+    }
+
+    #[tokio::test]
+    async fn child_count_counts_grandchildren_for_nested_chevron() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-child-count-nested").await;
+        let (parent, child) = seed_parent_with_child(&db.conn, folder).await;
+
+        // Delegate a grandchild from the child so the child itself becomes
+        // expandable one level down.
+        let link = DelegationLink {
+            parent_conversation_id: child,
+            parent_tool_use_id: "tu-2".into(),
+            delegation_call_id: "call-2".into(),
+        };
+        create_with_delegation(
+            &db.conn,
+            folder,
+            AgentType::Codex,
+            Some("G".into()),
+            None,
+            Some(link),
+        )
+        .await
+        .expect("grandchild");
+
+        // list_children(parent) must report the child's OWN child_count (1) so
+        // the recursive chevron appears on the nested row.
+        let children = list_children(&db.conn, parent).await.expect("children");
+        let child_row = children.iter().find(|r| r.id == child).expect("child row");
+        assert_eq!(child_row.child_count, 1, "child has one grandchild");
+    }
+
+    #[tokio::test]
+    async fn child_count_excludes_soft_deleted_children() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-child-count-deleted").await;
+        let (parent, child) = seed_parent_with_child(&db.conn, folder).await;
+
+        soft_delete(&db.conn, child).await.expect("soft delete child");
+
+        // A removed sub-session must not keep the parent's chevron alive: the
+        // aggregate filters deleted_at IS NULL, matching list_children.
+        let roots = list_all(&db.conn, None, None, None, None, None, false)
+            .await
+            .expect("list");
+        let parent_row = roots.iter().find(|r| r.id == parent).expect("parent row");
+        assert_eq!(
+            parent_row.child_count, 0,
+            "soft-deleted child must not be counted"
+        );
     }
 
     #[tokio::test]

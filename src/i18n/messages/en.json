@@ -1143,11 +1143,15 @@
       "reorderHandle": "Drag to reorder",
       "openFolder": "Open Folder",
       "searchPlaceholder": "Search conversations...",
+      "viewOptions": "View options",
       "showCompleted": "Show completed conversations",
       "moreOptions": "More options",
       "sortBy": "Sort by",
       "sortByCreatedAt": "Created time",
       "sortByUpdatedAt": "Updated time",
+      "sectionOrder": "Section order",
+      "sectionOrderFoldersFirst": "Folders on top",
+      "sectionOrderChatsFirst": "Chat on top",
       "statusRunningBadge": "Running",
       "statusCancelledBadge": "Cancelled",
       "conversationCountUnit": "{count, plural, one {# conversation} other {# conversations}}",
@@ -1192,7 +1196,8 @@
       "sectionChats": "Chat",
       "noChats": "No chats",
       "newChatAction": "New chat",
-      "automations": "Automations"
+      "automations": "Automations",
+      "loadingSubsessions": "Loading sub-conversations…"
     },
     "conversation": {
       "reloadFailed": "Failed to reload conversation: {message}",
@@ -1281,7 +1286,9 @@
       "pin": "Pin",
       "unpin": "Unpin",
       "markCompleted": "Mark as completed",
-      "reopen": "Reopen"
+      "reopen": "Reopen",
+      "expandSubsessions": "Expand sub-conversations",
+      "collapseSubsessions": "Collapse sub-conversations"
     },
     "search": {
       "dialogTitle": "Search",
@@ -2469,6 +2476,16 @@
         "remove": "Remove",
         "noDiffDataAvailable": "No diff data available for {filePath}"
       },
+      "replyArtifacts": {
+        "title": "Files changed",
+        "fileCount": "{count, plural, one {# file} other {# files}}",
+        "newFilesTitle": "New files",
+        "revealInFolder": "Show in file manager",
+        "openFile": "Open {filePath}",
+        "openInEditor": "Open in editor",
+        "remove": "Remove",
+        "noDiffDataAvailable": "No diff data available for {filePath}"
+      },
       "askQuestion": {
         "title": "The agent needs your input",
         "subtitle": "Answer below, then submit. You can skip anytime.",
@@ -3323,7 +3340,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "Live Feedback",
-    "description": "Send notes and corrections to an agent while it's working. When enabled, the agent gets a tool to check for your mid-task feedback, and conversations show a note input.",
+    "description": "Send notes and corrections to an agent while it's working. When enabled, the agent gets a tool to check for your mid-task feedback, and conversations show a note input. Tip: agents typically only check for feedback when you mention it in your prompt — for example, add \"check my live feedback regularly\" to your message so the agent knows to look.",
     "enable": "Enable live feedback",
     "enableHint": "Adds a check-for-feedback tool to agents started after this is turned on.",
     "save": "Save",
@@ -3347,8 +3364,7 @@
     "dismiss": "Dismiss",
     "turnEndedResent": "The turn ended — sent as a new message instead.",
     "turnEnded": "The turn already ended.",
-    "submitFailed": "Couldn't send your note",
-    "promptReminder": "(Automated note from Codeg — act on it silently: do not mention, quote, or reply to it.) Live feedback is enabled, so while you work I may send mid-task guidance at any time. Periodically check for it and adjust course. To read it, call the live-feedback tool exposed by the `codeg-mcp` MCP server — your host may surface it under a namespaced name such as `mcp__codeg-mcp__check_user_feedback` rather than the bare `check_user_feedback`, so call whichever matching tool is available without remarking on its name."
+    "submitFailed": "Couldn't send your note"
   },
   "SessionInfoSettings": {
     "title": "Get session info",

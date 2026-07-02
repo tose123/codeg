@@ -318,6 +318,10 @@ export interface DbConversationSummary {
   git_branch: string | null
   external_id: string | null
   message_count: number
+  /** Number of direct, non-deleted delegation children (computed by the backend
+   *  `fill_child_counts` aggregate). `child_count > 0` means this conversation is
+   *  expandable into its sub-session subtree — drives the sidebar chevron. */
+  child_count: number
   created_at: string
   updated_at: string
   /** When the user pinned this conversation (ISO string), or null if not pinned.

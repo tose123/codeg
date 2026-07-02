@@ -40,9 +40,12 @@ import { formatShortcutLabel } from "@/lib/keyboard-shortcuts"
 import {
   loadShowCompleted,
   loadSortMode,
+  loadSectionOrder,
   saveShowCompleted,
   saveSortMode,
+  saveSectionOrder,
   type SidebarSortMode,
+  type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
 import { cn } from "@/lib/utils"
 
@@ -117,6 +120,8 @@ export function Sidebar() {
 
   const [showCompleted, setShowCompleted] = useState(false)
   const [sortMode, setSortMode] = useState<SidebarSortMode>("created")
+  const [sectionOrder, setSectionOrder] =
+    useState<SidebarSectionOrder>("folders-first")
   const [allExpanded, setAllExpanded] = useState(true)
   const searchShortcutLabel = formatShortcutLabel(
     shortcuts.toggle_search,
@@ -126,7 +131,10 @@ export function Sidebar() {
     shortcuts.new_conversation,
     isMac
   )
-  const filterOptionsLabel = `${t("showCompleted")} / ${t("sortBy")}`
+  // General umbrella name for the funnel menu (show-completed + sort + section
+  // order). Kept generic so the accessible name / tooltip stays accurate as the
+  // menu gains options.
+  const viewOptionsLabel = t("viewOptions")
   const toggleExpandLabel = allExpanded
     ? t("collapseAllGroups")
     : t("expandAllGroups")
@@ -136,6 +144,7 @@ export function Sidebar() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setShowCompleted(loadShowCompleted())
     setSortMode(loadSortMode())
+    setSectionOrder(loadSectionOrder())
   }, [])
 
   const handleSetShowCompleted = useCallback((value: boolean) => {
@@ -147,6 +156,13 @@ export function Sidebar() {
     const mode: SidebarSortMode = value === "updated" ? "updated" : "created"
     setSortMode(mode)
     saveSortMode(mode)
+  }, [])
+
+  const handleSetSectionOrder = useCallback((value: string) => {
+    const next: SidebarSectionOrder =
+      value === "chats-first" ? "chats-first" : "folders-first"
+    setSectionOrder(next)
+    saveSectionOrder(next)
   }, [])
 
   const handleToggleExpandAll = useCallback(() => {
@@ -214,8 +230,8 @@ export function Sidebar() {
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 shrink-0 text-muted-foreground"
-                title={filterOptionsLabel}
-                aria-label={filterOptionsLabel}
+                title={viewOptionsLabel}
+                aria-label={viewOptionsLabel}
               >
                 <Funnel aria-hidden="true" className="h-3.5 w-3.5" />
               </Button>
@@ -238,6 +254,19 @@ export function Sidebar() {
                 </DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="updated">
                   {t("sortByUpdatedAt")}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel>{t("sectionOrder")}</DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={sectionOrder}
+                onValueChange={handleSetSectionOrder}
+              >
+                <DropdownMenuRadioItem value="folders-first">
+                  {t("sectionOrderFoldersFirst")}
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="chats-first">
+                  {t("sectionOrderChatsFirst")}
                 </DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
@@ -309,6 +338,7 @@ export function Sidebar() {
           ref={listRef}
           showCompleted={showCompleted}
           sortMode={sortMode}
+          sectionOrder={sectionOrder}
         />
       </div>
     </aside>

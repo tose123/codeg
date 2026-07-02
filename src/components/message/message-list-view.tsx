@@ -17,6 +17,7 @@ import {
 } from "@/lib/adapters/ai-elements-adapter"
 import { TurnStats } from "./turn-stats"
 import { LiveTurnStats } from "./live-turn-stats"
+import { ReplyArtifacts } from "./reply-artifacts"
 import { UserResourceLinks } from "./user-resource-links"
 import { UserImageAttachments } from "./user-image-attachments"
 import { useSessionStats } from "@/contexts/session-stats-context"
@@ -51,7 +52,12 @@ import {
   buildPlanKey,
   extractLatestPlanEntriesFromMessages,
 } from "@/lib/agent-plan"
-import type { AgentType, ConnectionStatus, SessionStats } from "@/lib/types"
+import type {
+  AgentType,
+  ConnectionStatus,
+  MessageTurn,
+  SessionStats,
+} from "@/lib/types"
 import { copyTextToClipboard } from "@/lib/utils"
 import { VirtualizedMessageThread } from "@/components/message/virtualized-message-thread"
 import {
@@ -118,6 +124,9 @@ type ThreadRenderItem =
       showStats: boolean
       isRoleTransition: boolean
       previousUserIndex: number | null
+      /** Raw assistant sub-turn(s) that compose this reply — fed to the
+       *  per-reply artifacts card so it can list files changed this reply. */
+      sourceTurns: MessageTurn[]
     }
   | {
       key: string
@@ -307,6 +316,9 @@ function mergeConsecutiveAssistantTurns(
       result.push({
         ...last,
         key: `merged-${first.key}`,
+        // Concatenate every sub-turn's raw turns so the artifacts card sees all
+        // file edits across the merged reply, not just the last sub-turn.
+        sourceTurns: buffer.flatMap((b) => b.sourceTurns),
         group: {
           ...last.group,
           id: first.group.id,
@@ -400,12 +412,14 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
   showStats = true,
   previousUserIndex = null,
   isResponseComplete = true,
+  sourceTurns,
 }: {
   group: ResolvedMessageGroup
   dimmed?: boolean
   showStats?: boolean
   previousUserIndex?: number | null
   isResponseComplete?: boolean
+  sourceTurns?: MessageTurn[]
 }) {
   if (group.role === "system") {
     return <CollapsibleSystemMessage group={group} />
@@ -433,6 +447,12 @@ const HistoricalMessageGroup = memo(function HistoricalMessageGroup({
           <UserResourceLinks resources={group.resources} className="self-end" />
         ) : null}
       </Message>
+      {showStats && group.role === "assistant" && sourceTurns && (
+        <ReplyArtifacts
+          sourceTurns={sourceTurns}
+          isResponseComplete={isResponseComplete}
+        />
+      )}
       {showStats && group.role === "assistant" && (
         <TurnStats
           usage={group.usage}
@@ -604,6 +624,7 @@ export function MessageListView({
         showStats: false,
         isRoleTransition: false,
         previousUserIndex: null,
+        sourceTurns: [allTurns[i]],
       }
     })
 
@@ -680,6 +701,7 @@ export function MessageListView({
               showStats={item.showStats}
               previousUserIndex={item.previousUserIndex}
               isResponseComplete={item.phase === "persisted"}
+              sourceTurns={item.sourceTurns}
             />
           </div>
         )

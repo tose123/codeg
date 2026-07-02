@@ -3,7 +3,34 @@ export interface LineChangeStats {
   deletions: number
 }
 
-const MAX_LCS_MATCH_PAIRS = 200_000
+/**
+ * Maximum product of changed-window line counts before both the collapsed stat
+ * (the LIS below) and the expanded diff (`generateUnifiedDiff`'s LCS table)
+ * stop computing an exact diff and treat the whole window as changed.
+ *
+ * This single ceiling is the crux of keeping the two consistent: because the
+ * number of matching line pairs is ≤ the product of the line counts, one
+ * product budget bounds BOTH the LIS work here and the O(n*m) diff table, and —
+ * decisively — makes the two share ONE fallback trigger. Below the budget both
+ * compute the exact line LCS (identical counts); at or above it both report the
+ * full trimmed window (identical counts). They can therefore never disagree.
+ *
+ * Kept modest because the collapsed stat runs on every edit-card render;
+ * localized edits trim to a tiny window regardless of file size, so only
+ * genuinely huge contiguous rewrites (~1000+ changed lines) reach the fallback.
+ */
+export const LINE_DIFF_LCS_BUDGET = 1_000_000
+
+/**
+ * Whether a changed window is too large for an exact line LCS. Shared by the
+ * collapsed stat and `generateUnifiedDiff` so they fall back in lockstep.
+ */
+export function exceedsLineDiffBudget(
+  oldWindow: string[],
+  newWindow: string[]
+): boolean {
+  return oldWindow.length * newWindow.length > LINE_DIFF_LCS_BUDGET
+}
 
 export function splitNormalizedLines(text: string): string[] {
   if (!text) return []
@@ -14,10 +41,15 @@ export function splitNormalizedLines(text: string): string[] {
   return lines
 }
 
-function contiguousChangedLineStats(
+/**
+ * Strip the common leading/trailing lines shared by both sides, returning just
+ * the changed window. Mirrors the trimming in `generateUnifiedDiff` so the
+ * collapsed stat and the expanded diff are computed over the same region.
+ */
+function trimCommonOuterLines(
   oldLines: string[],
   newLines: string[]
-): LineChangeStats {
+): { oldWindow: string[]; newWindow: string[] } {
   let prefix = 0
   while (
     prefix < oldLines.length &&
@@ -38,8 +70,8 @@ function contiguousChangedLineStats(
   }
 
   return {
-    additions: Math.max(0, newLines.length - prefix - suffix),
-    deletions: Math.max(0, oldLines.length - prefix - suffix),
+    oldWindow: oldLines.slice(prefix, oldLines.length - suffix),
+    newWindow: newLines.slice(prefix, newLines.length - suffix),
   }
 }
 
@@ -55,30 +87,6 @@ function lowerBound(values: number[], target: number): number {
     }
   }
   return left
-}
-
-function exceedsLcsPairBudget(oldLines: string[], newLines: string[]): boolean {
-  if (oldLines.length === 0 || newLines.length === 0) return false
-
-  const oldFreq = new Map<string, number>()
-  for (const line of oldLines) {
-    oldFreq.set(line, (oldFreq.get(line) ?? 0) + 1)
-  }
-
-  const newFreq = new Map<string, number>()
-  for (const line of newLines) {
-    newFreq.set(line, (newFreq.get(line) ?? 0) + 1)
-  }
-
-  let pairs = 0
-  for (const [line, oldCount] of oldFreq) {
-    const newCount = newFreq.get(line)
-    if (!newCount) continue
-    pairs += oldCount * newCount
-    if (pairs > MAX_LCS_MATCH_PAIRS) return true
-  }
-
-  return false
 }
 
 function lcsLengthByLine(oldLines: string[], newLines: string[]): number {
@@ -129,23 +137,87 @@ export function estimateChangedLineStats(
     return { additions: 0, deletions: oldLines.length }
   }
 
-  if (exceedsLcsPairBudget(oldLines, newLines)) {
-    return contiguousChangedLineStats(oldLines, newLines)
+  // Trim the common prefix/suffix first so this estimate runs on the same
+  // changed window the unified diff renders from (generateUnifiedDiff trims
+  // identically). For the normal LCS path this is mathematically equal to
+  // diffing the full text — common outer lines belong to every LCS — but it
+  // keeps the collapsed +N/−M stat in agreement with the expanded diff when the
+  // pair-budget fallback would otherwise diverge (e.g. a large duplicate prefix
+  // that the diff trims away before counting).
+  const { oldWindow, newWindow } = trimCommonOuterLines(oldLines, newLines)
+  if (oldWindow.length === 0) {
+    return { additions: newWindow.length, deletions: 0 }
+  }
+  if (newWindow.length === 0) {
+    return { additions: 0, deletions: oldWindow.length }
   }
 
-  const lcs = lcsLengthByLine(oldLines, newLines)
+  // Window too large / duplicate-heavy for an exact LCS: report the whole
+  // (already-trimmed) window as changed. generateUnifiedDiff applies the SAME
+  // gate, so the collapsed stat and the expanded diff fall back together and
+  // their +/- counts stay identical.
+  if (exceedsLineDiffBudget(oldWindow, newWindow)) {
+    return { additions: newWindow.length, deletions: oldWindow.length }
+  }
+
+  const lcs = lcsLengthByLine(oldWindow, newWindow)
   return {
-    additions: Math.max(0, newLines.length - lcs),
-    deletions: Math.max(0, oldLines.length - lcs),
+    additions: Math.max(0, newWindow.length - lcs),
+    deletions: Math.max(0, oldWindow.length - lcs),
   }
 }
 
+const UNIFIED_HUNK_HEADER = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/
+
 export function countUnifiedDiffLineChanges(text: string): LineChangeStats {
+  const lines = text.split("\n")
+
+  // Precise path for real unified diffs: walk each `@@` hunk and consume exactly
+  // the number of old/new lines it declares. This attributes every body line by
+  // POSITION, so a deletion/addition whose content itself begins with `--- `/
+  // `+++ ` (source that starts with `-- `/`++ `, emitted as `--- `/`+++ `) is
+  // counted correctly instead of being mistaken for a `--- a/…`/`+++ b/…` file
+  // header — which a pure prefix scan cannot disambiguate.
+  if (lines.some((line) => UNIFIED_HUNK_HEADER.test(line))) {
+    let additions = 0
+    let deletions = 0
+    let i = 0
+    while (i < lines.length) {
+      const header = UNIFIED_HUNK_HEADER.exec(lines[i])
+      i += 1
+      if (!header) continue
+
+      // Omitted count means 1 (`@@ -a +c @@`).
+      let oldRemaining = header[1] === undefined ? 1 : Number(header[1])
+      let newRemaining = header[2] === undefined ? 1 : Number(header[2])
+      while (i < lines.length && (oldRemaining > 0 || newRemaining > 0)) {
+        const line = lines[i]
+        i += 1
+        if (line.startsWith("\\")) continue // "\ No newline at end of file"
+        if (line.startsWith("-")) {
+          deletions += 1
+          oldRemaining -= 1
+        } else if (line.startsWith("+")) {
+          additions += 1
+          newRemaining -= 1
+        } else {
+          // Context line (leading space); belongs to both sides.
+          oldRemaining -= 1
+          newRemaining -= 1
+        }
+      }
+    }
+    return { additions, deletions }
+  }
+
+  // Header-less +/- block (e.g. a new-file diff without `@@` hunks): prefix scan,
+  // skipping the `--- a/…` / `+++ b/…` file-header lines (which carry a trailing
+  // space before the path).
   let additions = 0
   let deletions = 0
-  for (const line of text.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1
-    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1
+  for (const line of lines) {
+    if (line.startsWith("+") && !/^\+\+\+ /.test(line)) additions += 1
+    if (line.startsWith("-") && !/^--- /.test(line)) deletions += 1
   }
   return { additions, deletions }
 }

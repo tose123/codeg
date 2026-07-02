@@ -10,6 +10,7 @@ import {
   formatRelative,
   groupByFolderWithReuse,
   headerIndexForFolder,
+  mergeChildrenById,
   nextHeaderAfter,
   pointerYToTargetIndex,
   reuseSelected,
@@ -39,6 +40,7 @@ function conv(
     git_branch: null,
     external_id: null,
     message_count: 0,
+    child_count: 0,
     created_at: createdAt,
     updated_at: createdAt,
     pinned_at: null,
@@ -329,7 +331,7 @@ describe("buildRows", () => {
       foldersHeader(2),
       { kind: "folder", folderId: 20 },
       { kind: "folder", folderId: 10 },
-      { kind: "conversation", conversation: byFolder.get(10)![0] },
+      { kind: "conversation", conversation: byFolder.get(10)![0], depth: 0 },
     ])
   })
 
@@ -371,7 +373,11 @@ describe("buildRows", () => {
       expanded: true,
       count: 1,
     })
-    expect(rows[1]).toEqual({ kind: "conversation", conversation: p1 })
+    expect(rows[1]).toEqual({
+      kind: "conversation",
+      conversation: p1,
+      depth: 0,
+    })
     expect(rows[2]).toEqual({
       kind: "section",
       section: "folders",
@@ -441,15 +447,77 @@ describe("buildRows", () => {
     expect(rows[chatsIdx + 1]).toEqual({
       kind: "conversation",
       conversation: c1,
+      depth: 0,
     })
     expect(rows[chatsIdx + 2]).toEqual({
       kind: "conversation",
       conversation: c2,
+      depth: 0,
     })
     // Flat — no folder headers inside the chat section.
     expect(rows.slice(chatsIdx + 1).some((r) => r.kind === "folder")).toBe(
       false
     )
+  })
+
+  it("places Chat above Folders when sectionOrder is chats-first, keeping Pinned on top", () => {
+    const p1 = conv(1, 10, { pinned_at: new Date(2000).toISOString() })
+    const rows = buildRows({
+      pinned: [p1],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [conv(2, 10)]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [conv(3, 99)],
+      chatsExpanded: true,
+      sectionOrder: "chats-first",
+    })
+    const pinnedIdx = rows.findIndex(
+      (r) => r.kind === "section" && r.section === "pinned"
+    )
+    const chatsIdx = rows.findIndex(
+      (r) => r.kind === "section" && r.section === "chats"
+    )
+    const foldersIdx = rows.findIndex(
+      (r) => r.kind === "section" && r.section === "folders"
+    )
+    // Pinned stays at the very top; Folders and Chat are swapped.
+    expect(pinnedIdx).toBe(0)
+    expect(chatsIdx).toBeGreaterThan(pinnedIdx)
+    expect(foldersIdx).toBeGreaterThan(chatsIdx)
+  })
+
+  it("places Folders above Chat when sectionOrder is folders-first (the default)", () => {
+    const args = {
+      pinned: [] as DbConversationSummary[],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [conv(1, 10)]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [conv(2, 99)],
+      chatsExpanded: true,
+    }
+    const order = (rows: SidebarRow[]) => {
+      const f = rows.findIndex(
+        (r) => r.kind === "section" && r.section === "folders"
+      )
+      const c = rows.findIndex(
+        (r) => r.kind === "section" && r.section === "chats"
+      )
+      return { f, c }
+    }
+    // Explicit folders-first and the omitted default agree: Folders before Chat.
+    const explicit = order(
+      buildRows({ ...args, sectionOrder: "folders-first" })
+    )
+    const omitted = order(buildRows(args))
+    expect(explicit.f).toBeGreaterThanOrEqual(0)
+    expect(explicit.c).toBeGreaterThan(explicit.f)
+    expect(omitted.c).toBeGreaterThan(omitted.f)
   })
 
   it("always emits the Chat section, with an empty hint when there are no chat conversations", () => {
@@ -510,6 +578,187 @@ describe("buildRows", () => {
     expect(rows).toEqual([
       { kind: "section", section: "chats", expanded: false, count: 1 },
     ])
+  })
+
+  // ── Delegation sub-session subtree (recursive expansion) ─────────────────
+
+  it("recurses into an expanded conversation's cached children at depth+1", () => {
+    const parent = conv(1, 10, { child_count: 2 })
+    const childA = conv(100, 10, { kind: "delegate", parent_id: 1 })
+    const childB = conv(101, 10, { kind: "delegate", parent_id: 1 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1]),
+      childrenByParent: new Map([[1, [childA, childB]]]),
+    })
+    expect(rows.filter((r) => r.kind === "conversation")).toEqual([
+      { kind: "conversation", conversation: parent, depth: 0 },
+      { kind: "conversation", conversation: childA, depth: 1 },
+      { kind: "conversation", conversation: childB, depth: 1 },
+    ])
+  })
+
+  it("does not recurse when the conversation is collapsed", () => {
+    const parent = conv(1, 10, { child_count: 2 })
+    const childA = conv(100, 10, { parent_id: 1 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set(),
+      childrenByParent: new Map([[1, [childA]]]),
+    })
+    expect(rows.filter((r) => r.kind === "conversation")).toEqual([
+      { kind: "conversation", conversation: parent, depth: 0 },
+    ])
+  })
+
+  it("emits a loading row when expanded but children are not yet fetched", () => {
+    const parent = conv(1, 10, { child_count: 3 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1]),
+      childrenByParent: new Map(),
+    })
+    expect(rows).toContainEqual({
+      kind: "subsession-loading",
+      parentId: 1,
+      depth: 1,
+    })
+  })
+
+  it("renders nothing extra when expanded children loaded empty (stale count)", () => {
+    const parent = conv(1, 10, { child_count: 1 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1]),
+      childrenByParent: new Map([[1, []]]),
+    })
+    expect(rows.some((r) => r.kind === "subsession-loading")).toBe(false)
+    expect(rows.filter((r) => r.kind === "conversation")).toEqual([
+      { kind: "conversation", conversation: parent, depth: 0 },
+    ])
+  })
+
+  it("recurses grandchildren when nested conversations are expanded", () => {
+    const parent = conv(1, 10, { child_count: 1 })
+    const child = conv(100, 10, { child_count: 1, parent_id: 1 })
+    const grandchild = conv(200, 10, { parent_id: 100 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1, 100]),
+      childrenByParent: new Map([
+        [1, [child]],
+        [100, [grandchild]],
+      ]),
+    })
+    expect(rows.filter((r) => r.kind === "conversation")).toEqual([
+      { kind: "conversation", conversation: parent, depth: 0 },
+      { kind: "conversation", conversation: child, depth: 1 },
+      { kind: "conversation", conversation: grandchild, depth: 2 },
+    ])
+  })
+
+  it("passes child summary references through untouched (card memo stability)", () => {
+    const parent = conv(1, 10, { child_count: 1 })
+    const child = conv(100, 10, { parent_id: 1 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1]),
+      childrenByParent: new Map([[1, [child]]]),
+    })
+    const childRow = rows.find(
+      (r) => r.kind === "conversation" && r.conversation.id === 100
+    ) as { conversation: DbConversationSummary }
+    expect(childRow.conversation).toBe(child)
+  })
+
+  it("shows a loading row for an in-flight placeholder (empty array + loading)", () => {
+    const parent = conv(1, 10, { child_count: 2 })
+    const rows = buildRows({
+      pinned: [],
+      pinnedExpanded: true,
+      orderedFolderIds: [10],
+      byFolder: new Map([[10, [parent]]]),
+      folderExpanded: { 10: true },
+      folderTotalCounts: new Map([[10, 1]]),
+      foldersExpanded: true,
+      chatConversations: [],
+      chatsExpanded: true,
+      conversationExpanded: new Set([1]),
+      childrenByParent: new Map([[1, []]]),
+      childrenLoading: new Set([1]),
+    })
+    expect(rows).toContainEqual({
+      kind: "subsession-loading",
+      parentId: 1,
+      depth: 1,
+    })
+  })
+})
+
+describe("mergeChildrenById", () => {
+  it("keeps live events over the snapshot by id and adds new children", () => {
+    const snapA = conv(100, 1, { status: "pending" })
+    const snapB = conv(102, 1)
+    const eventA = conv(100, 1, { status: "completed" }) // newer status, same id
+    const eventC = conv(101, 1) // new child absent from the snapshot
+    const merged = mergeChildrenById([snapA, snapB], [eventA, eventC])
+    // created_at ascending (the factory derives created_at from id)
+    expect(merged.map((c) => c.id)).toEqual([100, 101, 102])
+    // the live event wins over the snapshot for the shared id
+    expect(merged.find((c) => c.id === 100)!.status).toBe("completed")
+  })
+
+  it("returns the snapshot order when nothing is buffered", () => {
+    const snap = [conv(100, 1), conv(101, 1)]
+    expect(mergeChildrenById(snap, []).map((c) => c.id)).toEqual([100, 101])
   })
 })
 
@@ -584,10 +833,11 @@ describe("selectPinnedWithReuse", () => {
 describe("flatIndexOfConversation", () => {
   const rows: SidebarRow[] = [
     { kind: "folder", folderId: 10 },
-    { kind: "conversation", conversation: conv(1, 10) },
+    { kind: "conversation", conversation: conv(1, 10), depth: 0 },
     {
       kind: "conversation",
       conversation: conv(2, 10, { agent_type: "codex" }),
+      depth: 0,
     },
     { kind: "folder", folderId: 20 },
     { kind: "empty", folderId: 20, totalConversationCount: 0 },
@@ -631,8 +881,8 @@ describe("sticky overlay helpers", () => {
   // F10 expanded (2 convs), F20 collapsed, F30 expanded (empty hint).
   const rows: SidebarRow[] = [
     { kind: "folder", folderId: 10 }, // 0
-    { kind: "conversation", conversation: conv(1, 10) }, // 1
-    { kind: "conversation", conversation: conv(2, 10) }, // 2
+    { kind: "conversation", conversation: conv(1, 10), depth: 0 }, // 1
+    { kind: "conversation", conversation: conv(2, 10), depth: 0 }, // 2
     { kind: "folder", folderId: 20 }, // 3
     { kind: "folder", folderId: 30 }, // 4
     { kind: "empty", folderId: 30, totalConversationCount: 0 }, // 5
@@ -654,10 +904,10 @@ describe("sticky overlay helpers", () => {
       // must never resolve a folder sticky overlay.
       const withSections: SidebarRow[] = [
         { kind: "section", section: "pinned", expanded: true, count: 1 }, // 0
-        { kind: "conversation", conversation: conv(5, 10) }, // 1 (pinned)
+        { kind: "conversation", conversation: conv(5, 10), depth: 0 }, // 1 (pinned)
         { kind: "section", section: "folders", expanded: true, count: 1 }, // 2
         { kind: "folder", folderId: 10 }, // 3
-        { kind: "conversation", conversation: conv(1, 10) }, // 4
+        { kind: "conversation", conversation: conv(1, 10), depth: 0 }, // 4
       ]
       expect(Array.from(buildOwnerHeaderIndex(withSections))).toEqual([
         -1, -1, -1, 3, 3,
@@ -673,7 +923,7 @@ describe("sticky overlay helpers", () => {
     it("ignores section headers, listing only folder header indices", () => {
       const withSections: SidebarRow[] = [
         { kind: "section", section: "pinned", expanded: true, count: 1 },
-        { kind: "conversation", conversation: conv(5, 10) },
+        { kind: "conversation", conversation: conv(5, 10), depth: 0 },
         { kind: "section", section: "folders", expanded: true, count: 2 },
         { kind: "folder", folderId: 10 },
         { kind: "folder", folderId: 20 },

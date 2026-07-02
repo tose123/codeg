@@ -42,6 +42,13 @@ pub struct DbConversationSummary {
     pub git_branch: Option<String>,
     pub external_id: Option<String>,
     pub message_count: u32,
+    /// Number of direct, non-deleted delegation children. Drives the sidebar
+    /// chevron: a row with `child_count > 0` is expandable into its sub-session
+    /// subtree. Not stored on the row — computed by a single GROUP BY aggregate
+    /// (`fill_child_counts`) over the returned set, so `child_count > 0` iff
+    /// `list_children` would return rows. Always serialized (the frontend reads
+    /// `child_count` to decide chevron visibility).
+    pub child_count: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Mirror of `conversation.pinned_at`: when set, the sidebar shows this row in

@@ -1,10 +1,5 @@
 import { computeLineDiff, type DiffHunk } from "@/components/merge/merge-diff"
-
-/**
- * Maximum product of line counts before falling back to naive diff.
- * Avoids O(n*m) LCS blowup for very large inputs.
- */
-const LCS_PAIR_BUDGET = 200_000
+import { exceedsLineDiffBudget } from "./line-change-stats"
 
 /**
  * Generate a unified diff string from old and new text.
@@ -27,15 +22,59 @@ export function generateUnifiedDiff(
   const path = filePath ?? "file"
   const header = `--- a/${path}\n+++ b/${path}`
 
-  // Performance gate: fall back to naive diff for large inputs
-  if (oldLines.length * newLines.length > LCS_PAIR_BUDGET) {
-    return buildNaiveDiff(header, oldLines, newLines)
+  // Diff only the changed window: trim the common leading/trailing lines so the
+  // O(n*m) LCS — and the naive fallback below — operate on the actual change
+  // region instead of the whole file. This mirrors `contiguousChangedLineStats`
+  // in line-change-stats.ts, keeping this expanded diff in sync with the
+  // collapsed +N/-M stat (which already trims this way). Without it, a small
+  // edit inside a large file (e.g. the full-file old/new strings synthesized
+  // for a Codex ACP edit) trips the budget gate and dumps the entire file.
+  let prefix = 0
+  while (
+    prefix < oldLines.length &&
+    prefix < newLines.length &&
+    oldLines[prefix] === newLines[prefix]
+  ) {
+    prefix += 1
   }
 
-  const hunks = computeLineDiff(oldLines, newLines)
+  let suffix = 0
+  while (
+    suffix < oldLines.length - prefix &&
+    suffix < newLines.length - prefix &&
+    oldLines[oldLines.length - 1 - suffix] ===
+      newLines[newLines.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+
+  const midOld = oldLines.slice(prefix, oldLines.length - suffix)
+  const midNew = newLines.slice(prefix, newLines.length - suffix)
+
+  // Nothing left after trimming (content differed only by a trailing newline).
+  if (midOld.length === 0 && midNew.length === 0) return null
+
+  // Fall back to the naive diff when the changed window is too large for an
+  // exact LCS. This gate is shared with the collapsed +N/−M stat
+  // (line-change-stats.ts) so the two always agree: below the budget both
+  // compute the exact LCS; at/above it both treat the whole window as changed.
+  // The window is already trimmed, so the naive output covers only the real
+  // change region, never the whole file.
+  if (exceedsLineDiffBudget(midOld, midNew)) {
+    return buildNaiveDiff(header, midOld, midNew, prefix)
+  }
+
+  const hunks = computeLineDiff(midOld, midNew)
   if (hunks.length === 0) return null
 
-  const unifiedHunks = buildUnifiedHunks(oldLines, hunks, contextLines)
+  // Shift hunk positions from window-relative back to full-file coordinates so
+  // buildUnifiedHunks can pull surrounding context from the full old array.
+  const offsetHunks =
+    prefix === 0
+      ? hunks
+      : hunks.map((hunk) => ({ ...hunk, baseStart: hunk.baseStart + prefix }))
+
+  const unifiedHunks = buildUnifiedHunks(oldLines, offsetHunks, contextLines)
 
   return `${header}\n${unifiedHunks}`
 }
@@ -50,16 +89,20 @@ function splitLines(text: string): string[] {
 }
 
 /**
- * Naive diff: all deletions first, then all additions, with a single hunk header.
- * Used as fallback when inputs are too large for LCS.
+ * Naive diff: all deletions first, then all additions, with a single hunk
+ * header. Used as a fallback when the changed window is too large for LCS.
+ *
+ * `windowStart` is the 0-based index of the window within the full file (the
+ * common-prefix length), so the hunk header reports real file line numbers.
  */
 function buildNaiveDiff(
   header: string,
   oldLines: string[],
-  newLines: string[]
+  newLines: string[],
+  windowStart: number
 ): string {
-  const oldStart = oldLines.length === 0 ? 0 : 1
-  const newStart = newLines.length === 0 ? 0 : 1
+  const oldStart = oldLines.length === 0 ? 0 : windowStart + 1
+  const newStart = newLines.length === 0 ? 0 : windowStart + 1
   const hunkHeader = `@@ -${oldStart},${oldLines.length} +${newStart},${newLines.length} @@`
 
   const parts = [header, hunkHeader]
@@ -114,11 +157,17 @@ function buildUnifiedHunks(
 
   // Render each merged region as a unified hunk
   const output: string[] = []
+  // Running (additions − deletions) from every earlier hunk. Groups are emitted
+  // in old-file order, so each hunk's `+start` is its old start shifted by the
+  // net line delta of all preceding hunks — without this, later hunks report
+  // wrong new-file line numbers after an earlier insertion or deletion.
+  let newLineDelta = 0
 
   for (const group of merged) {
     const lines: string[] = []
     let oldCursor = group.ctxOldStart
     let newLineCount = 0
+    let groupDelta = 0
     const oldLineCount = group.ctxOldEnd - group.ctxOldStart
 
     for (const hunk of group.hunks) {
@@ -140,6 +189,8 @@ function buildUnifiedHunks(
         lines.push(`+${newLine}`)
         newLineCount++
       }
+
+      groupDelta += hunk.newLines.length - hunk.baseCount
     }
 
     // Trailing context
@@ -152,29 +203,15 @@ function buildUnifiedHunks(
     // Compute hunk header
     const oldStart = oldLineCount === 0 ? 0 : group.ctxOldStart + 1
     const newStart =
-      newLineCount === 0
-        ? 0
-        : group.ctxOldStart +
-          1 +
-          computeNewOffset(group.hunks, group.ctxOldStart)
+      newLineCount === 0 ? 0 : group.ctxOldStart + 1 + newLineDelta
 
     output.push(
       `@@ -${oldStart},${oldLineCount} +${newStart},${newLineCount} @@`
     )
     output.push(...lines)
+
+    newLineDelta += groupDelta
   }
 
   return output.join("\n")
-}
-
-/**
- * Compute the offset applied to new-line numbering by hunks before a given position.
- */
-function computeNewOffset(hunks: DiffHunk[], beforeOldLine: number): number {
-  let offset = 0
-  for (const hunk of hunks) {
-    if (hunk.baseStart >= beforeOldLine) break
-    offset += hunk.newLines.length - hunk.baseCount
-  }
-  return offset
 }

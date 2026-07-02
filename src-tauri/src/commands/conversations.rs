@@ -851,14 +851,13 @@ pub(crate) async fn emit_conversation_upsert(
 ) {
     match conversation_service::get_by_id(conn, conversation_id).await {
         Ok(summary) => {
-            // Sidebar shows ROOT conversations only — never broadcast a
-            // delegation child. The frontend also filters `parent_id != null`;
-            // this is the backend half of that invariant, so callers on agent
-            // paths (e.g. SessionStarted) can hand us any id without leaking
-            // child rows into every client's list.
-            if summary.parent_id.is_some() {
-                return;
-            }
+            // Broadcast EVERY conversation, root or delegation child. The
+            // sidebar's root list still drops children (the frontend keeps
+            // `parent_id != null` out of its root array via `applyConversationUpsert`);
+            // a separate subscriber routes child upserts into the expanded
+            // sub-session subtree by `parent_id`. The summary carries `parent_id`
+            // (serialized for children only) and a fresh `child_count`, so a
+            // newly-spawned child can appear live and bump its parent's chevron.
             emit_event(
                 emitter,
                 CONVERSATION_CHANGED_EVENT,
@@ -1401,14 +1400,23 @@ pub async fn delete_conversation_with_cleanup_core(
     conn: &sea_orm::DatabaseConnection,
     conversation_id: i32,
 ) -> Result<(), AppCommandError> {
-    // Capture the backing folder before the soft-delete so a hidden chat folder
-    // can be cleaned up afterward.
-    let folder_id = conversation_service::get_by_id(conn, conversation_id)
+    // Capture the backing folder AND parent before the soft-delete: a hidden
+    // chat folder is retired afterward, and a deleted delegation child must
+    // re-broadcast its parent so the parent's child_count (hence its chevron)
+    // converges from the DB aggregate.
+    let pre = conversation_service::get_by_id(conn, conversation_id)
         .await
-        .ok()
-        .map(|c| c.folder_id);
+        .ok();
+    let folder_id = pre.as_ref().map(|c| c.folder_id);
+    let parent_id = pre.as_ref().and_then(|c| c.parent_id);
     delete_conversation_core(conn, conversation_id).await?;
     emit_conversation_deleted(emitter, conversation_id);
+    // A removed delegation child drops its parent's child_count (→ 0 hides the
+    // chevron). Re-emit the parent from the authoritative aggregate so every
+    // client converges — symmetric with the create-time parent re-emit.
+    if let Some(parent_id) = parent_id {
+        emit_conversation_upsert(emitter, conn, parent_id).await;
+    }
     cleanup_tabs_for_deleted_conversation(emitter, conn, conversation_id).await;
     if let Some(folder_id) = folder_id {
         cleanup_chat_folder_for_deleted_conversation(conn, folder_id).await;
@@ -1496,6 +1504,7 @@ mod tests {
             git_branch: None,
             external_id: None,
             message_count: 0,
+            child_count: 0,
             created_at: now,
             updated_at: now,
             pinned_at: None,
@@ -3062,13 +3071,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_conversation_upsert_skips_delegation_child() {
-        // The sidebar shows root conversations only. A delegation child id
-        // handed to the helper (e.g. from the SessionStarted path) must not
-        // broadcast a sidebar upsert.
+    async fn emit_conversation_upsert_broadcasts_delegation_child_with_parent() {
+        // Delegation children now broadcast too: a dedicated frontend subscriber
+        // routes them into their parent's expanded sub-session subtree by
+        // `parent_id`. The payload must therefore carry `parent_id` (the routing
+        // key) and a fresh `child_count` (so a grandchild bumps the nested
+        // chevron), unlike a root whose `parent_id` is omitted.
         use crate::acp::delegation::spawner::DelegationLink;
         let db = fresh_in_memory_db().await;
-        let folder_id = seed_folder(&db, "/tmp/codeg-sync-child-skip").await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-sync-child-broadcast").await;
         let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
             .await
             .expect("parent");
@@ -3089,9 +3100,74 @@ mod tests {
         let (broadcaster, emitter) = sync_test_emitter();
         let mut rx = broadcaster.subscribe();
         emit_conversation_upsert(&emitter, &db.conn, child.id).await;
+        let evt = rx
+            .try_recv()
+            .expect("delegation child should broadcast an upsert");
+        let p = &*evt.payload;
+        assert_eq!(p["kind"], "upsert");
+        assert_eq!(p["summary"]["id"], child.id);
+        assert_eq!(
+            p["summary"]["parent_id"], parent_id,
+            "child summary must carry parent_id so the frontend can route it"
+        );
+        assert_eq!(
+            p["summary"]["child_count"], 0,
+            "leaf child carries child_count 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_child_re_emits_parent_for_child_count_convergence() {
+        // Deleting a delegation child must re-broadcast its parent so every
+        // client's child_count (and chevron) converges from the DB aggregate —
+        // symmetric with the create-time parent re-emit.
+        use crate::acp::delegation::spawner::DelegationLink;
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/codeg-delete-child-reemit").await;
+        let parent_id = create_conversation_core(&db.conn, folder_id, AgentType::ClaudeCode, None)
+            .await
+            .expect("parent");
+        let child = conversation_service::create_with_delegation(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            Some("child".into()),
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent_id,
+                parent_tool_use_id: "tu-1".into(),
+                delegation_call_id: "call-1".into(),
+            }),
+        )
+        .await
+        .expect("child");
+        let (broadcaster, emitter) = sync_test_emitter();
+        let mut rx = broadcaster.subscribe();
+        delete_conversation_with_cleanup_core(&emitter, &db.conn, child.id)
+            .await
+            .expect("delete child");
+        let mut saw_deleted = false;
+        let mut saw_parent_upsert = false;
+        while let Ok(evt) = rx.try_recv() {
+            if evt.channel != CONVERSATION_CHANGED_EVENT {
+                continue;
+            }
+            let p = &*evt.payload;
+            if p["kind"] == "deleted" && p["id"] == child.id {
+                saw_deleted = true;
+            }
+            if p["kind"] == "upsert" && p["summary"]["id"] == parent_id {
+                saw_parent_upsert = true;
+                assert_eq!(
+                    p["summary"]["child_count"], 0,
+                    "parent count drops to 0 once its only child is gone"
+                );
+            }
+        }
+        assert!(saw_deleted, "child deletion must broadcast a Deleted");
         assert!(
-            rx.try_recv().is_err(),
-            "delegation child must not broadcast a sidebar upsert"
+            saw_parent_upsert,
+            "parent must re-broadcast an Upsert for child_count convergence"
         );
     }
 }

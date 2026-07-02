@@ -2,9 +2,10 @@ import { act, render, screen, waitFor } from "@testing-library/react"
 import { useEffect } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { TabProvider, useTabContext } from "@/contexts/tab-context"
-import { TABS_CHANGED_EVENT } from "@/lib/types"
+import { CONVERSATION_CHANGED_EVENT, TABS_CHANGED_EVENT } from "@/lib/types"
 import type {
   AgentType,
+  ConversationChange,
   DbConversationSummary,
   FolderDetail,
   OpenedTab,
@@ -14,6 +15,7 @@ import type {
 
 const listOpenedTabsMock = vi.fn()
 const saveOpenedTabsMock = vi.fn()
+const getFolderConversationMock = vi.fn()
 const setActiveFolderIdMock = vi.fn()
 const activateConversationPaneMock = vi.fn()
 const disconnectMock = vi.fn()
@@ -24,6 +26,10 @@ const saveLastActiveContextMock = vi.fn()
 const clearLastActiveContextMock = vi.fn()
 // Captured `tabs://changed` handler so tests can simulate inbound broadcasts.
 let tabsChangedHandler: ((change: TabsChanged) => void) | null = null
+// Captured `conversation://changed` handler so tests can drive sub-session
+// status/upsert/delete events into the open-tab summary cache.
+let conversationChangedHandler: ((change: ConversationChange) => void) | null =
+  null
 
 vi.mock("next-intl", () => {
   // Return a STABLE function instance across renders, mirroring next-intl's
@@ -36,6 +42,8 @@ vi.mock("next-intl", () => {
 vi.mock("@/lib/api", () => ({
   listOpenedTabs: (...args: unknown[]) => listOpenedTabsMock(...args),
   saveOpenedTabs: (...args: unknown[]) => saveOpenedTabsMock(...args),
+  getFolderConversation: (...args: unknown[]) =>
+    getFolderConversationMock(...args),
 }))
 
 vi.mock("@/lib/platform", () => ({
@@ -47,6 +55,7 @@ vi.mock("@/lib/platform", () => ({
 vi.mock("@/contexts/app-workspace-context", () => ({
   useAppWorkspace: () => ({
     conversations: conversationsMock,
+    conversationsLoading: conversationsLoadingMock,
     folders: foldersMock,
     allFolders: allFoldersMock,
     foldersHydrated: true,
@@ -111,8 +120,11 @@ let foldersMock: FolderDetail[] = defaultFoldersMock
 // `allFolders` includes hidden chat folders that the user-facing `folders` list
 // excludes; defaults to the same set (no chat folders) for most tests.
 let allFoldersMock: FolderDetail[] = defaultFoldersMock
+// Whether the root conversation list is still loading; gates the sub-session
+// seed effect. Defaults to loaded (false) so most tests seed immediately.
+let conversationsLoadingMock = false
 
-const conversationsMock: DbConversationSummary[] = [
+const defaultConversationsMock: DbConversationSummary[] = [
   {
     id: 1,
     folder_id: 1,
@@ -125,6 +137,7 @@ const conversationsMock: DbConversationSummary[] = [
     git_branch: null,
     external_id: null,
     message_count: 1,
+    child_count: 0,
     created_at: "2026-05-24T00:00:00Z",
     updated_at: "2026-05-24T00:00:00Z",
     pinned_at: null,
@@ -141,6 +154,7 @@ const conversationsMock: DbConversationSummary[] = [
     git_branch: null,
     external_id: null,
     message_count: 1,
+    child_count: 0,
     created_at: "2026-05-24T00:00:00Z",
     updated_at: "2026-05-24T00:00:00Z",
     pinned_at: null,
@@ -157,11 +171,15 @@ const conversationsMock: DbConversationSummary[] = [
     git_branch: null,
     external_id: null,
     message_count: 1,
+    child_count: 0,
     created_at: "2026-05-24T00:00:00Z",
     updated_at: "2026-05-24T00:00:00Z",
     pinned_at: null,
   },
 ]
+
+// Mutable so a test can swap in an empty root list (the loaded-but-empty case).
+let conversationsMock: DbConversationSummary[] = defaultConversationsMock
 
 let latestContext: ReturnType<typeof useTabContext> | null = null
 
@@ -210,19 +228,30 @@ describe("TabProvider tab state transitions", () => {
     vi.clearAllMocks()
     foldersMock = defaultFoldersMock
     allFoldersMock = defaultFoldersMock
+    conversationsMock = defaultConversationsMock
+    conversationsLoadingMock = false
     listOpenedTabsMock.mockReturnValue(new Promise(() => {}))
     saveOpenedTabsMock.mockResolvedValue({
       accepted: true,
       version: 1,
       tabs: [],
     })
+    // mockReset (not just clearAllMocks) also drains any leftover
+    // mockReturnValueOnce queue from a prior test so it can't leak a stale
+    // (e.g. never-resolving) promise into the next test's first fetch.
+    getFolderConversationMock.mockReset()
+    getFolderConversationMock.mockReturnValue(new Promise(() => {}))
     tabsChangedHandler = null
-    subscribeMock.mockImplementation(
-      (event: string, handler: (change: TabsChanged) => void) => {
-        if (event === TABS_CHANGED_EVENT) tabsChangedHandler = handler
-        return Promise.resolve(() => {})
-      }
-    )
+    conversationChangedHandler = null
+    subscribeMock.mockImplementation((event: string, handler: unknown) => {
+      if (event === TABS_CHANGED_EVENT)
+        tabsChangedHandler = handler as (change: TabsChanged) => void
+      if (event === CONVERSATION_CHANGED_EVENT)
+        conversationChangedHandler = handler as (
+          change: ConversationChange
+        ) => void
+      return Promise.resolve(() => {})
+    })
     onTransportReconnectMock.mockReturnValue(() => {})
   })
 
@@ -569,19 +598,30 @@ describe("TabProvider cross-client sync", () => {
     vi.clearAllMocks()
     foldersMock = defaultFoldersMock
     allFoldersMock = defaultFoldersMock
+    conversationsMock = defaultConversationsMock
+    conversationsLoadingMock = false
     listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
     saveOpenedTabsMock.mockResolvedValue({
       accepted: true,
       version: 1,
       tabs: [],
     })
+    // mockReset (not just clearAllMocks) also drains any leftover
+    // mockReturnValueOnce queue from a prior test so it can't leak a stale
+    // (e.g. never-resolving) promise into the next test's first fetch.
+    getFolderConversationMock.mockReset()
+    getFolderConversationMock.mockReturnValue(new Promise(() => {}))
     tabsChangedHandler = null
-    subscribeMock.mockImplementation(
-      (event: string, handler: (change: TabsChanged) => void) => {
-        if (event === TABS_CHANGED_EVENT) tabsChangedHandler = handler
-        return Promise.resolve(() => {})
-      }
-    )
+    conversationChangedHandler = null
+    subscribeMock.mockImplementation((event: string, handler: unknown) => {
+      if (event === TABS_CHANGED_EVENT)
+        tabsChangedHandler = handler as (change: TabsChanged) => void
+      if (event === CONVERSATION_CHANGED_EVENT)
+        conversationChangedHandler = handler as (
+          change: ConversationChange
+        ) => void
+      return Promise.resolve(() => {})
+    })
     disconnectMock.mockResolvedValue(undefined)
     onTransportReconnectMock.mockReturnValue(() => {})
   })
@@ -1097,6 +1137,8 @@ describe("TabProvider post-hydration recovery", () => {
     vi.clearAllMocks()
     foldersMock = defaultFoldersMock
     allFoldersMock = defaultFoldersMock
+    conversationsMock = defaultConversationsMock
+    conversationsLoadingMock = false
     // Draft-only sessions persist nothing, so a fresh launch hydrates empty.
     listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
     saveOpenedTabsMock.mockResolvedValue({
@@ -1237,5 +1279,339 @@ describe("TabProvider post-hydration recovery", () => {
       latestContext?.tabs.filter((t) => t.conversationId == null) ?? []
     expect(drafts).toHaveLength(0)
     expect(screen.getByTestId("active")).toHaveTextContent("conv-1-codex-1")
+  })
+})
+
+describe("TabProvider sub-session tabs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    foldersMock = defaultFoldersMock
+    allFoldersMock = defaultFoldersMock
+    conversationsMock = defaultConversationsMock
+    conversationsLoadingMock = false
+    // No hydration noise — open the sub-session tab imperatively instead.
+    listOpenedTabsMock.mockReturnValue(new Promise(() => {}))
+    saveOpenedTabsMock.mockResolvedValue({
+      accepted: true,
+      version: 1,
+      tabs: [],
+    })
+    // mockReset (not just clearAllMocks) also drains any leftover
+    // mockReturnValueOnce queue from a prior test so it can't leak a stale
+    // (e.g. never-resolving) promise into the next test's first fetch.
+    getFolderConversationMock.mockReset()
+    getFolderConversationMock.mockReturnValue(new Promise(() => {}))
+    tabsChangedHandler = null
+    conversationChangedHandler = null
+    subscribeMock.mockImplementation((event: string, handler: unknown) => {
+      if (event === TABS_CHANGED_EVENT)
+        tabsChangedHandler = handler as (change: TabsChanged) => void
+      if (event === CONVERSATION_CHANGED_EVENT)
+        conversationChangedHandler = handler as (
+          change: ConversationChange
+        ) => void
+      return Promise.resolve(() => {})
+    })
+    onTransportReconnectMock.mockReturnValue(() => {})
+  })
+
+  function subSummary(
+    overrides: Partial<DbConversationSummary> = {}
+  ): DbConversationSummary {
+    return {
+      id: 99,
+      folder_id: 1,
+      title: "Review the auth module",
+      title_locked: false,
+      agent_type: "codex",
+      status: "in_progress",
+      kind: "delegate",
+      model: null,
+      git_branch: null,
+      external_id: null,
+      message_count: 0,
+      child_count: 0,
+      created_at: "2026-05-24T00:00:00Z",
+      updated_at: "2026-05-24T00:00:00Z",
+      pinned_at: null,
+      parent_id: 1,
+      ...overrides,
+    }
+  }
+
+  it("resolves an open sub-session tab's title + status from a fetched summary, then keeps the status dot live", async () => {
+    // Sub-session id 99 is absent from the root conversations list (1,2,3), so a
+    // tab for it can ONLY get its title/status from the seed fetch + the live
+    // conversation channel — the exact gap this fix closes.
+    getFolderConversationMock.mockResolvedValue({
+      summary: subSummary(),
+      turns: [],
+      session_stats: null,
+    })
+    renderTabs()
+    await act(async () => {}) // flush mount: subscribe() captures the handler
+    // Open WITHOUT a seed title — mirrors handleSelect opening a sidebar child.
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    const subTab = () =>
+      latestContext?.tabs.find((tab) => tab.conversationId === 99)
+    // Before the fetch resolves the tab can't resolve a title (root-only map).
+    expect(subTab()?.title).toBe("untitledConversation")
+    // Flush the seed fetch → title + status fill in from the fetched summary.
+    await act(async () => {})
+    expect(subTab()?.title).toBe("Review the auth module")
+    expect(subTab()?.status).toBe("in_progress")
+    // A live status event for the running sub-agent flips the tab's status dot.
+    act(() => {
+      conversationChangedHandler?.({
+        kind: "status",
+        id: 99,
+        status: "completed",
+      })
+    })
+    expect(subTab()?.status).toBe("completed")
+  })
+
+  it("does not fetch a summary for a root conversation tab (resolved from the list)", async () => {
+    // Id 1 IS a root in the conversations list, so the tab resolves from there
+    // and the sub-session seed fetch must never fire for it.
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 1, "codex", true)
+    })
+    await act(async () => {})
+    expect(getFolderConversationMock).not.toHaveBeenCalled()
+    expect(
+      latestContext?.tabs.find((tab) => tab.conversationId === 1)?.title
+    ).toBe("First")
+  })
+
+  it("applies a status event that arrives while the seed fetch is still in flight (no lost event)", async () => {
+    // Hold the seed fetch open so an event can land mid-flight.
+    let resolveFetch: (detail: unknown) => void = () => {}
+    getFolderConversationMock.mockReturnValue(
+      new Promise((res) => {
+        resolveFetch = res
+      })
+    )
+    renderTabs()
+    await act(async () => {}) // capture the conversation://changed handler
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {}) // reconcile effect → seed fetch in flight
+    // An event lands before the seed resolves — it must be buffered, then win
+    // over the (older) fetched status when the seed commits.
+    act(() => {
+      conversationChangedHandler?.({
+        kind: "status",
+        id: 99,
+        status: "completed",
+      })
+    })
+    await act(async () => {
+      resolveFetch({
+        summary: subSummary({ status: "in_progress" }),
+        turns: [],
+        session_stats: null,
+      })
+    })
+    const subTab = latestContext?.tabs.find((tab) => tab.conversationId === 99)
+    expect(subTab?.title).toBe("Review the auth module")
+    expect(subTab?.status).toBe("completed") // buffered event won over the fetch
+  })
+
+  it("merges an upsert then a status that both land during the seed window (upsert title + later status)", async () => {
+    let resolveFetch: (detail: unknown) => void = () => {}
+    getFolderConversationMock.mockReturnValue(
+      new Promise((res) => {
+        resolveFetch = res
+      })
+    )
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {}) // seed in flight
+    // Two events during the fetch: a full upsert (new title) THEN a status. The
+    // status must not clobber the upsert's title — both must survive.
+    act(() => {
+      conversationChangedHandler?.({
+        kind: "upsert",
+        summary: subSummary({ title: "Renamed by AI", status: "in_progress" }),
+      })
+      conversationChangedHandler?.({
+        kind: "status",
+        id: 99,
+        status: "completed",
+      })
+    })
+    // The fetched snapshot carries the OLD title; the merge must prefer the
+    // upsert's summary and the later status.
+    await act(async () => {
+      resolveFetch({
+        summary: subSummary({ title: "OLD", status: "pending" }),
+        turns: [],
+        session_stats: null,
+      })
+    })
+    const subTab = latestContext?.tabs.find((tab) => tab.conversationId === 99)
+    expect(subTab?.title).toBe("Renamed by AI") // upsert summary won over the fetch
+    expect(subTab?.status).toBe("completed") // later status patched on top
+  })
+
+  it("keeps a delete terminal across a late status during the seed window (no resurrection)", async () => {
+    let resolveFetch: (detail: unknown) => void = () => {}
+    getFolderConversationMock.mockReturnValue(
+      new Promise((res) => {
+        resolveFetch = res
+      })
+    )
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {}) // seed in flight
+    act(() => {
+      conversationChangedHandler?.({ kind: "deleted", id: 99 })
+      conversationChangedHandler?.({
+        kind: "status",
+        id: 99,
+        status: "completed",
+      })
+    })
+    await act(async () => {
+      resolveFetch({
+        summary: subSummary(),
+        turns: [],
+        session_stats: null,
+      })
+    })
+    // A child deleted mid-fetch must not be committed by the seed despite a later
+    // status — the tab stays unresolved ("Untitled"), with no status.
+    const subTab = latestContext?.tabs.find((tab) => tab.conversationId === 99)
+    expect(subTab?.title).toBe("untitledConversation")
+    expect(subTab?.status).toBeUndefined()
+  })
+
+  it("seeds an open child tab even when the (loaded) root list is empty", async () => {
+    // Loaded-but-empty root list: the seed must still fire (gated on loading, not
+    // on conversationMap.size, which an old `size === 0` guard would skip).
+    conversationsMock = []
+    conversationsLoadingMock = false
+    getFolderConversationMock.mockResolvedValue({
+      summary: subSummary(),
+      turns: [],
+      session_stats: null,
+    })
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {})
+    expect(getFolderConversationMock).toHaveBeenCalledWith(99)
+    expect(
+      latestContext?.tabs.find((tab) => tab.conversationId === 99)?.title
+    ).toBe("Review the auth module")
+  })
+
+  it("does not seed while the root list is still loading", async () => {
+    conversationsLoadingMock = true
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {})
+    expect(getFolderConversationMock).not.toHaveBeenCalled()
+  })
+
+  it("discards a stale in-flight seed on reconnect and reseeds the open child tab", async () => {
+    // TabProvider registers MORE THAN ONE reconnect handler (tab resync + this
+    // sub-session cache), so capture them all and fire all to exercise ours.
+    const reconnectCbs: Array<() => void> = []
+    onTransportReconnectMock.mockImplementation((cb: () => void) => {
+      reconnectCbs.push(cb)
+      return () => {}
+    })
+    let resolveStale: (detail: unknown) => void = () => {}
+    let resolveFresh: (detail: unknown) => void = () => {}
+    getFolderConversationMock
+      .mockReturnValueOnce(
+        new Promise((res) => {
+          resolveStale = res
+        })
+      )
+      .mockReturnValueOnce(
+        new Promise((res) => {
+          resolveFresh = res
+        })
+      )
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {}) // seed #1 in flight
+    act(() => {
+      reconnectCbs.forEach((cb) => cb())
+    })
+    await act(async () => {}) // reconcile reruns under a new epoch → seed #2 in flight
+    // The pre-reconnect (stale) response must be ignored…
+    await act(async () => {
+      resolveStale({
+        summary: subSummary({ title: "STALE" }),
+        turns: [],
+        session_stats: null,
+      })
+    })
+    expect(
+      latestContext?.tabs.find((tab) => tab.conversationId === 99)?.title
+    ).toBe("untitledConversation")
+    // …and the fresh reseed response applied.
+    await act(async () => {
+      resolveFresh({
+        summary: subSummary({ title: "FRESH" }),
+        turns: [],
+        session_stats: null,
+      })
+    })
+    expect(
+      latestContext?.tabs.find((tab) => tab.conversationId === 99)?.title
+    ).toBe("FRESH")
+    expect(getFolderConversationMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("prunes a child tab's cached summary when the tab closes (so a reopen refetches)", async () => {
+    getFolderConversationMock.mockResolvedValue({
+      summary: subSummary(),
+      turns: [],
+      session_stats: null,
+    })
+    renderTabs()
+    await act(async () => {})
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {})
+    expect(getFolderConversationMock).toHaveBeenCalledTimes(1)
+    const tabId = latestContext?.tabs.find(
+      (tab) => tab.conversationId === 99
+    )?.id
+    act(() => {
+      latestContext?.closeTab(tabId!)
+    })
+    await act(async () => {})
+    // Reopen → a pruned cache forces a fresh fetch (a leaked entry would not).
+    act(() => {
+      latestContext?.openTab(1, 99, "codex", true)
+    })
+    await act(async () => {})
+    expect(getFolderConversationMock).toHaveBeenCalledTimes(2)
   })
 })

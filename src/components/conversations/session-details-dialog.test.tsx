@@ -44,6 +44,7 @@ function summary(
     git_branch: "main",
     external_id: "ext-abc",
     message_count: 12,
+    child_count: 0,
     created_at: "2026-06-10T10:00:00.000Z",
     updated_at: "2026-06-12T12:00:00.000Z",
     pinned_at: null,

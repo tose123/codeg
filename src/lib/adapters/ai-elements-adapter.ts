@@ -15,7 +15,6 @@ import {
 import { normalizeToolName } from "@/lib/tool-call-normalization"
 import { isBackgroundTaskToolCall } from "@/lib/background-task"
 import { feedbackCheckHasContent } from "@/lib/feedback-check"
-import { stripFeedbackReminder } from "@/lib/feedback-reminder"
 import {
   isPlanLikeToolName,
   isPlanModeToolName,
@@ -881,28 +880,6 @@ function splitUserTextAndResources(
   return { parts: nextParts, resources }
 }
 
-/**
- * Strip the auto-injected live-feedback reminder from a user turn's text parts.
- * The reminder rides the wire to the agent but is bracketed by a sentinel so it
- * can be hidden again on reload (codeg keeps no prompt copy, so the user turn is
- * reparsed from the agent's session file with the reminder still attached). A
- * text part that was nothing but the reminder collapses to empty and is dropped.
- */
-function stripFeedbackReminderFromParts(
-  parts: AdaptedContentPart[]
-): AdaptedContentPart[] {
-  const out: AdaptedContentPart[] = []
-  for (const part of parts) {
-    if (part.type !== "text") {
-      out.push(part)
-      continue
-    }
-    const stripped = stripFeedbackReminder(part.text)
-    if (stripped.length > 0) out.push({ ...part, text: stripped })
-  }
-  return out
-}
-
 function deriveImageNameFromBlock(
   block: Extract<ContentBlock, { type: "image" }>
 ): string {
@@ -1766,15 +1743,9 @@ export function adaptMessageTurn(
         )
       : adaptedContent
 
-  // Drop the live-feedback reminder (auto-appended to outgoing prompts) BEFORE
-  // resource extraction, so it never surfaces in the UI on reload and its body
-  // can't be misread as a resource mention.
   const userSplit =
     turn.role === "user"
-      ? splitUserTextAndResources(
-          stripFeedbackReminderFromParts(groupedContent),
-          text.attachedResources
-        )
+      ? splitUserTextAndResources(groupedContent, text.attachedResources)
       : { parts: groupedContent, resources: [] as UserResourceDisplay[] }
   // Only user-uploaded images surface as top-of-message attachments.
   // Assistant-side image_generation flows through the inline

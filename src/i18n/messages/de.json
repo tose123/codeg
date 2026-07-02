@@ -1143,11 +1143,15 @@
       "reorderHandle": "Zum Neuordnen ziehen",
       "openFolder": "Ordner öffnen",
       "searchPlaceholder": "Konversationen suchen...",
+      "viewOptions": "Anzeigeoptionen",
       "showCompleted": "Abgeschlossene Konversationen anzeigen",
       "moreOptions": "Weitere Optionen",
       "sortBy": "Sortieren nach",
       "sortByCreatedAt": "Erstellungszeit",
       "sortByUpdatedAt": "Aktualisierungszeit",
+      "sectionOrder": "Abschnittsreihenfolge",
+      "sectionOrderFoldersFirst": "Ordner oben",
+      "sectionOrderChatsFirst": "Chat oben",
       "statusRunningBadge": "Läuft",
       "statusCancelledBadge": "Abgebrochen",
       "conversationCountUnit": "{count, plural, one {# Konversation} other {# Konversationen}}",
@@ -1192,7 +1196,8 @@
       "sectionChats": "Chat",
       "noChats": "Keine Chats",
       "newChatAction": "Neuer Chat",
-      "automations": "Automatisierungen"
+      "automations": "Automatisierungen",
+      "loadingSubsessions": "Unterkonversationen werden geladen…"
     },
     "conversation": {
       "reloadFailed": "Konversation konnte nicht neu geladen werden: {message}",
@@ -1281,7 +1286,9 @@
       "pin": "Anheften",
       "unpin": "Loslösen",
       "markCompleted": "Als abgeschlossen markieren",
-      "reopen": "Erneut öffnen"
+      "reopen": "Erneut öffnen",
+      "expandSubsessions": "Unterkonversationen einblenden",
+      "collapseSubsessions": "Unterkonversationen ausblenden"
     },
     "search": {
       "dialogTitle": "Suchen",
@@ -2469,6 +2476,16 @@
         "remove": "Entfernen",
         "noDiffDataAvailable": "Keine Diff-Daten verfügbar für {filePath}"
       },
+      "replyArtifacts": {
+        "title": "Geänderte Dateien",
+        "fileCount": "{count, plural, one {# Datei} other {# Dateien}}",
+        "newFilesTitle": "Neue Dateien",
+        "revealInFolder": "Im Dateimanager anzeigen",
+        "openFile": "{filePath} öffnen",
+        "openInEditor": "Im Editor öffnen",
+        "remove": "Entfernen",
+        "noDiffDataAvailable": "Keine Diff-Daten verfügbar für {filePath}"
+      },
       "askQuestion": {
         "title": "Der Agent benötigt deine Auswahl",
         "subtitle": "Antworten und absenden. Du kannst jederzeit überspringen.",
@@ -3323,7 +3340,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "Live-Feedback",
-    "description": "Sende dem Agenten Hinweise und Korrekturen, während er arbeitet. Wenn aktiviert, erhält der Agent ein Werkzeug zum Abrufen von Live-Feedback und Unterhaltungen zeigen eine Notizeingabe.",
+    "description": "Sende dem Agenten Hinweise und Korrekturen, während er arbeitet. Wenn aktiviert, erhält der Agent ein Werkzeug zum Abrufen von Live-Feedback und Unterhaltungen zeigen eine Notizeingabe. Tipp: Der Agent prüft Feedback normalerweise nur, wenn du es in deiner Nachricht erwähnst — füge z. B. «prüfe regelmäßig mein Live-Feedback während der Arbeit» hinzu.",
     "enable": "Live-Feedback aktivieren",
     "enableHint": "Fügt Agenten, die nach dem Aktivieren gestartet werden, ein Werkzeug zum Abrufen von Feedback hinzu.",
     "save": "Speichern",
@@ -3347,8 +3364,7 @@
     "dismiss": "Verwerfen",
     "turnEndedResent": "Die Runde endete – stattdessen als neue Nachricht gesendet.",
     "turnEnded": "Die Runde ist bereits beendet.",
-    "submitFailed": "Deine Notiz konnte nicht gesendet werden",
-    "promptReminder": "(Automatischer Hinweis von Codeg – handle still danach: erwähne, zitiere oder beantworte ihn nicht.) Live-Feedback ist aktiviert, daher kann ich dir während der Arbeit jederzeit Hinweise mitten in der Aufgabe senden. Prüfe regelmäßig darauf und passe deinen Kurs an. Um es zu lesen, rufe das Live-Feedback-Tool auf, das der MCP-Server `codeg-mcp` bereitstellt – deine Umgebung stellt es möglicherweise unter einem Namespace-Namen wie `mcp__codeg-mcp__check_user_feedback` statt unter dem bloßen `check_user_feedback` bereit, rufe also das jeweils verfügbare passende Tool auf, ohne seinen Namen zu kommentieren."
+    "submitFailed": "Deine Notiz konnte nicht gesendet werden"
   },
   "SessionInfoSettings": {
     "title": "Sitzungsinformationen abrufen",

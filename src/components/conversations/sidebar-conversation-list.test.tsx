@@ -232,6 +232,9 @@ vi.mock("./conversation-manage-dialog", () => ({
   ConversationManageDialog: () => null,
 }))
 vi.mock("@/components/layout/clone-dialog", () => ({ CloneDialog: () => null }))
+// The sub-session realtime sync hook reaches @/lib/platform (transport), which
+// these tests don't load; stub it to a no-op — it has its own unit tests.
+vi.mock("@/hooks/use-subsession-sync", () => ({ useSubsessionSync: () => {} }))
 vi.mock("@/components/shared/directory-browser-dialog", () => ({
   DirectoryBrowserDialog: () => null,
 }))
@@ -257,6 +260,7 @@ function conv(
     git_branch: null,
     external_id: null,
     message_count: 0,
+    child_count: 0,
     created_at: createdAt,
     updated_at: createdAt,
     pinned_at: null,

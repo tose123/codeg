@@ -50,6 +50,7 @@ import {
   updateFolderColor,
   updateFolderDefaultAgent,
   deleteConversation,
+  listChildConversations,
 } from "@/lib/api"
 import { isDesktop, openFileDialog, revealItemInDir } from "@/lib/platform"
 import { getActiveRemoteConnectionId } from "@/lib/transport"
@@ -64,8 +65,11 @@ import {
   saveFolderExpanded,
   loadSectionCollapsed,
   saveSectionCollapsed,
+  loadConversationExpanded,
+  saveConversationExpanded,
   type SidebarSectionCollapsed,
   type SidebarSortMode,
+  type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
 import {
   FOLDER_THEME_COLOR_INHERIT,
@@ -74,7 +78,11 @@ import {
   type FolderThemeColor,
   type ThemeColor,
 } from "@/lib/theme-presets"
-import { SidebarConversationCard } from "./sidebar-conversation-card"
+import {
+  SidebarConversationCard,
+  SubsessionAncestorRails,
+  CONV_RAIL_DEPTH_STEP,
+} from "./sidebar-conversation-card"
 import {
   applyReorder,
   buildOwnerHeaderIndex,
@@ -85,6 +93,7 @@ import {
   formatRelative,
   groupByFolderWithReuse,
   headerIndexForFolder,
+  mergeChildrenById,
   nextHeaderAfter,
   pointerYToTargetIndex,
   reuseSelected,
@@ -93,6 +102,7 @@ import {
   selectPinnedWithReuse,
   type SidebarRow,
 } from "./sidebar-conversation-grouping"
+import { useSubsessionSync } from "@/hooks/use-subsession-sync"
 import { SidebarSectionHeader } from "./sidebar-section-header"
 import { ConversationManageDialog } from "./conversation-manage-dialog"
 import { CloneDialog } from "@/components/layout/clone-dialog"
@@ -569,12 +579,14 @@ export interface SidebarConversationListHandle {
 export interface SidebarConversationListProps {
   showCompleted?: boolean
   sortMode?: SidebarSortMode
+  sectionOrder?: SidebarSectionOrder
 }
 
 export function SidebarConversationList({
   ref,
   showCompleted = true,
   sortMode = "created",
+  sectionOrder = "folders-first",
 }: SidebarConversationListProps & {
   ref?: Ref<SidebarConversationListHandle>
 }) {
@@ -677,6 +689,38 @@ export function SidebarConversationList({
   const pinnedExpanded = !sectionCollapsed.pinned
   const foldersExpanded = !sectionCollapsed.folders
   const chatsExpanded = !sectionCollapsed.chats
+  // ── Per-conversation delegation sub-session expansion ───────────────────
+  // Default COLLAPSED (unlike folders): only ids the user opened are tracked
+  // and persisted. Hydrated from localStorage after mount. `childrenByParent`
+  // is the lazily-fetched child cache (key absent = not fetched → renders a
+  // loading row; empty array = no live children → renders nothing, self-heals
+  // on the next refresh). The ref mirror lets the lazy-fetch dedupe read the
+  // latest cache without re-creating its callback.
+  const [conversationExpanded, setConversationExpanded] = useState<Set<number>>(
+    () => new Set()
+  )
+  const [childrenByParent, setChildrenByParent] = useState<
+    Map<number, DbConversationSummary[]>
+  >(() => new Map())
+  const childrenByParentRef = useRef(childrenByParent)
+  childrenByParentRef.current = childrenByParent
+  const childrenInFlightRef = useRef<Set<number>>(new Set())
+  // In-flight parent fetches → drives the loading spinner. A placeholder empty
+  // array is written into `childrenByParent` before the fetch so concurrent child
+  // upserts buffer into it (closing the lost-update race); `childrenLoading` then
+  // distinguishes "still fetching" from a settled-empty (stale-count) subtree.
+  const [childrenLoading, setChildrenLoading] = useState<Set<number>>(
+    () => new Set()
+  )
+  // Tombstones for soft-deleted child ids (FIFO-bounded in the sync hook) so a
+  // stale fetch snapshot or out-of-order upsert can't resurrect a deleted child —
+  // the child-cache analog of the context's root deletion guard.
+  const deletedChildIdsRef = useRef<Set<number>>(new Set())
+
+  // Keep the lazily-loaded sub-session cache live in real time: route child
+  // upsert/status/deleted events into `childrenByParent` (roots stay with the
+  // AppWorkspace context). child_count converges via backend parent re-emits.
+  useSubsessionSync({ setChildrenByParent, deletedChildIdsRef })
   const [removeConfirm, setRemoveConfirm] = useState<{
     folderId: number
     folderName: string
@@ -728,6 +772,7 @@ export function SidebarConversationList({
 
     setFolderExpanded(loadFolderExpanded())
     setSectionCollapsed(loadSectionCollapsed())
+    setConversationExpanded(new Set(loadConversationExpanded()))
   }, [])
 
   const toggleSection = useCallback(
@@ -955,6 +1000,10 @@ export function SidebarConversationList({
         foldersExpanded,
         chatConversations,
         chatsExpanded,
+        sectionOrder,
+        conversationExpanded,
+        childrenByParent,
+        childrenLoading,
       }),
     [
       pinned,
@@ -966,6 +1015,10 @@ export function SidebarConversationList({
       foldersExpanded,
       chatConversations,
       chatsExpanded,
+      sectionOrder,
+      conversationExpanded,
+      childrenByParent,
+      childrenLoading,
     ]
   )
 
@@ -1109,6 +1162,115 @@ export function SidebarConversationList({
       return next
     })
   }, [])
+
+  // Lazily fetch a conversation's direct delegation children into the cache.
+  // Deduped against both the cache and in-flight requests so a re-toggle or the
+  // restore-time guard below can call it freely (idempotent, StrictMode-safe).
+  const ensureChildrenLoaded = useCallback(async (id: number) => {
+    if (childrenByParentRef.current.has(id)) return
+    if (childrenInFlightRef.current.has(id)) return
+    childrenInFlightRef.current.add(id)
+    // Placeholder BEFORE the fetch: `childrenByParent` is the only routing
+    // surface for live child upserts, so a concurrent upsert buffers into this
+    // entry instead of being dropped, and the fetch merges them — closing the
+    // lost-update race. `childrenLoading` keeps the spinner up while empty.
+    setChildrenByParent((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Map(prev)
+      next.set(id, [])
+      return next
+    })
+    setChildrenLoading((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+    try {
+      const fetched = await listChildConversations(id)
+      setChildrenByParent((prev) => {
+        // Drop any child tombstoned while the fetch was in flight — a stale
+        // snapshot can still contain a since-deleted child (list_children
+        // queried before the soft-delete committed) — then merge the snapshot
+        // with live events buffered mid-flight (events win by id) so a child
+        // created after the query isn't lost.
+        const tomb = deletedChildIdsRef.current
+        const liveFetched =
+          tomb.size > 0 ? fetched.filter((c) => !tomb.has(c.id)) : fetched
+        const buffered = prev.get(id)
+        const merged =
+          buffered && buffered.length > 0
+            ? mergeChildrenById(liveFetched, buffered)
+            : liveFetched
+        const next = new Map(prev)
+        next.set(id, merged)
+        return next
+      })
+    } catch {
+      // Roll back the placeholder so a later toggle retries — unless live events
+      // already populated it, in which case keep them.
+      setChildrenByParent((prev) => {
+        const cur = prev.get(id)
+        if (cur && cur.length > 0) return prev
+        const next = new Map(prev)
+        next.delete(id)
+        return next
+      })
+    } finally {
+      childrenInFlightRef.current.delete(id)
+      setChildrenLoading((prev) => {
+        if (!prev.has(id)) return prev
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+    }
+  }, [])
+
+  // Toggle a conversation's sub-session subtree. Expanding kicks off a lazy
+  // fetch; the Set identity changes so `rows` rebuilds, but the per-card
+  // `expanded` boolean is computed per row at render (never the Set passed in),
+  // so only the toggled card's prop flips and every other card memo holds.
+  const toggleConversation = useCallback(
+    (id: number) => {
+      setConversationExpanded((prev) => {
+        const next = new Set(prev)
+        if (next.has(id)) {
+          next.delete(id)
+        } else {
+          next.add(id)
+          void ensureChildrenLoaded(id)
+        }
+        saveConversationExpanded([...next])
+        return next
+      })
+    },
+    [ensureChildrenLoaded]
+  )
+
+  // Restore-time lazy load, driven by the RENDERED rows (not the raw persisted
+  // set): fetch children for every expanded parent actually visible in `rows`
+  // but not yet cached. Iterating `rows` keeps this to the reachable next level —
+  // a deep restored expansion re-materializes one level per pass as each level's
+  // children arrive and `rows` rebuilds — instead of flooding startup with
+  // requests for every persisted (possibly stale/deleted/deep) id. An effect (not
+  // a render-time microtask) keeps the side effect out of render; the
+  // cache/in-flight dedupe makes the repeated passes cheap and StrictMode-safe.
+  useEffect(() => {
+    if (loading) return
+    for (const row of rows) {
+      if (row.kind !== "conversation") continue
+      const c = row.conversation
+      if (
+        c.child_count > 0 &&
+        conversationExpanded.has(c.id) &&
+        !childrenByParentRef.current.has(c.id) &&
+        !childrenInFlightRef.current.has(c.id)
+      ) {
+        void ensureChildrenLoaded(c.id)
+      }
+    }
+  }, [rows, conversationExpanded, loading, ensureChildrenLoaded])
 
   // ── Sticky folder header overlay ──────────────────────────────────────────
   // Resolve the folder currently scrolled through and the iOS handoff offset
@@ -1788,6 +1950,27 @@ export function SidebarConversationList({
         </div>
       )
     }
+    if (row.kind === "subsession-loading") {
+      // Transient spinner at the child indent while children are fetched. The
+      // left inset matches a depth-`row.depth` card's text start: rail axis
+      // (0.875rem + depth·CONV_RAIL_DEPTH_STEP) plus the button's extra 0.875rem.
+      // Ancestor guide rails keep each parent's vertical line continuous through
+      // this placeholder; the content is lifted (relative) above the z-0 rails.
+      return (
+        <div
+          className="relative py-[0.375rem] text-[0.75rem] text-muted-foreground/70"
+          style={{
+            paddingLeft: `calc(0.875rem + ${row.depth} * ${CONV_RAIL_DEPTH_STEP} + 0.875rem)`,
+          }}
+        >
+          <SubsessionAncestorRails depth={row.depth} />
+          <span className="relative flex items-center gap-1.5">
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
+            {t("loadingSubsessions")}
+          </span>
+        </div>
+      )
+    }
     const conv = row.conversation
     // Worktree child folders render under their parent group, so theme the row
     // by the display group (parent) for a unified look.
@@ -1812,6 +1995,10 @@ export function SidebarConversationList({
         onStatusChange={handleStatusChange}
         onNewConversation={handleNewConversationForFolder}
         onTogglePin={handleTogglePin}
+        depth={row.depth}
+        hasChildren={conv.child_count > 0}
+        expanded={conversationExpanded.has(conv.id)}
+        onToggleExpand={toggleConversation}
       />
     )
   }
@@ -1821,6 +2008,7 @@ export function SidebarConversationList({
     if (row.kind === "folder") return `folder-${row.folderId}`
     if (row.kind === "empty") return `empty-${row.folderId}`
     if (row.kind === "chats-empty") return "chats-empty"
+    if (row.kind === "subsession-loading") return `subloading-${row.parentId}`
     return `conv-${row.conversation.agent_type}-${row.conversation.id}`
   }
 

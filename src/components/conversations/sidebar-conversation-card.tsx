@@ -1,6 +1,6 @@
 "use client"
 
-import { memo, useState, useCallback } from "react"
+import { memo, useState, useCallback, type CSSProperties } from "react"
 import {
   Pencil,
   Trash2,
@@ -12,6 +12,7 @@ import {
   PinOff,
   CheckCircle2,
   Info,
+  ChevronRight,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import type { DbConversationSummary, ConversationStatus } from "@/lib/types"
@@ -51,6 +52,54 @@ import { ConversationStatusDot } from "./conversation-status-dot"
 import { SessionDetailsDialog } from "./session-details-dialog"
 import { AgentIcon } from "@/components/agent-icon"
 
+/**
+ * Horizontal indent added per delegation-nesting level. Chosen so a child's
+ * agent-icon GLYPH left edge lands exactly under its parent's title TEXT start:
+ * the gap from a row's rail axis to its title is `0.875rem`, and the icon glyph
+ * is centred on the axis (half-width `0.375rem`), so one level must shift the
+ * child axis right by `0.875 + 0.375 = 1.25rem` for `axis(child) − 0.375 =
+ * title(parent)`. The root axis (`0.875rem`) and the axis→title gap (`0.875rem`)
+ * are separate constants — don't fold them into this step.
+ */
+export const CONV_RAIL_DEPTH_STEP = "1.25rem"
+
+/**
+ * Vertical guide rails for a delegation sub-session's ANCESTORS. A row at `depth`
+ * draws one rail per ancestor level (axis 0 … depth−1), each a 2px line at
+ * `axis(level) = 0.875rem + level·CONV_RAIL_DEPTH_STEP` from the row's left edge
+ * — the same x as that ancestor row's own rail. Stacked across a contiguous
+ * subtree they render each parent's rail as a single continuous vertical line
+ * running down through all of its descendants, so a child's left rail lines up
+ * exactly under its parent's instead of floating one indent step to the right.
+ * The row's OWN rail — the one through its agent icon — is drawn separately at
+ * `--conv-rail-axis` by the caller.
+ *
+ * Renders nothing for a root (depth 0). Shared with the list's sub-session
+ * loading placeholder so the spine stays continuous while children are fetched.
+ */
+export function SubsessionAncestorRails({ depth }: { depth: number }) {
+  if (depth <= 0) return null
+  return (
+    <>
+      {Array.from({ length: depth }, (_, level) => (
+        <span
+          key={level}
+          aria-hidden
+          data-subsession-rail
+          className="pointer-events-none absolute z-0 bg-sidebar-border"
+          style={{
+            top: "-0.0625rem",
+            bottom: "-0.0625rem",
+            left: `calc(0.875rem + ${level} * ${CONV_RAIL_DEPTH_STEP})`,
+            width: "0.125rem",
+            transform: "translateX(-50%)",
+          }}
+        />
+      ))}
+    </>
+  )
+}
+
 interface SidebarConversationCardProps {
   conversation: DbConversationSummary
   isSelected: boolean
@@ -63,6 +112,15 @@ interface SidebarConversationCardProps {
   onStatusChange: (id: number, status: ConversationStatus) => Promise<void>
   onNewConversation?: (folderId: number) => void
   onTogglePin?: (id: number, nextPinned: boolean) => void
+  /** Delegation-tree nesting depth (0 = root). Drives the per-level indent. */
+  depth?: number
+  /** True when `child_count > 0`: the conversation has delegation children, so
+   *  the expand chevron is shown. */
+  hasChildren?: boolean
+  /** Whether this conversation's sub-session subtree is currently expanded. */
+  expanded?: boolean
+  /** Toggle this conversation's sub-session subtree (lazily loads on expand). */
+  onToggleExpand?: (id: number) => void
 }
 
 export const SidebarConversationCard = memo(function SidebarConversationCard({
@@ -77,6 +135,10 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
   onStatusChange,
   onNewConversation,
   onTogglePin,
+  depth = 0,
+  hasChildren = false,
+  expanded = false,
+  onToggleExpand,
 }: SidebarConversationCardProps) {
   const t = useTranslations("Folder.conversationCard")
   const tSidebar = useTranslations("Folder.sidebar")
@@ -141,6 +203,11 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
   const isCancelled = status === "cancelled"
   const isPinned = conversation.pinned_at != null
   const isCompleted = status === "completed"
+  // Delegation sub-sessions (a child of another conversation) don't get the
+  // hover quick actions: pinning a sub-agent run to the root Pinned section or
+  // hand-toggling its status doesn't fit — its lifecycle is the sub-agent's. The
+  // time / running badge then stays visible on hover (nothing swaps in for it).
+  const isSubsession = conversation.parent_id != null
 
   return (
     <>
@@ -149,10 +216,22 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
           <div
             className="relative h-[2rem] bg-sidebar"
             data-conv-key={`${conversation.agent_type}:${conversation.id}`}
+            // Per-level indent: shift the shared rail axis right by one step per
+            // depth. Root rows (depth 0) leave the var untouched so they inherit
+            // the list's `--conv-rail-axis: 0.875rem` and render exactly as
+            // before; the rail, agent icon, status dot, and button padding all
+            // key off this var so the whole row indents cohesively.
+            style={
+              depth > 0
+                ? ({
+                    "--conv-rail-axis": `calc(0.875rem + ${depth} * ${CONV_RAIL_DEPTH_STEP})`,
+                  } as CSSProperties)
+                : undefined
+            }
           >
             <div
               className={cn(
-                "group flex h-[1.9375rem] w-full items-center",
+                "group relative flex h-[1.9375rem] w-full items-center",
                 "rounded-full text-sidebar-foreground",
                 "transition-colors duration-[120ms]",
                 isSelected
@@ -167,9 +246,22 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                 className={cn(
                   "relative flex h-full min-w-0 flex-1 items-center gap-[0.625rem] text-left outline-none",
                   "rounded-full",
-                  "pr-[0.25rem] pl-7"
+                  "pr-[0.25rem]"
                 )}
+                // Rail-axis-relative left padding (was a fixed `pl-7`): at depth 0
+                // this resolves to 0.875rem + 0.875rem = 1.75rem (= pl-7), so root
+                // rows are pixel-identical; deeper rows inherit the shifted var.
+                style={{
+                  paddingLeft:
+                    "calc(var(--conv-rail-axis, 0.875rem) + 0.875rem)",
+                }}
               >
+                {/* Ancestor guide rails (depth ≥ 1): keep each parent's vertical
+                    line continuous down through this nested row, so the child's
+                    left rail aligns under the parent's. */}
+                <SubsessionAncestorRails depth={depth} />
+                {/* This row's OWN rail, through its agent icon, at the (depth-
+                    shifted) rail axis. */}
                 <span
                   aria-hidden
                   className={cn(
@@ -184,7 +276,16 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                   }}
                 />
                 <div
-                  className="pointer-events-none absolute top-1/2 z-10 flex items-center justify-center"
+                  className={cn(
+                    "pointer-events-none absolute top-1/2 z-10 flex items-center justify-center",
+                    // With children, the row hover (or focus) swaps this agent
+                    // icon out for the expand chevron at the same spot — fade it
+                    // so the two cross-fade in place. On touch (no hover) the
+                    // chevron is always shown, so the icon is always hidden.
+                    hasChildren &&
+                      onToggleExpand &&
+                      "transition-opacity duration-150 group-hover:opacity-0 group-focus-within:opacity-0 [@media(hover:none)]:opacity-0"
+                  )}
                   style={{
                     left: "var(--conv-rail-axis, 0.875rem)",
                     width: "0.875rem",
@@ -215,6 +316,52 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                 </span>
               </button>
 
+              {/* Expand/collapse affordance for delegation children. It overlays
+                  the agent icon at the rail axis: idle shows the icon, and
+                  hovering (or focusing) the row swaps in this chevron at the very
+                  same spot while the icon fades. A sibling of the row button (HTML
+                  forbids nested buttons) with `stopPropagation` so a toggle never
+                  selects the row; pointer events stay off until revealed so a
+                  click on the icon area still selects the row when not hovering. */}
+              {hasChildren && onToggleExpand && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleExpand(conversation.id)
+                  }}
+                  aria-label={
+                    expanded ? t("collapseSubsessions") : t("expandSubsessions")
+                  }
+                  aria-expanded={expanded}
+                  title={
+                    expanded ? t("collapseSubsessions") : t("expandSubsessions")
+                  }
+                  className={cn(
+                    "absolute top-0 bottom-0 z-20 flex items-center justify-center",
+                    "cursor-pointer outline-none",
+                    "opacity-0 pointer-events-none transition-opacity duration-150",
+                    "group-hover:opacity-100 group-hover:pointer-events-auto",
+                    "group-focus-within:opacity-100 group-focus-within:pointer-events-auto",
+                    "[@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto"
+                  )}
+                  style={{
+                    left: "var(--conv-rail-axis, 0.875rem)",
+                    width: "0.875rem",
+                    transform: "translateX(-50%)",
+                  }}
+                >
+                  <ChevronRight
+                    aria-hidden
+                    className={cn(
+                      "h-3 w-3 shrink-0 text-muted-foreground/70",
+                      "transition-transform duration-200 ease-out",
+                      expanded && "rotate-90"
+                    )}
+                  />
+                </button>
+              )}
+
               {/* Right slot: sizes to its content — the time / status badge
                   normally, the two quick-action buttons (pin, done) on hover —
                   so it never reserves more width than what is actually shown
@@ -231,7 +378,15 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                   actions, folder-header actions, and New chat / Search shortcut
                   badges. */}
               <div className="flex h-full shrink-0 items-center pr-[0.375rem]">
-                <span className="flex items-center group-hover:hidden">
+                <span
+                  className={cn(
+                    "flex items-center",
+                    // Roots swap the badge out for the hover actions; sub-sessions
+                    // have no actions, so keep the badge (incl. the running
+                    // spinner) visible on hover.
+                    !isSubsession && "group-hover:hidden"
+                  )}
+                >
                   {isRunning ? (
                     <span
                       className="relative inline-flex shrink-0 items-center justify-center"
@@ -272,59 +427,64 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                     </span>
                   ) : null}
                 </span>
-                {/* Hover quick actions. Default /90 is the lightest muted shade
-                    that still clears the 3:1 non-text-contrast bar over the row's
-                    hover background; hover deepens to full foreground. The folder
-                    ⋯ button shares this exact palette so all action icons stay a
-                    consistent two colors. Each button is justify-end so its 14px
-                    glyph flushes to the slot's right edge (0.75rem) — the same edge
-                    the default time/status badge fills — instead of sitting ~5px in
-                    as a centred icon in a transparent box would. */}
-                <div className="hidden items-center gap-px group-hover:flex">
-                  {onTogglePin && (
+                {/* Hover quick actions — roots only (sub-sessions opt out above).
+                    Default /90 is the lightest muted shade that still clears the
+                    3:1 non-text-contrast bar over the row's hover background; hover
+                    deepens to full foreground. The folder ⋯ button shares this
+                    exact palette so all action icons stay a consistent two colors.
+                    Each button is justify-end so its 14px glyph flushes to the
+                    slot's right edge (0.75rem) — the same edge the default
+                    time/status badge fills — instead of sitting ~5px in as a
+                    centred icon in a transparent box would. */}
+                {!isSubsession && (
+                  <div className="hidden items-center gap-px group-hover:flex">
+                    {onTogglePin && (
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onTogglePin(conversation.id, !isPinned)
+                        }}
+                        title={isPinned ? t("unpin") : t("pin")}
+                        aria-label={isPinned ? t("unpin") : t("pin")}
+                        className={cn(
+                          "flex h-6 w-6 shrink-0 items-center justify-end rounded-[0.375rem]",
+                          "cursor-pointer outline-none transition-colors duration-150",
+                          "text-muted-foreground/90 hover:text-sidebar-foreground"
+                        )}
+                      >
+                        {isPinned ? (
+                          <PinOff className="h-[0.875rem] w-[0.875rem]" />
+                        ) : (
+                          <Pin className="h-[0.875rem] w-[0.875rem]" />
+                        )}
+                      </button>
+                    )}
                     <button
                       type="button"
                       tabIndex={-1}
                       onClick={(e) => {
                         e.stopPropagation()
-                        onTogglePin(conversation.id, !isPinned)
+                        onStatusChange(
+                          conversation.id,
+                          isCompleted ? "in_progress" : "completed"
+                        )
                       }}
-                      title={isPinned ? t("unpin") : t("pin")}
-                      aria-label={isPinned ? t("unpin") : t("pin")}
+                      title={isCompleted ? t("reopen") : t("markCompleted")}
+                      aria-label={
+                        isCompleted ? t("reopen") : t("markCompleted")
+                      }
                       className={cn(
                         "flex h-6 w-6 shrink-0 items-center justify-end rounded-[0.375rem]",
                         "cursor-pointer outline-none transition-colors duration-150",
                         "text-muted-foreground/90 hover:text-sidebar-foreground"
                       )}
                     >
-                      {isPinned ? (
-                        <PinOff className="h-[0.875rem] w-[0.875rem]" />
-                      ) : (
-                        <Pin className="h-[0.875rem] w-[0.875rem]" />
-                      )}
+                      <CheckCircle2 className="h-[0.875rem] w-[0.875rem]" />
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onStatusChange(
-                        conversation.id,
-                        isCompleted ? "in_progress" : "completed"
-                      )
-                    }}
-                    title={isCompleted ? t("reopen") : t("markCompleted")}
-                    aria-label={isCompleted ? t("reopen") : t("markCompleted")}
-                    className={cn(
-                      "flex h-6 w-6 shrink-0 items-center justify-end rounded-[0.375rem]",
-                      "cursor-pointer outline-none transition-colors duration-150",
-                      "text-muted-foreground/90 hover:text-sidebar-foreground"
-                    )}
-                  >
-                    <CheckCircle2 className="h-[0.875rem] w-[0.875rem]" />
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

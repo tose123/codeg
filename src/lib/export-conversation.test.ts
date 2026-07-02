@@ -89,6 +89,7 @@ function makeData(): ExportConversationData {
       git_branch: null,
       external_id: null,
       message_count: 1,
+      child_count: 0,
       created_at: "2026-05-27T00:00:00Z",
       updated_at: "2026-05-27T00:00:00Z",
       pinned_at: null,

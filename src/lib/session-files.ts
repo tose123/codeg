@@ -578,10 +578,17 @@ function extractFilePaths(inputPreview: string | null): string[] {
     }
   }
 
-  const patchText = extractPatchTextFromInputPreview(inputPreview)
-  if (patchText) {
-    for (const path of extractPathsFromPatchText(patchText)) {
-      paths.add(path)
+  // Skip patch-text extraction for edit-shaped inputs: their authoritative
+  // paths are the `changes` keys / `file_path` above. Running it anyway would
+  // let `extractPatchTextFromInputPreview`'s deep `diff`-field search surface a
+  // nested diff's own header path as a phantom file (e.g. `src/a.ts` alongside
+  // the real `/repo/src/a.ts`).
+  if (!isEditShapedInput(parsed)) {
+    const patchText = extractPatchTextFromInputPreview(inputPreview)
+    if (patchText) {
+      for (const path of extractPathsFromPatchText(patchText)) {
+        paths.add(path)
+      }
     }
   }
 
@@ -595,6 +602,24 @@ function extractFilePaths(inputPreview: string | null): string[] {
   }
 
   return Array.from(paths)
+}
+
+/**
+ * True when a tool input is an edit descriptor (`{file_path, old_string,
+ * new_string}` or `{changes:{path:{...}}}`) rather than V4A/unified patch text.
+ * Some agents (e.g. Codex) synthesize `apply_patch` edits this way. Callers use
+ * it to keep such inputs out of the patch-text path, because
+ * `extractPatchTextFromInputPreview` deep-searches nested `diff` fields — so a
+ * multi-file `changes` payload where one entry carries a `diff` would otherwise
+ * (a) leak that file's diff/stats onto its siblings and (b) emit a phantom path
+ * from the nested diff's own header.
+ */
+function isEditShapedInput(parsed: Record<string, unknown> | null): boolean {
+  if (!parsed) return false
+  if (findObjectFieldDeep(parsed, "changes")) return true
+  if (typeof parsed.old_string === "string") return true
+  if (typeof parsed.new_string === "string") return true
+  return false
 }
 
 function computeLineDiff(
@@ -664,8 +689,20 @@ function computeLineDiff(
   }
 
   if (op === "apply_patch") {
+    // Edit-shaped synthesized payloads must go through the `edit` logic, which
+    // resolves the change object per path — otherwise a nested `diff` field
+    // gets treated as the whole patch and misattributed across files.
+    if (isEditShapedInput(parsed)) {
+      return computeLineDiff("edit", inputPreview, filePath)
+    }
+
     const patchText = extractPatchTextFromInputPreview(inputPreview)
-    if (!patchText) return null
+    if (!patchText) {
+      // Any remaining apply_patch payload with no real patch text — fall back
+      // to edit stats so the file still reports +/- instead of a misleading
+      // +0/-0.
+      return computeLineDiff("edit", inputPreview, filePath)
+    }
 
     const applyPatchSections = parseApplyPatchSections(patchText)
     if (normalizedPath && applyPatchSections.has(normalizedPath)) {
@@ -782,6 +819,79 @@ export function extractSessionFilesGrouped(
 
   flushGroup()
   return groups
+}
+
+/**
+ * Aggregate an assistant reply's write operations into ONE `FileChangeStat`
+ * per file path. Unlike `extractSessionFilesGrouped` (which groups by user
+ * turn), this collects every edit/write/apply_patch across the supplied turns,
+ * summing line counts and concatenating diff chunks per file — the shape the
+ * per-reply "artifacts" card needs. Pass only the raw turns that compose a
+ * single reply (the assistant sub-turns merged into one visual reply).
+ */
+export function extractReplyFileChanges(
+  turns: MessageTurn[]
+): FileChangeStat[] {
+  interface Acc {
+    path: string
+    additions: number
+    deletions: number
+    diffs: string[]
+  }
+  const byPath = new Map<string, Acc>()
+  const order: string[] = []
+
+  for (const turn of turns) {
+    if (turn.role !== "assistant") continue
+
+    for (const block of turn.blocks) {
+      if (block.type !== "tool_use") continue
+
+      const normalized = normalizeToolName(block.tool_name)
+      if (!WRITE_OPS.has(normalized)) continue
+
+      const filePaths = extractFilePaths(block.input_preview)
+      if (filePaths.length === 0) continue
+
+      const toolOutput = findToolResultOutput(turn.blocks, block.tool_use_id)
+
+      for (const filePath of filePaths) {
+        const normalizedPath = normalizePath(filePath)
+        const diff = computeLineDiff(
+          normalized,
+          block.input_preview,
+          normalizedPath
+        )
+        const diffChunk = buildDiffChunk(
+          normalized,
+          block.input_preview,
+          normalizedPath,
+          toolOutput
+        )
+
+        let acc = byPath.get(normalizedPath)
+        if (!acc) {
+          acc = { path: normalizedPath, additions: 0, deletions: 0, diffs: [] }
+          byPath.set(normalizedPath, acc)
+          order.push(normalizedPath)
+        }
+        acc.additions += diff?.additions ?? 0
+        acc.deletions += diff?.deletions ?? 0
+        if (diffChunk?.trim()) acc.diffs.push(diffChunk.trim())
+      }
+    }
+  }
+
+  return order.map((path, index) => {
+    const acc = byPath.get(path)!
+    return {
+      id: `reply-file:${index}:${path}`,
+      path: acc.path,
+      additions: acc.additions,
+      deletions: acc.deletions,
+      diff: acc.diffs.length > 0 ? acc.diffs.join("\n\n") : null,
+    }
+  })
 }
 
 /**
@@ -930,8 +1040,17 @@ function buildDiffChunk(
   }
 
   if (op === "apply_patch") {
+    // See computeLineDiff: edit-shaped synthesized payloads must build their
+    // diff via the `edit` logic (keyed per path), so a nested `diff` field
+    // isn't treated as the whole patch and misattributed across files.
+    if (isEditShapedInput(parsed)) {
+      return buildDiffChunk("edit", inputPreview, filePath, toolOutput)
+    }
+
     const patchText = extractPatchTextFromInputPreview(inputPreview)
-    if (!patchText) return null
+    if (!patchText) {
+      return buildDiffChunk("edit", inputPreview, filePath, toolOutput)
+    }
 
     const applyPatchSections = parseApplyPatchSections(patchText)
     if (applyPatchSections.has(filePath)) {

@@ -524,6 +524,7 @@ export function UnifiedDiffPreview({
   diffText,
   className,
   clickableFilePath = false,
+  embedded = false,
 }: {
   diffText: string
   /** @deprecated No longer used — kept for API compat */
@@ -531,6 +532,13 @@ export function UnifiedDiffPreview({
   className?: string
   /** When true, file-name header is clickable and opens the workspace open-file dialog. */
   clickableFilePath?: boolean
+  /**
+   * When true, render each file's diff WITHOUT its own bordered card + header
+   * chrome — just the line grid. For hosts that already frame the diff and
+   * label the file (e.g. the reply-artifacts accordion), this avoids a
+   * double border and a redundant path/mode header.
+   */
+  embedded?: boolean
 }) {
   const t = useTranslations("Folder.diffPreview")
   const { activeFolder: folder } = useActiveFolder()
@@ -561,45 +569,52 @@ export function UnifiedDiffPreview({
 
   return (
     <ScrollArea className={cn("h-full", className)} x="scroll">
-      <div className="space-y-3">
+      <div className={embedded ? "space-y-2" : "space-y-3"}>
         {files.map((file) => {
           const newFile = isNewFileOnly(file)
           return (
             <section
               key={file.key}
-              className="flex max-h-[420px] flex-col rounded-lg border border-border bg-background"
+              className={cn(
+                "flex max-h-[420px] flex-col",
+                embedded
+                  ? "bg-transparent"
+                  : "rounded-lg border border-border bg-background"
+              )}
             >
-              <header className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
-                <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  {newFile ? "WRITE" : t(modeKey(file.mode))}
-                </span>
-                {clickableFilePath ? (
-                  <FilePathLink
-                    filePath={file.path}
-                    className="min-w-0 flex-1 font-mono text-foreground"
-                    title={file.path}
-                  >
-                    {toDisplayPath(file.path, folder?.path ?? null)}
-                  </FilePathLink>
-                ) : (
-                  <span
-                    className="min-w-0 flex-1 truncate font-mono text-foreground"
-                    title={file.path}
-                  >
-                    {toDisplayPath(file.path, folder?.path ?? null)}
+              {!embedded && (
+                <header className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
+                  <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {newFile ? "WRITE" : t(modeKey(file.mode))}
                   </span>
-                )}
-                {!newFile && (
-                  <span className="ml-auto inline-flex shrink-0 items-center gap-2 font-mono">
-                    <span className="text-green-700 dark:text-green-400">
-                      +{file.additions}
+                  {clickableFilePath ? (
+                    <FilePathLink
+                      filePath={file.path}
+                      className="min-w-0 flex-1 font-mono text-foreground"
+                      title={file.path}
+                    >
+                      {toDisplayPath(file.path, folder?.path ?? null)}
+                    </FilePathLink>
+                  ) : (
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-foreground"
+                      title={file.path}
+                    >
+                      {toDisplayPath(file.path, folder?.path ?? null)}
                     </span>
-                    <span className="text-red-700 dark:text-red-400">
-                      -{file.deletions}
+                  )}
+                  {!newFile && (
+                    <span className="ml-auto inline-flex shrink-0 items-center gap-2 font-mono">
+                      <span className="text-green-700 dark:text-green-400">
+                        +{file.additions}
+                      </span>
+                      <span className="text-red-700 dark:text-red-400">
+                        -{file.deletions}
+                      </span>
                     </span>
-                  </span>
-                )}
-              </header>
+                  )}
+                </header>
+              )}
 
               <ScrollArea x="scroll">
                 <div className="inline-block min-w-full">

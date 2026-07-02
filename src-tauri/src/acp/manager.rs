@@ -76,6 +76,34 @@ fn user_prompt_text_preview(blocks: &[PromptInputBlock]) -> Option<String> {
     }
 }
 
+/// Seed title for a freshly-created delegation child row, derived from the
+/// delegating prompt's text blocks (the sub-agent's task). Uses the parser's own
+/// `title_from_user_text` (folds reference links, caps at 100 chars) so the value
+/// matches what `refresh_auto_title` would later compute from that same first
+/// turn — the conditional UPDATE then sees no change and doesn't churn. Returns
+/// `None` for a textless prompt, leaving the title unset to be backfilled on
+/// first detail load as before. Kept unlocked by the caller so an AI-generated
+/// title can still replace it later.
+fn delegation_child_title_seed(blocks: &[PromptInputBlock]) -> Option<String> {
+    let joined = blocks
+        .iter()
+        .filter_map(|b| match b {
+            PromptInputBlock::Text { text } => {
+                let t = text.trim();
+                (!t.is_empty()).then_some(t)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(crate::parsers::title_from_user_text(trimmed))
+    }
+}
+
 /// Composite key identifying a logical agent session for spawn-time dedup.
 /// Two `acp_connect` calls with the same triple race for the same `Mutex`,
 /// so the second one observes the first's freshly-spawned connection in
@@ -860,11 +888,21 @@ impl ConnectionManager {
                         delegation.as_ref().map(|d| d.parent_conversation_id);
                     let parent_tool_use_id_for_event =
                         delegation.as_ref().map(|d| d.parent_tool_use_id.clone());
+                    // Seed a delegation child's title from the task prompt so the
+                    // sidebar shows a meaningful label immediately. `list_children`
+                    // returns the raw DB title, so a child born with NULL reads
+                    // "Untitled" until the first detail load backfills it. Roots
+                    // (no delegation) keep `None` and follow the existing backfill.
+                    let seed_title = if delegation.is_some() {
+                        delegation_child_title_seed(&blocks)
+                    } else {
+                        None
+                    };
                     let row = conversation_service::create_with_delegation(
                         &db.conn,
                         folder_id,
                         agent_type,
-                        None,
+                        seed_title,
                         None,
                         delegation.clone(),
                     )
@@ -881,15 +919,28 @@ impl ConnectionManager {
                         },
                     )
                     .await;
-                    // Sidebar sync: a ROOT conversation born here (agent path —
-                    // a prompt sent without a pre-created row, not the create
-                    // button) must appear in every client's list immediately,
-                    // via the global `conversation://changed` channel. Delegation
-                    // children (parent set) are excluded — they aren't sidebar
-                    // rows.
-                    if delegation.is_none() {
+                    // Sidebar sync: a conversation born here (agent path — a
+                    // prompt sent without a pre-created row, not the create
+                    // button) must reach every client immediately via the global
+                    // `conversation://changed` channel. Roots land in the sidebar
+                    // list; delegation children (parent set) are routed into their
+                    // parent's expanded sub-session subtree and bump its chevron.
+                    // Both carry `external_id: null` here (no session yet) — the
+                    // external_id write below re-broadcasts the full summary.
+                    crate::commands::conversations::emit_conversation_upsert(
+                        &emitter, &db.conn, row.id,
+                    )
+                    .await;
+                    // A new delegation child changes its parent's child_count
+                    // (0 → >0 makes the parent's expand chevron appear). Re-emit
+                    // the parent so every client converges its count from the
+                    // authoritative DB aggregate rather than a drift-prone
+                    // per-client increment. The parent may itself be a root or a
+                    // nested child — the upsert routes correctly either way by its
+                    // own parent_id.
+                    if let Some(parent_id) = parent_conversation_id_for_event {
                         crate::commands::conversations::emit_conversation_upsert(
-                            &emitter, &db.conn, row.id,
+                            &emitter, &db.conn, parent_id,
                         )
                         .await;
                     }
@@ -3260,6 +3311,46 @@ mod tests {
         // truncate_str keeps MAX chars then appends a 3-char "..." marker.
         assert_eq!(preview.chars().count(), USER_PROMPT_PREVIEW_MAX_CHARS + 3);
         assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn delegation_child_title_seed_uses_parser_title_from_first_prompt() {
+        // The delegating prompt is a single text block (the task) — the seed must
+        // equal what the parser's `title_from_user_text` produces from it, so a
+        // later `refresh_auto_title` over the same first turn is a no-op.
+        let task = "Review the auth module for race conditions";
+        let blocks = vec![PromptInputBlock::Text { text: task.into() }];
+        assert_eq!(
+            delegation_child_title_seed(&blocks),
+            Some(crate::parsers::title_from_user_text(task))
+        );
+    }
+
+    #[test]
+    fn delegation_child_title_seed_is_none_for_textless_prompt() {
+        // Empty / whitespace / image-only prompts seed no title (stays NULL,
+        // backfilled on first detail load as before).
+        assert!(delegation_child_title_seed(&[]).is_none());
+        assert!(
+            delegation_child_title_seed(&[PromptInputBlock::Text { text: "  \n ".into() }])
+                .is_none()
+        );
+        let img = vec![PromptInputBlock::Image {
+            data: "x".into(),
+            mime_type: "image/png".into(),
+            uri: None,
+        }];
+        assert!(delegation_child_title_seed(&img).is_none());
+    }
+
+    #[test]
+    fn delegation_child_title_seed_caps_long_task_text() {
+        // Mirrors the parser cap (100 chars) so an over-long task doesn't store a
+        // runaway title; `title_from_user_text` keeps 100 then appends "...".
+        let long = "x".repeat(250);
+        let seed = delegation_child_title_seed(&[PromptInputBlock::Text { text: long }]).unwrap();
+        assert_eq!(seed.chars().count(), 103);
+        assert!(seed.ends_with("..."));
     }
 
     /// A successful UI send (delegation = None, text present) emits

@@ -16,7 +16,11 @@ import { useAppWorkspace } from "@/contexts/app-workspace-context"
 import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useWorkspaceContext } from "@/contexts/workspace-context"
 import { useSortedAvailableAgents } from "@/hooks/use-sorted-available-agents"
-import { listOpenedTabs, saveOpenedTabs } from "@/lib/api"
+import {
+  getFolderConversation,
+  listOpenedTabs,
+  saveOpenedTabs,
+} from "@/lib/api"
 import { onTransportReconnect, subscribe } from "@/lib/platform"
 import { resolveDefaultAgent } from "@/lib/resolve-default-agent"
 import { formatConversationTitle } from "@/lib/conversation-title"
@@ -27,9 +31,12 @@ import {
 } from "@/lib/last-active-context-storage"
 import { readRecentConversationAgent } from "@/lib/selector-prefs-storage"
 import {
+  CONVERSATION_CHANGED_EVENT,
   TABS_CHANGED_EVENT,
   type AgentType,
+  type ConversationChange,
   type ConversationStatus,
+  type DbConversationSummary,
   type OpenedTab,
   type TabsChanged,
 } from "@/lib/types"
@@ -292,6 +299,7 @@ export function TabProvider({ children }: TabProviderProps) {
   const { activateConversationPane } = useWorkspaceContext()
   const {
     conversations,
+    conversationsLoading,
     folders,
     allFolders,
     foldersHydrated,
@@ -376,6 +384,37 @@ export function TabProvider({ children }: TabProviderProps) {
   useEffect(() => {
     conversationsRef.current = conversations
   }, [conversations])
+
+  // ── Open sub-session tab title + status ─────────────────────────────────────
+  // Delegation sub-sessions (parent_id != null) live only in the sidebar's child
+  // cache, never in the root `conversations` list, so the `tabs` derivation below
+  // can't resolve their title/status from `conversationMap`. Keep an id-keyed
+  // summary cache for the sub-sessions currently OPEN as tabs: seed each by
+  // fetching its detail once (which also backfills the DB auto-title), then keep
+  // it live off the global conversation channel so the tab title + status dot
+  // track the running sub-agent. Roots are unaffected (resolved from `conversations`).
+  const [childSummaries, setChildSummaries] = useState<
+    Map<number, DbConversationSummary>
+  >(() => new Map())
+  const childSummariesRef = useRef(childSummaries)
+  childSummariesRef.current = childSummaries
+  const childSummaryInFlightRef = useRef<Set<number>>(new Set())
+  // ACCUMULATED state for events that land while an id's seed fetch is in flight,
+  // applied when the fetch resolves so nothing committed after the fetch's DB
+  // snapshot is lost. Accumulated (not last-event-wins) so a sequence like
+  // upsert→status keeps the upsert's newer title AND the later status, and a
+  // `deleted` stays terminal even if a stray status follows it.
+  const childSeedBufferRef = useRef<
+    Map<
+      number,
+      { summary?: DbConversationSummary; status?: string; deleted?: boolean }
+    >
+  >(new Map())
+  // Bumped on reconnect so an in-flight seed that resolves afterwards is dropped
+  // (its snapshot predates the missed-events window); paired with `reseedTick`,
+  // which re-runs the reconcile effect to refetch every still-open child tab.
+  const seedEpochRef = useRef(0)
+  const [reseedTick, setReseedTick] = useState(0)
 
   const foldersRef = useRef(folders)
   useEffect(() => {
@@ -703,14 +742,18 @@ export function TabProvider({ children }: TabProviderProps) {
     return m
   }, [conversations])
 
-  // Derive tabs with up-to-date titles and status from conversations
+  // Derive tabs with up-to-date titles and status from conversations, falling
+  // back to the sub-session cache for delegation children (absent from the
+  // root-only `conversationMap`) so their tabs show the real title + a live
+  // status dot instead of a frozen "Untitled".
   const tabs = useMemo(() => {
-    if (conversationMap.size === 0) return rawTabs
+    if (conversationMap.size === 0 && childSummaries.size === 0) return rawTabs
     return rawTabs.map((tab) => {
       if (tab.conversationId != null) {
-        const conv = conversationMap.get(
-          `${tab.folderId}-${tab.agentType}-${tab.conversationId}`
-        )
+        const conv =
+          conversationMap.get(
+            `${tab.folderId}-${tab.agentType}-${tab.conversationId}`
+          ) ?? childSummaries.get(tab.conversationId)
         if (conv) {
           const newTitle =
             formatConversationTitle(conv.title) || t("untitledConversation")
@@ -722,7 +765,161 @@ export function TabProvider({ children }: TabProviderProps) {
       }
       return tab
     })
-  }, [rawTabs, conversationMap, t])
+  }, [rawTabs, conversationMap, childSummaries, t])
+
+  // Reconcile the sub-session cache to exactly the open child tabs: prune
+  // summaries whose tab has closed, and seed each open child tab not yet cached.
+  // Gated on `conversationsLoading` (NOT `conversationMap.size`) so a legitimately
+  // empty root list — e.g. only a restored orphan child tab is open — still seeds,
+  // while an unfinished initial load doesn't misfetch a root as a child. The seed
+  // fetch (`getFolderConversation`, which also backfills the DB auto-title) is
+  // deduped against the cache + in-flight set, epoch-guarded against a reconnect
+  // landing mid-flight, and merges any event buffered during the fetch (latest
+  // wins) so the initial window can't drop a live status/upsert.
+  useEffect(() => {
+    if (conversationsLoading) return
+    const openChildIds = new Set<number>()
+    for (const tab of rawTabs) {
+      const id = tab.conversationId
+      if (id == null) continue
+      if (conversationMap.has(`${tab.folderId}-${tab.agentType}-${id}`))
+        continue
+      openChildIds.add(id)
+    }
+    // Prune cached summaries for child tabs that have since closed (also keeps
+    // closed ids from absorbing later subscription updates).
+    setChildSummaries((prev) => {
+      let next: Map<number, DbConversationSummary> | null = null
+      for (const id of prev.keys()) {
+        if (!openChildIds.has(id)) {
+          next = next ?? new Map(prev)
+          next.delete(id)
+        }
+      }
+      return next ?? prev
+    })
+    // Seed the open child tabs that aren't cached or already being fetched.
+    for (const id of openChildIds) {
+      if (childSummariesRef.current.has(id)) continue
+      if (childSummaryInFlightRef.current.has(id)) continue
+      childSummaryInFlightRef.current.add(id)
+      const epoch = seedEpochRef.current
+      void getFolderConversation(id)
+        .then((detail) => {
+          // Reconnect since fetch start → snapshot is stale, drop it (a fresh
+          // reseed is already running under the new epoch).
+          if (seedEpochRef.current !== epoch) return
+          const buffered = childSeedBufferRef.current.get(id)
+          // Deleted while fetching → don't resurrect it (terminal).
+          if (buffered?.deleted) return
+          // Closed while fetching → don't re-add (prune may have already run).
+          if (!rawTabsRef.current.some((tb) => tb.conversationId === id)) return
+          // Apply the accumulated in-flight events over the fetched snapshot: a
+          // buffered upsert is a newer full summary; a buffered status (kept even
+          // across an intervening upsert that cleared it, only when it arrived
+          // last) patches the dot.
+          let summary = buffered?.summary ?? detail.summary
+          if (buffered?.status != null) {
+            summary = { ...summary, status: buffered.status }
+          }
+          setChildSummaries((prev) => {
+            const next = new Map(prev)
+            next.set(id, summary)
+            return next
+          })
+        })
+        .catch(() => {
+          // Leave unseeded (e.g. deleted) — a later pass or live event retries.
+        })
+        .finally(() => {
+          // A reconnect already cleared (and possibly re-seeded) this id; don't
+          // let this superseded fetch clear the new fetch's in-flight/buffer marks.
+          if (seedEpochRef.current !== epoch) return
+          childSummaryInFlightRef.current.delete(id)
+          childSeedBufferRef.current.delete(id)
+        })
+    }
+  }, [rawTabs, conversationMap, conversationsLoading, reseedTick])
+
+  // Keep seeded sub-session summaries live: a sub-agent advancing / finishing /
+  // being renamed emits on the global conversation channel. A tracked id is
+  // updated/dropped in place; an id whose seed fetch is still in flight has its
+  // latest event buffered (the seed merges it on resolve) so the initial window
+  // can't lose an event. On reconnect, invalidate in-flight seeds (epoch bump),
+  // clear the cache, and trigger a reseed of every still-open child tab.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void (async () => {
+      const dispose = await subscribe<ConversationChange>(
+        CONVERSATION_CHANGED_EVENT,
+        (change) => {
+          const id = change.kind === "upsert" ? change.summary.id : change.id
+          if (childSummariesRef.current.has(id)) {
+            if (change.kind === "upsert") {
+              const summary = change.summary
+              setChildSummaries((prev) => {
+                if (!prev.has(summary.id)) return prev
+                const next = new Map(prev)
+                next.set(summary.id, summary)
+                return next
+              })
+            } else if (change.kind === "status") {
+              setChildSummaries((prev) => {
+                const cur = prev.get(change.id)
+                if (!cur || cur.status === change.status) return prev
+                const next = new Map(prev)
+                next.set(change.id, { ...cur, status: change.status })
+                return next
+              })
+            } else {
+              setChildSummaries((prev) => {
+                if (!prev.has(change.id)) return prev
+                const next = new Map(prev)
+                next.delete(change.id)
+                return next
+              })
+            }
+            return
+          }
+          // Seed for this id is still in flight — accumulate into the pending
+          // buffer (the seed's resolve handler applies it) so the initial window
+          // can't lose state even across mixed event kinds.
+          if (childSummaryInFlightRef.current.has(id)) {
+            const pending = childSeedBufferRef.current.get(id) ?? {}
+            if (change.kind === "deleted") {
+              pending.deleted = true // terminal for this seed window
+            } else if (!pending.deleted) {
+              if (change.kind === "upsert") {
+                // Newer full summary supersedes any earlier summary AND any
+                // earlier status patch (its own status is current).
+                pending.summary = change.summary
+                pending.status = undefined
+              } else {
+                // status patch — layered over the pending/fetched summary.
+                pending.status = change.status
+              }
+            }
+            childSeedBufferRef.current.set(id, pending)
+          }
+        }
+      )
+      if (disposed) dispose()
+      else unlisten = dispose
+    })()
+    const offReconnect = onTransportReconnect(() => {
+      seedEpochRef.current += 1
+      childSummaryInFlightRef.current.clear()
+      childSeedBufferRef.current.clear()
+      setChildSummaries((prev) => (prev.size === 0 ? prev : new Map()))
+      setReseedTick((tick) => tick + 1)
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+      offReconnect?.()
+    }
+  }, [])
 
   const openTab = useCallback(
     (

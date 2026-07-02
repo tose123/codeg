@@ -13,6 +13,17 @@ import type { EventStream, UnsubscribeFn } from "./transport/types"
 export { isDesktop }
 
 /**
+ * True only for a LOCAL desktop app — a Tauri window not viewing a remote
+ * workspace. This is the exact condition under which `openPath` /
+ * `revealItemInDir` actually do something (they no-op otherwise), so gate any
+ * "reveal in file manager" affordance on it to avoid rendering a dead button
+ * for remote-desktop connections.
+ */
+export function isLocalDesktop(): boolean {
+  return isDesktop() && getActiveRemoteConnectionId() === null
+}
+
+/**
  * Subscribe to backend events.
  * Uses Tauri listen() in desktop mode, WebSocket in web mode.
  */

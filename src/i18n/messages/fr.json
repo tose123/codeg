@@ -1143,11 +1143,15 @@
       "reorderHandle": "Glisser pour réorganiser",
       "openFolder": "Ouvrir le dossier",
       "searchPlaceholder": "Rechercher des conversations...",
+      "viewOptions": "Options d'affichage",
       "showCompleted": "Afficher les conversations terminées",
       "moreOptions": "Plus d'options",
       "sortBy": "Trier par",
       "sortByCreatedAt": "Date de création",
       "sortByUpdatedAt": "Date de mise à jour",
+      "sectionOrder": "Ordre des sections",
+      "sectionOrderFoldersFirst": "Dossiers en haut",
+      "sectionOrderChatsFirst": "Discussion en haut",
       "statusRunningBadge": "En cours",
       "statusCancelledBadge": "Annulé",
       "conversationCountUnit": "{count, plural, one {# conversation} other {# conversations}}",
@@ -1192,7 +1196,8 @@
       "sectionChats": "Discussion",
       "noChats": "Aucune discussion",
       "newChatAction": "Nouvelle discussion",
-      "automations": "Automatisations"
+      "automations": "Automatisations",
+      "loadingSubsessions": "Chargement des sous-conversations…"
     },
     "conversation": {
       "reloadFailed": "Échec du rechargement de la conversation : {message}",
@@ -1281,7 +1286,9 @@
       "pin": "Épingler",
       "unpin": "Désépingler",
       "markCompleted": "Marquer comme terminé",
-      "reopen": "Rouvrir"
+      "reopen": "Rouvrir",
+      "expandSubsessions": "Développer les sous-conversations",
+      "collapseSubsessions": "Réduire les sous-conversations"
     },
     "search": {
       "dialogTitle": "Rechercher",
@@ -2469,6 +2476,16 @@
         "remove": "Retirer",
         "noDiffDataAvailable": "Aucune donnée de diff disponible pour {filePath}"
       },
+      "replyArtifacts": {
+        "title": "Fichiers modifiés",
+        "fileCount": "{count, plural, one {# fichier} other {# fichiers}}",
+        "newFilesTitle": "Nouveaux fichiers",
+        "revealInFolder": "Afficher dans le gestionnaire de fichiers",
+        "openFile": "Ouvrir {filePath}",
+        "openInEditor": "Ouvrir dans l'éditeur",
+        "remove": "Retirer",
+        "noDiffDataAvailable": "Aucune donnée de diff disponible pour {filePath}"
+      },
       "askQuestion": {
         "title": "L'agent attend votre choix",
         "subtitle": "Répondez puis envoyez. Vous pouvez ignorer à tout moment.",
@@ -3323,7 +3340,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "Retour en direct",
-    "description": "Envoyez des notes et corrections à un agent pendant qu'il travaille. Une fois activé, l'agent dispose d'un outil pour consulter les retours en direct et les conversations affichent une entrée de notes.",
+    "description": "Envoyez des notes et corrections à un agent pendant qu'il travaille. Une fois activé, l'agent dispose d'un outil pour consulter les retours en direct et les conversations affichent une entrée de notes. Astuce : l'agent ne consulte généralement les retours que lorsque vous le mentionnez dans votre message — par exemple, ajoutez « vérifie régulièrement mes retours en direct pendant le travail ».",
     "enable": "Activer le retour en direct",
     "enableHint": "Ajoute un outil de consultation des retours aux agents démarrés après l'activation.",
     "save": "Enregistrer",
@@ -3347,8 +3364,7 @@
     "dismiss": "Ignorer",
     "turnEndedResent": "Le tour est terminé : envoyé comme nouveau message.",
     "turnEnded": "Le tour est déjà terminé.",
-    "submitFailed": "Impossible d'envoyer votre note",
-    "promptReminder": "(Note automatique de Codeg — agis en conséquence en silence : ne la mentionne pas, ne la cite pas et n'y réponds pas.) Le retour en direct est activé, donc pendant que tu travailles je peux envoyer des indications en cours de tâche à tout moment. Vérifie-les régulièrement et ajuste ta trajectoire. Pour les lire, appelle l'outil de retour en direct exposé par le serveur MCP `codeg-mcp` — ton environnement peut l'exposer sous un nom avec espace de noms tel que `mcp__codeg-mcp__check_user_feedback` plutôt que le nom brut `check_user_feedback`, alors appelle l'outil correspondant disponible sans faire de remarque sur son nom."
+    "submitFailed": "Impossible d'envoyer votre note"
   },
   "SessionInfoSettings": {
     "title": "Obtenir les infos de session",

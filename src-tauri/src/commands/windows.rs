@@ -227,11 +227,15 @@ where
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        if should_use_dark_background() {
+        // Linux: drop the native GTK title bar so it doesn't stack on top of
+        // the app's own toolbar (the "double title bar"). The frontend then
+        // renders custom window controls + resize grips, mirroring Windows.
+        let builder = if should_use_dark_background() {
             builder.background_color(tauri::window::Color(9, 9, 11, 255))
         } else {
             builder
-        }
+        };
+        builder.decorations(false)
     }
 }
 

@@ -159,8 +159,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Claude Code",
             description: "ACP wrapper for Anthropic's Claude",
             distribution: AgentDistribution::Npx {
-                version: "0.53.0",
-                package: "@agentclientprotocol/claude-agent-acp@0.53.0",
+                version: "0.54.1",
+                package: "@agentclientprotocol/claude-agent-acp@0.54.1",
                 cmd: "claude-agent-acp",
                 args: &[],
                 env: &[],
@@ -210,8 +210,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "OpenClaw",
             description: "OpenClaw is a personal AI assistant you run on your own devices.",
             distribution: AgentDistribution::Npx {
-                version: "2026.6.10",
-                package: "openclaw@2026.6.10",
+                version: "2026.6.11",
+                package: "openclaw@2026.6.11",
                 cmd: "openclaw",
                 args: &["acp"],
                 env: &[],
@@ -224,8 +224,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Cline",
             description: "Autonomous coding agent CLI",
             distribution: AgentDistribution::Npx {
-                version: "3.0.33",
-                package: "cline@3.0.33",
+                version: "3.0.34",
+                package: "cline@3.0.34",
                 cmd: "cline",
                 args: &["--acp"],
                 env: &[],
@@ -238,34 +238,34 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "OpenCode",
             description: "The open source coding agent",
             distribution: AgentDistribution::Binary {
-                version: "1.17.11",
+                version: "1.17.12",
                 cmd: "opencode",
                 args: &["acp"],
                 env: &[],
                 platforms: &[
                     PlatformBinary {
                         platform: "darwin-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-darwin-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-darwin-arm64.zip",
                     },
                     PlatformBinary {
                         platform: "darwin-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-darwin-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-darwin-x64.zip",
                     },
                     PlatformBinary {
                         platform: "linux-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-arm64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-linux-arm64.tar.gz",
                     },
                     PlatformBinary {
                         platform: "linux-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64.tar.gz",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-linux-x64.tar.gz",
                     },
                     PlatformBinary {
                         platform: "windows-aarch64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-windows-arm64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-windows-arm64.zip",
                     },
                     PlatformBinary {
                         platform: "windows-x86_64",
-                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-windows-x64.zip",
+                        url: "https://github.com/anomalyco/opencode/releases/download/v1.17.12/opencode-windows-x64.zip",
                     },
                 ],
             },
@@ -298,8 +298,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "CodeBuddy",
             description: "Tencent Cloud's official AI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "2.114.0",
-                package: "@tencent-ai/codebuddy-code@2.114.0",
+                version: "2.114.1",
+                package: "@tencent-ai/codebuddy-code@2.114.1",
                 cmd: "codebuddy",
                 args: &["--acp"],
                 env: &[],
@@ -312,8 +312,8 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             name: "Kimi Code",
             description: "Moonshot AI's official CLI coding assistant (ACP)",
             distribution: AgentDistribution::Npx {
-                version: "0.20.2",
-                package: "@moonshot-ai/kimi-code@0.20.2",
+                version: "0.20.3",
+                package: "@moonshot-ai/kimi-code@0.20.3",
                 cmd: "kimi",
                 args: &["acp"],
                 env: &[],
@@ -438,8 +438,8 @@ mod tests {
     fn registry_pins_current_acp_agent_versions() {
         assert_npx_version(
             AgentType::ClaudeCode,
-            "0.53.0",
-            "@agentclientprotocol/claude-agent-acp@0.53.0",
+            "0.54.1",
+            "@agentclientprotocol/claude-agent-acp@0.54.1",
             None,
         );
         assert_npx_version(
@@ -450,21 +450,21 @@ mod tests {
         );
         assert_npx_version(
             AgentType::OpenClaw,
-            "2026.6.10",
-            "openclaw@2026.6.10",
+            "2026.6.11",
+            "openclaw@2026.6.11",
             Some("22.19.0"),
         );
-        assert_npx_version(AgentType::Cline, "3.0.33", "cline@3.0.33", None);
+        assert_npx_version(AgentType::Cline, "3.0.34", "cline@3.0.34", None);
         assert_npx_version(
             AgentType::CodeBuddy,
-            "2.114.0",
-            "@tencent-ai/codebuddy-code@2.114.0",
+            "2.114.1",
+            "@tencent-ai/codebuddy-code@2.114.1",
             Some("22.0.0"),
         );
         assert_npx_version(
             AgentType::KimiCode,
-            "0.20.2",
-            "@moonshot-ai/kimi-code@0.20.2",
+            "0.20.3",
+            "@moonshot-ai/kimi-code@0.20.3",
             Some("22.19.0"),
         );
         assert_npx_version(
@@ -474,7 +474,7 @@ mod tests {
             None,
         );
         assert_npx_version(AgentType::Pi, "0.0.31", "pi-acp@0.0.31", Some("22.0.0"));
-        assert_binary_version(AgentType::OpenCode, "1.17.11", "/releases/download/v1.17.11/");
+        assert_binary_version(AgentType::OpenCode, "1.17.12", "/releases/download/v1.17.12/");
         assert_uvx_version(
             AgentType::Hermes,
             "0.17.0",

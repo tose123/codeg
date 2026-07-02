@@ -1143,11 +1143,15 @@
       "reorderHandle": "Arrastrar para reordenar",
       "openFolder": "Abrir carpeta",
       "searchPlaceholder": "Buscar conversaciones...",
+      "viewOptions": "Opciones de visualización",
       "showCompleted": "Mostrar conversaciones completadas",
       "moreOptions": "Más opciones",
       "sortBy": "Ordenar por",
       "sortByCreatedAt": "Fecha de creación",
       "sortByUpdatedAt": "Fecha de actualización",
+      "sectionOrder": "Orden de secciones",
+      "sectionOrderFoldersFirst": "Carpetas arriba",
+      "sectionOrderChatsFirst": "Chat arriba",
       "statusRunningBadge": "Ejecutando",
       "statusCancelledBadge": "Cancelado",
       "conversationCountUnit": "{count, plural, one {# conversación} other {# conversaciones}}",
@@ -1192,7 +1196,8 @@
       "sectionChats": "Chat",
       "noChats": "Sin chats",
       "newChatAction": "Nuevo chat",
-      "automations": "Automatizaciones"
+      "automations": "Automatizaciones",
+      "loadingSubsessions": "Cargando subconversaciones…"
     },
     "conversation": {
       "reloadFailed": "No se pudo recargar la conversación: {message}",
@@ -1281,7 +1286,9 @@
       "pin": "Fijar",
       "unpin": "Dejar de fijar",
       "markCompleted": "Marcar como completada",
-      "reopen": "Reabrir"
+      "reopen": "Reabrir",
+      "expandSubsessions": "Expandir subconversaciones",
+      "collapseSubsessions": "Contraer subconversaciones"
     },
     "search": {
       "dialogTitle": "Buscar",
@@ -2469,6 +2476,16 @@
         "remove": "Quitar",
         "noDiffDataAvailable": "No hay datos de diff disponibles para {filePath}"
       },
+      "replyArtifacts": {
+        "title": "Archivos modificados",
+        "fileCount": "{count, plural, one {# archivo} other {# archivos}}",
+        "newFilesTitle": "Archivos nuevos",
+        "revealInFolder": "Mostrar en el gestor de archivos",
+        "openFile": "Abrir {filePath}",
+        "openInEditor": "Abrir en el editor",
+        "remove": "Quitar",
+        "noDiffDataAvailable": "No hay datos de diff disponibles para {filePath}"
+      },
       "askQuestion": {
         "title": "El agente necesita tu elección",
         "subtitle": "Responde y luego envía. Puedes omitir en cualquier momento.",
@@ -3323,7 +3340,7 @@
   },
   "SessionFeedbackSettings": {
     "title": "Comentarios en vivo",
-    "description": "Envía notas y correcciones a un agente mientras trabaja. Cuando está activado, el agente obtiene una herramienta para consultar comentarios en vivo y las conversaciones muestran una entrada de notas.",
+    "description": "Envía notas y correcciones a un agente mientras trabaja. Cuando está activado, el agente obtiene una herramienta para consultar comentarios en vivo y las conversaciones muestran una entrada de notas. Consejo: el agente normalmente solo consulta los comentarios cuando lo mencionas en tu mensaje — por ejemplo, añade \"revisa mis comentarios en vivo periódicamente mientras trabajas\".",
     "enable": "Activar comentarios en vivo",
     "enableHint": "Inyecta una herramienta para consultar comentarios en los agentes iniciados después de activarlo.",
     "save": "Guardar",
@@ -3347,8 +3364,7 @@
     "dismiss": "Descartar",
     "turnEndedResent": "El turno terminó: se envió como un mensaje nuevo.",
     "turnEnded": "El turno ya terminó.",
-    "submitFailed": "No se pudo enviar tu nota",
-    "promptReminder": "(Nota automática de Codeg: actúa en consecuencia en silencio; no la menciones, cites ni respondas.) La retroalimentación en vivo está habilitada, así que mientras trabajas puedo enviarte indicaciones a mitad de la tarea en cualquier momento. Revísalas periódicamente y ajusta el rumbo. Para leerlas, llama a la herramienta de retroalimentación en vivo que expone el servidor MCP `codeg-mcp`: tu entorno podría exponerla con un nombre con espacio de nombres, como `mcp__codeg-mcp__check_user_feedback`, en lugar del nombre simple `check_user_feedback`, así que llama a la herramienta correspondiente que esté disponible sin hacer comentarios sobre su nombre."
+    "submitFailed": "No se pudo enviar tu nota"
   },
   "SessionInfoSettings": {
     "title": "Obtener información de sesión",
