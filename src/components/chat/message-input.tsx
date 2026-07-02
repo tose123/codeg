@@ -76,6 +76,7 @@ import {
   isEmptyAttachmentError,
   openSettingsWindow,
   type SettingsSection,
+  REMOTE_UPLOAD_MAX_BYTES,
   UPLOAD_MAX_BYTES,
   UPLOAD_I18N_KEY_TOO_LARGE,
   UPLOAD_I18N_KEY_NOT_A_FILE,
@@ -1232,9 +1233,13 @@ export function MessageInput({
   const uploadAndAppendFiles = useCallback(
     async (files: File[]) => {
       if (files.length === 0) return
-      const oversized = files.filter((f) => f.size > UPLOAD_MAX_BYTES)
-      const accepted = files.filter((f) => f.size <= UPLOAD_MAX_BYTES)
-      const limitMb = Math.round(UPLOAD_MAX_BYTES / (1024 * 1024))
+      const uploadMaxBytes =
+        desktopMode && !showNativePaperclip
+          ? REMOTE_UPLOAD_MAX_BYTES
+          : UPLOAD_MAX_BYTES
+      const oversized = files.filter((f) => f.size > uploadMaxBytes)
+      const accepted = files.filter((f) => f.size <= uploadMaxBytes)
+      const limitMb = Math.round(uploadMaxBytes / (1024 * 1024))
       if (oversized.length > 0) {
         toast.error(
           tAttach("attachUploadTooLarge", {
@@ -1307,7 +1312,13 @@ export function MessageInput({
         appendResourceAttachments(uploaded)
       }
     },
-    [appendResourceAttachments, attachmentTabId, tAttach]
+    [
+      appendResourceAttachments,
+      attachmentTabId,
+      desktopMode,
+      showNativePaperclip,
+      tAttach,
+    ]
   )
 
   const appendEmbeddedResources = useCallback(
@@ -1538,7 +1549,7 @@ export function MessageInput({
       )
       if (normalized.length === 0) return
 
-      const limitMb = Math.round(UPLOAD_MAX_BYTES / (1024 * 1024))
+      const limitMb = Math.round(REMOTE_UPLOAD_MAX_BYTES / (1024 * 1024))
       const succeeded: string[] = []
       const failed: Array<{ name: string; reason: unknown }> = []
       const oversize: string[] = []

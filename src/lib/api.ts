@@ -2085,14 +2085,18 @@ export async function listDirectoryWithFiles(
   return getTransport().call("list_directory_with_files", { path })
 }
 
-// Hard ceiling for a single attachment, kept in lockstep with the server's
-// `UPLOAD_MAX_BYTES`. Aligned with axum's default multipart body limit (and
-// with the fact that anything larger won't fit a model context anyway).
-export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+// Hard ceiling for a single streamed attachment, kept in lockstep with the
+// server's `UPLOAD_MAX_BYTES`.
+export const UPLOAD_MAX_BYTES = 500 * 1024 * 1024
+
+// Remote-desktop uploads still route through a base64 + IPC hop before the
+// server sees multipart bytes, so they keep the smaller cap enforced by the
+// Rust `remote_upload_attachment` path.
+export const REMOTE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 
 // `btoa` only accepts a binary string, and `String.fromCharCode(...bytes)`
 // hits the call-stack limit somewhere around a few hundred KB. Chunk the
-// buffer so a 2 MB upload encodes without blowing the stack.
+// buffer so large uploads encode without blowing the stack.
 function arrayBufferToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf)
   let binary = ""
@@ -2174,6 +2178,18 @@ export async function uploadAttachment(
   }
   const remoteId = getActiveRemoteConnectionId()
   if (isDesktop() && remoteId !== null) {
+    if (file.size > REMOTE_UPLOAD_MAX_BYTES) {
+      throw {
+        code: "io_error",
+        message: "Upload payload exceeds the size limit",
+        detail: `size=${file.size} limit=${REMOTE_UPLOAD_MAX_BYTES}`,
+        i18n_key: UPLOAD_I18N_KEY_TOO_LARGE,
+        i18n_params: {
+          size: String(file.size),
+          limit: String(REMOTE_UPLOAD_MAX_BYTES),
+        },
+      }
+    }
     const buf = await file.arrayBuffer()
     // `getShellTransport()` resolves to the local Tauri transport even when
     // a `RemoteDesktopTransport` is configured — we deliberately want the
