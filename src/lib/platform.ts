@@ -154,15 +154,21 @@ export async function getCurrentWindow() {
   return null
 }
 
+export function returnHome(): void {
+  if (typeof window !== "undefined") {
+    window.location.assign("/")
+  }
+}
+
 /**
  * Close the current window.
- * Desktop: closes Tauri window. Web: navigates back or closes tab.
+ * Desktop: closes Tauri window. Web: returns to the app home route.
  */
 export async function closeCurrentWindow(): Promise<void> {
   if (isDesktop()) {
     const win = await getCurrentWindow()
     await win?.close()
   } else {
-    window.history.back()
+    returnHome()
   }
 }

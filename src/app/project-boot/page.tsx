@@ -3,11 +3,16 @@
 import { Suspense, useEffect } from "react"
 import { useTranslations } from "next-intl"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
+import {
+  ReturnHomeButton,
+  useShowReturnHomeButton,
+} from "@/components/layout/return-home-button"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { ProjectBootWorkspace } from "@/components/project-boot/project-boot-workspace"
 
 function ProjectBootPageInner() {
   const t = useTranslations("ProjectBoot")
+  const showReturnHome = useShowReturnHomeButton()
 
   useEffect(() => {
     document.title = `${t("title")} - codeg`
@@ -21,6 +26,7 @@ function ProjectBootPageInner() {
             {t("title")}
           </div>
         }
+        right={showReturnHome ? <ReturnHomeButton /> : undefined}
       />
 
       <main className="min-h-0 flex-1">

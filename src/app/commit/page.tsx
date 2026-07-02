@@ -3,16 +3,17 @@
 import { Suspense, useCallback, useEffect, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { useTranslations } from "next-intl"
-const getCurrentWindow = async () => {
-  const m = await import("@tauri-apps/api/window")
-  return m.getCurrentWindow()
-}
 import { Loader2 } from "lucide-react"
 import { CommitWorkspace } from "@/components/layout/commit-dialog"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
+import {
+  ReturnHomeButton,
+  useShowReturnHomeButton,
+} from "@/components/layout/return-home-button"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { getFolder } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
+import { closeCurrentWindow } from "@/lib/platform"
 import type { FolderDetail } from "@/lib/types"
 import { GitCredentialProvider } from "@/contexts/git-credential-context"
 import { RemoteConnectionGate } from "@/contexts/remote-connection-context"
@@ -28,6 +29,7 @@ interface FolderLoadState {
 function CommitPageInner() {
   const t = useTranslations("CommitPage")
   const searchParams = useSearchParams()
+  const showReturnHome = useShowReturnHomeButton()
   const [state, setState] = useState<FolderLoadState>({
     loadedId: null,
     folder: null,
@@ -43,8 +45,7 @@ function CommitPageInner() {
 
   const closeWindow = useCallback(async () => {
     try {
-      const win = await getCurrentWindow()
-      await win.close()
+      await closeCurrentWindow()
     } catch (err) {
       console.error("[CommitPage] failed to close window:", err)
     }
@@ -96,6 +97,7 @@ function CommitPageInner() {
               {hasValidFolderId && folder ? ` · ${folder.name}` : ""}
             </div>
           }
+          right={showReturnHome ? <ReturnHomeButton /> : undefined}
         />
 
         <main className="flex-1 min-h-0 p-3">

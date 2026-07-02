@@ -34,6 +34,10 @@ import { AppToaster } from "@/components/ui/app-toaster"
 import { cn } from "@/lib/utils"
 import { detectEnvironment } from "@/lib/transport/detect"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
+import {
+  ReturnHomeButton,
+  useShowReturnHomeButton,
+} from "@/components/layout/return-home-button"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 
@@ -159,6 +163,7 @@ export function SettingsShell({ children }: SettingsShellProps) {
   const router = useRouter()
   const normalizedPathname = normalizePath(pathname)
   const isMobile = useIsMobile()
+  const showReturnHome = useShowReturnHomeButton()
   const [navOpen, setNavOpen] = useState(false)
 
   useEffect(() => {
@@ -252,6 +257,7 @@ export function SettingsShell({ children }: SettingsShellProps) {
         center={
           <div className="text-sm font-bold tracking-tight">{t("title")}</div>
         }
+        right={showReturnHome ? <ReturnHomeButton /> : undefined}
       />
 
       <div className="flex-1 min-h-0 flex">

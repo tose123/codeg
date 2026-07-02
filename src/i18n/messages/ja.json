@@ -36,6 +36,7 @@
   "SettingsShell": {
     "title": "設定",
     "preferences": "環境設定",
+    "returnHome": "ホームへ戻る",
     "nav": {
       "general": "一般",
       "appearance": "外観",

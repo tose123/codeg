@@ -36,6 +36,7 @@
   "SettingsShell": {
     "title": "设置",
     "preferences": "偏好设置",
+    "returnHome": "返回主页",
     "nav": {
       "general": "常规",
       "appearance": "外观",

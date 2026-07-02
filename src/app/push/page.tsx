@@ -3,15 +3,16 @@
 import { Suspense, useCallback, useEffect, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { useTranslations } from "next-intl"
-const getCurrentWindow = async () => {
-  const m = await import("@tauri-apps/api/window")
-  return m.getCurrentWindow()
-}
 import { Loader2 } from "lucide-react"
 import { PushWorkspace } from "@/components/layout/push-workspace"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
+import {
+  ReturnHomeButton,
+  useShowReturnHomeButton,
+} from "@/components/layout/return-home-button"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { getFolder } from "@/lib/api"
+import { closeCurrentWindow } from "@/lib/platform"
 import type { FolderDetail } from "@/lib/types"
 import { RemoteConnectionGate } from "@/contexts/remote-connection-context"
 
@@ -26,6 +27,7 @@ interface FolderLoadState {
 function PushPageInner() {
   const t = useTranslations("Folder.pushWindow")
   const searchParams = useSearchParams()
+  const showReturnHome = useShowReturnHomeButton()
   const [state, setState] = useState<FolderLoadState>({
     loadedId: null,
     folder: null,
@@ -34,8 +36,7 @@ function PushPageInner() {
 
   const closeWindow = useCallback(async () => {
     try {
-      const win = await getCurrentWindow()
-      await win.close()
+      await closeCurrentWindow()
     } catch (err) {
       console.error("[PushPage] failed to close window:", err)
     }
@@ -93,6 +94,7 @@ function PushPageInner() {
             {hasValidFolderId && folder ? ` · ${folder.name}` : ""}
           </div>
         }
+        right={showReturnHome ? <ReturnHomeButton /> : undefined}
       />
 
       <main className="min-h-0 flex-1">

@@ -6,6 +6,10 @@ import { useTranslations } from "next-intl"
 import { Loader2 } from "lucide-react"
 import { StashWorkspace } from "@/components/layout/unstash-dialog"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
+import {
+  ReturnHomeButton,
+  useShowReturnHomeButton,
+} from "@/components/layout/return-home-button"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { getFolder } from "@/lib/api"
 import type { FolderDetail } from "@/lib/types"
@@ -22,6 +26,7 @@ interface FolderLoadState {
 function StashPageInner() {
   const t = useTranslations("Folder.branchDropdown.unstashDialog")
   const searchParams = useSearchParams()
+  const showReturnHome = useShowReturnHomeButton()
   const [state, setState] = useState<FolderLoadState>({
     loadedId: null,
     folder: null,
@@ -80,6 +85,7 @@ function StashPageInner() {
             {hasValidFolderId && folder ? ` · ${folder.name}` : ""}
           </div>
         }
+        right={showReturnHome ? <ReturnHomeButton /> : undefined}
       />
 
       <main className="min-h-0 flex-1">

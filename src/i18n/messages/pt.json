@@ -36,6 +36,7 @@
   "SettingsShell": {
     "title": "Configurações",
     "preferences": "Preferências",
+    "returnHome": "Voltar ao início",
     "nav": {
       "general": "Geral",
       "appearance": "Aparência",
