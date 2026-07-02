@@ -1894,6 +1894,7 @@ async fn run_connection(
                                 &mut session,
                                 &state,
                                 &emitter_clone,
+                                agent_type,
                                 preferred_mode_id.as_deref(),
                                 &preferred_config_values,
                                 initial_config_options.unwrap_or_default(),
@@ -2051,6 +2052,7 @@ async fn run_connection(
                             &mut session,
                             &state,
                             &emitter_clone,
+                            agent_type,
                             preferred_mode_id.as_deref(),
                             &preferred_config_values,
                             initial_config_options.unwrap_or_default(),
@@ -2193,6 +2195,7 @@ async fn run_connection(
                             &mut session,
                             &state,
                             &emitter_clone,
+                            agent_type,
                             preferred_mode_id.as_deref(),
                             &preferred_config_values,
                             initial_config_options.unwrap_or_default(),
@@ -2267,6 +2270,7 @@ async fn run_connection(
                     &mut session,
                     &state,
                     &emitter_clone,
+                    agent_type,
                     preferred_mode_id.as_deref(),
                     &preferred_config_values,
                     initial_config_options.unwrap_or_default(),
@@ -2475,6 +2479,61 @@ async fn set_session_config_option_inner(
     Ok(response.config_options)
 }
 
+fn high_privilege_mode_rank(id: &str, name: &str) -> Option<u8> {
+    let id_lower = id.to_ascii_lowercase();
+    let text = format!("{} {}", id_lower, name.to_ascii_lowercase())
+        .replace(['-', '_'], " ");
+    if id_lower == "agent-full-access" || text.contains("full access") {
+        Some(0)
+    } else if id.eq_ignore_ascii_case("yolo") || name.eq_ignore_ascii_case("yolo") {
+        Some(1)
+    } else if text.contains("don't ask") || text.contains("dont ask") {
+        Some(2)
+    } else if text.contains("bypass permissions") {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+fn default_high_privilege_session_mode_id(modes: &SessionModeState) -> Option<String> {
+    modes
+        .available_modes
+        .iter()
+        .filter_map(|mode| {
+            let id = mode.id.to_string();
+            high_privilege_mode_rank(&id, &mode.name).map(|rank| (rank, id))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, id)| id)
+}
+
+fn default_mode_config_value(
+    current_value: &str,
+    has_saved_mode_config: bool,
+) -> Option<&'static str> {
+    if has_saved_mode_config || current_value == "agent-full-access" {
+        None
+    } else {
+        Some("agent-full-access")
+    }
+}
+
+fn select_options_contain_value(options: &SessionConfigSelectOptions, value: &str) -> bool {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().any(|option| option.value.to_string() == value)
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
+            group
+                .options
+                .iter()
+                .any(|option| option.value.to_string() == value)
+        }),
+        _ => false,
+    }
+}
+
 /// Apply user-saved mode and config-option preferences to a freshly-attached
 /// session BEFORE the initial `session_modes` / `session_config_options`
 /// events are emitted to the frontend.
@@ -2500,6 +2559,7 @@ async fn apply_preferred_session_options(
     session: &mut sacp::ActiveSession<'_, Agent>,
     state: &Arc<RwLock<SessionState>>,
     emitter: &EventEmitter,
+    agent_type: AgentType,
     preferred_mode_id: Option<&str>,
     preferred_config_values: &BTreeMap<String, String>,
     initial_config_options: Vec<SessionConfigOption>,
@@ -2515,14 +2575,67 @@ async fn apply_preferred_session_options(
                 tracing::error!("[ACP] failed to apply preferred mode '{pref_mode}' on connect: {e}");
             }
         }
-    }
-
-    if preferred_config_values.is_empty() {
-        return initial_config_options;
+    } else if let Some(default_mode) = session
+        .modes()
+        .as_ref()
+        .and_then(default_high_privilege_session_mode_id)
+    {
+        let needs_apply = session
+            .modes()
+            .as_ref()
+            .map(|m| m.current_mode_id.to_string() != default_mode)
+            .unwrap_or(false);
+        if needs_apply {
+            if let Err(e) = set_session_mode(session, state, emitter, default_mode.clone()).await {
+                tracing::error!(
+                    "[ACP] failed to apply default high-privilege mode '{default_mode}' on connect: {e}"
+                );
+            }
+        }
     }
 
     let session_id = session.session_id().clone();
     let mut options = initial_config_options;
+    let has_saved_mode_config = preferred_config_values.contains_key("mode");
+    if agent_type == AgentType::Codex && !has_saved_mode_config {
+        if let Some(mode_value) = options.iter().find_map(|option| {
+            if option.id.to_string() != "mode" {
+                return None;
+            }
+            match &option.kind {
+                SessionConfigKind::Select(select) => {
+                    if !select_options_contain_value(&select.options, "agent-full-access") {
+                        return None;
+                    }
+                    default_mode_config_value(
+                        &select.current_value.to_string(),
+                        has_saved_mode_config,
+                    )
+                }
+                _ => None,
+            }
+        }) {
+            match set_session_config_option_inner(
+                cx,
+                &session_id,
+                "mode".to_string(),
+                mode_value.to_string(),
+            )
+            .await
+            {
+                Ok(updated) => options = updated,
+                Err(e) => tracing::error!(
+                    "[ACP] failed to apply default high-privilege config 'mode'='{mode_value}' \
+                     on connect: {e}"
+                ),
+            }
+        }
+    }
+
+    if preferred_config_values.is_empty() {
+        return options;
+    }
+
     for (config_id, value_id) in preferred_config_values {
         // Skip the round-trip when the agent's current value already matches.
         // Note: codex-acp 1.0.0 advertises "mode" as a config option (so the
@@ -4920,6 +5033,15 @@ async fn emit_conversation_update(
 mod tests {
     use super::*;
     use sacp::schema::Diff;
+
+    #[test]
+    fn codex_mode_default_uses_full_access_without_saved_pref() {
+        assert_eq!(
+            default_mode_config_value("agent", false),
+            Some("agent-full-access")
+        );
+        assert_eq!(default_mode_config_value("agent", true), None);
+    }
 
     fn diff_content(path: &str, old: Option<&str>, new: &str) -> ToolCallContent {
         let mut d = Diff::new(path, new);
