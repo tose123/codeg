@@ -20,6 +20,18 @@ function fileUriToLocalPath(uri: string): string | null {
   } catch {
     return null
   }
+  // A non-empty host is a UNC authority: file://server/share/x parses as
+  // host="server", pathname="/share/x". Emit the BACKSLASH UNC form
+  // \\server\share\x — unambiguously LOCAL. A forward-slash //server/share
+  // would be indistinguishable from a protocol-relative WEB url once the
+  // file: scheme is gone, and downstream (classifyResourceKind /
+  // link-safety) route bare // to the browser; backslashes never appear in
+  // a web url, so they reliably tag the target as a local file. The click
+  // path normalizes the separators back to // before opening.
+  if (parsed.host) {
+    const body = `${parsed.host}${parsed.pathname}`.replace(/\//g, "\\")
+    return `\\\\${body}${parsed.search}${parsed.hash}`
+  }
   let path = parsed.pathname
   if (/^\/[a-zA-Z]:[\\/]/.test(path)) path = path.slice(1)
   // Keep URL-encoded form so `%23` / `%3F` don't collide with fragment/query

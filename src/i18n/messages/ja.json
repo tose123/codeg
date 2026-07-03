@@ -2230,7 +2230,6 @@
       "linkSafety": {
         "errorCannotOpen": "ローカルファイルを開けません",
         "errorNoWorkspace": "現在アクティブなワークスペースフォルダがありません。",
-        "errorOutsideWorkspace": "ファイルが現在のワークスペースフォルダの外にあります。",
         "errorFailedOpen": "ローカルファイルを開けませんでした",
         "errorFailedLink": "リンクを開けませんでした",
         "errorUnsupportedLinkProtocol": "このリンクプロトコルはサポートされていません。"

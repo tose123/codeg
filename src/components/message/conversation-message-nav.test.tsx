@@ -17,7 +17,7 @@ const { stableT, mockOpenDiff } = vi.hoisted(() => {
 
 vi.mock("next-intl", () => ({ useTranslations: () => stableT }))
 vi.mock("@/contexts/workspace-context", () => ({
-  useWorkspaceContext: () => ({ openSessionFileDiff: mockOpenDiff }),
+  useWorkspaceActions: () => ({ openSessionFileDiff: mockOpenDiff }),
 }))
 vi.mock("@/contexts/active-folder-context", () => ({
   useActiveFolder: () => ({ activeFolder: { path: "/repo" } }),

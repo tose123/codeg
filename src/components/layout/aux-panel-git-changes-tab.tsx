@@ -36,7 +36,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useTabContext } from "@/contexts/tab-context"
-import { useWorkspaceContext } from "@/contexts/workspace-context"
+import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
 import { AuxPanelNoFolderEmpty } from "@/components/layout/aux-panel-no-folder-empty"
 import { WorkspaceDegradedBanner } from "@/components/layout/workspace-degraded-banner"
@@ -382,7 +382,7 @@ export function GitChangesTab() {
   const tFileTree = useTranslations("Folder.fileTreeTab")
   const { activeFolder: folder } = useActiveFolder()
   const { tabs, activeTabId } = useTabContext()
-  const { openFilePreview, openWorkingTreeDiff } = useWorkspaceContext()
+  const { openFilePreview, openWorkingTreeDiff } = useWorkspaceActions()
   const workspaceState = useWorkspaceStateStore(folder?.path ?? null)
 
   const [expandedTrackedPaths, setExpandedTrackedPaths] = useState<Set<string>>(

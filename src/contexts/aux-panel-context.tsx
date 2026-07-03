@@ -111,7 +111,7 @@ export function AuxPanelProvider({ children }: AuxPanelProviderProps) {
   }, [isOpen, restored, storageKey, width])
 
   // Reset pending reveal path when the active folder changes; file tree
-  // state is content-driven by `useWorkspaceContext` and will refetch
+  // state is content-driven by the workspace contexts and will refetch
   // naturally via its folder-path dependency.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

@@ -44,7 +44,7 @@ vi.mock("@/contexts/active-folder-context", () => ({
 }))
 
 vi.mock("@/contexts/workspace-context", () => ({
-  useWorkspaceContext: () => ({
+  useWorkspaceActions: () => ({
     openFilePreview: mocks.openFilePreview,
   }),
 }))
@@ -119,8 +119,10 @@ describe("link safety direct opening", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
 
+    // Absolute paths pass through untouched — openFilePreview owns routing
+    // (owning-folder match or outside-workspace open) by absolute path.
     await waitFor(() => {
-      expect(mocks.openFilePreview).toHaveBeenCalledWith("src/app.ts", {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith("/repo/src/app.ts", {
         line: 12,
       })
     })
@@ -133,11 +135,60 @@ describe("link safety direct opening", () => {
     fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
 
     await waitFor(() => {
-      expect(mocks.openFilePreview).toHaveBeenCalledWith("src/app.ts", {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith("/repo/src/app.ts", {
         line: 10,
       })
     })
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+  })
+
+  it("preserves the UNC authority of a file://server/share URI", async () => {
+    // new URL("file://server/share/doc.md") parses host=server,
+    // pathname=/share/doc.md — the opener must receive the full UNC path
+    // //server/share/doc.md, not the local /share/doc.md.
+    render(<LinkSafetyHarness url="file://server/share/doc.md" />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
+
+    await waitFor(() => {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith(
+        "//server/share/doc.md",
+        { line: undefined }
+      )
+    })
+  })
+
+  it("opens a UNC link through the real chat path (remark-rewritten backslash form)", async () => {
+    // In chat, remark-file-uri-links rewrites file://server/share/doc.md to
+    // the backslash UNC form BEFORE MarkdownLink sees it. That rewritten
+    // href must route to the file opener (as //server/share/doc.md), not
+    // the browser.
+    // JS string "\\\\server\\share\\doc.md" is the 2-backslash UNC form.
+    render(<LinkSafetyHarness url={"\\\\server\\share\\doc.md"} />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
+
+    await waitFor(() => {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith(
+        "//server/share/doc.md",
+        { line: undefined }
+      )
+    })
+    expect(window.open).not.toHaveBeenCalled()
+  })
+
+  it("passes ~ paths through for home expansion by the opener", async () => {
+    render(<LinkSafetyHarness url="~/.claude/plans/notes.md" />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
+
+    await waitFor(() => {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith(
+        "~/.claude/plans/notes.md",
+        { line: undefined }
+      )
+    })
+    expect(mocks.toastError).not.toHaveBeenCalled()
   })
 
   it("blocks unsupported markdown link protocols without rendering a confirmation dialog", async () => {
@@ -155,21 +206,22 @@ describe("link safety direct opening", () => {
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
   })
 
-  it("treats protocol-relative // URLs as local paths, not browser links", async () => {
-    // `//cdn.example.com/app.js` begins with "/", so parseLocalFileTarget
-    // claims it and it routes through the file opener (here: rejected as
-    // outside the workspace) rather than window.open. This is why
-    // classifyResourceKind tags `//…` with the file icon, not the web icon.
+  it("treats protocol-relative // URLs as web links, never local file IO", async () => {
+    // `//cdn.example.com/app.js` is protocol-relative — the browser resolves
+    // it against the page protocol. parseLocalFileTarget must NOT claim it
+    // (that would route "//Users/…"-style urls into local file reads);
+    // classifyResourceKind tags `//…` with the web icon to match.
     render(<LinkSafetyHarness url="//cdn.example.com/app.js" />)
 
     fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
 
     await waitFor(() => {
-      expect(mocks.toastError).toHaveBeenCalledWith("errorCannotOpen", {
-        description: "errorOutsideWorkspace",
-      })
+      expect(window.open).toHaveBeenCalledWith(
+        "//cdn.example.com/app.js",
+        "_blank",
+        "noreferrer"
+      )
     })
-    expect(window.open).not.toHaveBeenCalled()
     expect(mocks.openFilePreview).not.toHaveBeenCalled()
   })
 
@@ -183,11 +235,32 @@ describe("link safety direct opening", () => {
     fireEvent.click(screen.getByRole("button", { name: "src/lib.ts" }))
 
     await waitFor(() => {
-      expect(mocks.openFilePreview).toHaveBeenCalledWith("src/lib.ts", {
+      expect(mocks.openFilePreview).toHaveBeenCalledWith("/repo/src/lib.ts", {
         line: 5,
       })
     })
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+  })
+
+  it("opens protocol-relative links on desktop as concrete https URLs", async () => {
+    // The Tauri opener capability only allows http(s) URLs; a raw "//host"
+    // would resolve against the webview's own scheme. The dispatch must
+    // canonicalize.
+    mocks.isDesktop.mockReturnValue(true)
+    mocks.openUrl.mockResolvedValue(undefined)
+
+    render(<LinkSafetyHarness url="//cdn.example.com/app.js" />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Trigger link" }))
+
+    await waitFor(() => {
+      expect(mocks.openUrl).toHaveBeenCalledWith(
+        "https://cdn.example.com/app.js"
+      )
+    })
+    expect(window.open).not.toHaveBeenCalled()
+    expect(mocks.openFilePreview).not.toHaveBeenCalled()
+    expect(mocks.toastError).not.toHaveBeenCalled()
   })
 
   it("routes desktop external links through the platform opener instead of streamdown", async () => {
@@ -312,7 +385,7 @@ describe("link safety direct opening", () => {
       expect(initialOpenPreview).toHaveBeenCalledTimes(1)
     })
 
-    // Swap `useWorkspaceContext().openFilePreview` to a fresh vi.fn so the
+    // Swap `useWorkspaceActions().openFilePreview` to a fresh vi.fn so the
     // next render forces `useOpenLinkOrFile`'s `useCallback` to rebuild —
     // i.e. the `onAction` prop of `<DirectLinkOpen>` changes identity while
     // the original open is still pending. The previous `cancelled`-flag

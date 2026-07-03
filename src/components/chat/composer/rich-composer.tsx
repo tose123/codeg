@@ -17,6 +17,7 @@ import { exitSuggestion } from "@tiptap/suggestion"
 import { cn } from "@/lib/utils"
 
 import { buildComposerExtensions } from "./editor-config"
+import { buildResilientMarkdownNodes } from "./markdown-insert"
 import { decideComposerKey } from "./submit-key"
 import type {
   MentionController,
@@ -419,11 +420,49 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
         isEmpty: () => editor?.isEmpty ?? true,
         getJSON: () => editor?.getJSON() ?? { type: "doc", content: [] },
         insertMarkdownAtCursor: (markdown) => {
-          editor
-            ?.chain()
-            .focus()
-            .insertContent(markdown, { contentType: "markdown" })
-            .run()
+          if (!editor) return
+          // Fast path: parse the whole message as Markdown. Almost every quick
+          // message parses cleanly, and a throw here leaves the document
+          // untouched (the transaction is built, then dispatched — an exception
+          // during the build never reaches dispatch), so the recovery below
+          // cannot duplicate content.
+          try {
+            editor
+              .chain()
+              .focus()
+              .insertContent(markdown, { contentType: "markdown" })
+              .run()
+          } catch (error) {
+            // The composer's StarterKit schema can't represent every Markdown
+            // construct — GFM tables and task-list checkboxes (`- [ ]`) parse
+            // into nodes ProseMirror rejects, so `insertContent` throws a
+            // RangeError (it runs an unconditional `node.check()`; `setContent`
+            // silently drops such nodes instead). With no fallback the throw is
+            // swallowed by the click handler and the composer shows no reaction
+            // at all — the reported bug. Recover block-by-block so every
+            // *supported* block still renders as rich Markdown and only the
+            // unsupported ones degrade to their literal source text.
+            console.warn(
+              "[RichComposer] Markdown insert failed; degrading unsupported blocks to text.",
+              error
+            )
+            try {
+              const nodes = buildResilientMarkdownNodes(editor, markdown)
+              editor.chain().focus().insertContent(nodes).run()
+            } catch (recoveryError) {
+              // Belt-and-suspenders: the recovery nodes are pre-validated, but
+              // never leave the click looking dead — insert raw text verbatim.
+              console.warn(
+                "[RichComposer] Block recovery failed; inserting raw text.",
+                recoveryError
+              )
+              editor
+                .chain()
+                .focus()
+                .insertContent({ type: "text", text: markdown })
+                .run()
+            }
+          }
         },
         insertReference: (attrs) => {
           editor?.chain().focus().insertReference(attrs).run()

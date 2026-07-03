@@ -257,14 +257,26 @@ describe("groupGoalRuns", () => {
     expect(goalRun.isRunning).toBe(false)
   })
 
-  it("wraps an unfinished goal run as running", () => {
-    const out = groupGoalRuns([poll("create_goal"), text])
+  it("wraps an unfinished goal run as running while streaming", () => {
+    const out = groupGoalRuns([poll("create_goal"), text], true)
 
     expect(out).toHaveLength(1)
     const goalRun = goalRunOf(out[0])
     expect(goalRun.end).toBeNull()
     expect(goalRun.items).toEqual([text])
     expect(goalRun.isRunning).toBe(true)
+  })
+
+  it("settles an unfinished goal run when not streaming", () => {
+    // codex leaves a `/goal` active without a closing update_goal, so a stopped
+    // turn or a reloaded conversation must NOT shimmer the capsule forever.
+    const out = groupGoalRuns([poll("create_goal"), text], false)
+
+    expect(out).toHaveLength(1)
+    const goalRun = goalRunOf(out[0])
+    expect(goalRun.end).toBeNull()
+    expect(goalRun.items).toEqual([text])
+    expect(goalRun.isRunning).toBe(false)
   })
 
   it("does not mutate a reopened unfinished goal run when closing across turns", () => {

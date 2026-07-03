@@ -75,6 +75,7 @@ import {
   FOLDER_THEME_COLOR_INHERIT,
   THEME_COLOR_PREVIEW,
   THEME_COLORS,
+  normalizeFolderThemeColor,
   type FolderThemeColor,
   type ThemeColor,
 } from "@/lib/theme-presets"
@@ -137,33 +138,6 @@ import { toErrorMessage } from "@/lib/app-error"
 // paint) but a no-op-safe passive effect during the static-export prerender.
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect
-
-const THEME_COLOR_SET = new Set<string>(THEME_COLORS)
-
-const LEGACY_FOLDER_COLOR_MAP: Record<string, FolderThemeColor> = {
-  foreground: FOLDER_THEME_COLOR_INHERIT,
-  "#ef4444": "red",
-  "#f97316": "orange",
-  "#eab308": "yellow",
-  "#84cc16": "green",
-  "#22c55e": "green",
-  "#06b6d4": "blue",
-  "#8b5cf6": "violet",
-  "#d946ef": "rose",
-  "#ec4899": "rose",
-}
-
-function normalizeFolderThemeColor(
-  color: string | null | undefined
-): FolderThemeColor {
-  if (!color) return FOLDER_THEME_COLOR_INHERIT
-  const normalized = color.toLowerCase()
-  if (normalized === FOLDER_THEME_COLOR_INHERIT) {
-    return FOLDER_THEME_COLOR_INHERIT
-  }
-  if (THEME_COLOR_SET.has(normalized)) return normalized as ThemeColor
-  return LEGACY_FOLDER_COLOR_MAP[normalized] ?? FOLDER_THEME_COLOR_INHERIT
-}
 
 const FolderHeader = memo(function FolderHeader({
   folderId,

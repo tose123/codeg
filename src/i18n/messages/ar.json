@@ -2230,7 +2230,6 @@
       "linkSafety": {
         "errorCannotOpen": "تعذر فتح الملف المحلي",
         "errorNoWorkspace": "لا يوجد مجلد مساحة عمل نشط حالياً.",
-        "errorOutsideWorkspace": "الملف خارج مجلد مساحة العمل الحالي.",
         "errorFailedOpen": "فشل فتح الملف المحلي",
         "errorFailedLink": "فشل فتح الرابط",
         "errorUnsupportedLinkProtocol": "بروتوكول الرابط هذا غير مدعوم."

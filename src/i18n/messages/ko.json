@@ -2230,7 +2230,6 @@
       "linkSafety": {
         "errorCannotOpen": "로컬 파일을 열 수 없습니다",
         "errorNoWorkspace": "현재 활성화된 워크스페이스 폴더가 없습니다.",
-        "errorOutsideWorkspace": "파일이 현재 워크스페이스 폴더 밖에 있습니다.",
         "errorFailedOpen": "로컬 파일 열기 실패",
         "errorFailedLink": "링크 열기 실패",
         "errorUnsupportedLinkProtocol": "이 링크 프로토콜은 지원되지 않습니다."

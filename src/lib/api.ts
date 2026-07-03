@@ -2679,15 +2679,23 @@ export async function getFileTree(
 }
 
 export async function startWorkspaceStateStream(
-  rootPath: string
+  rootPath: string,
+  wantsTreeGit = true
 ): Promise<WorkspaceSnapshotResponse> {
-  return getTransport().call("start_workspace_state_stream", { rootPath })
+  return getTransport().call("start_workspace_state_stream", {
+    rootPath,
+    wantsTreeGit,
+  })
 }
 
 export async function stopWorkspaceStateStream(
-  rootPath: string
+  rootPath: string,
+  wantsTreeGit = true
 ): Promise<void> {
-  return getTransport().call("stop_workspace_state_stream", { rootPath })
+  return getTransport().call("stop_workspace_state_stream", {
+    rootPath,
+    wantsTreeGit,
+  })
 }
 
 export async function getWorkspaceSnapshot(

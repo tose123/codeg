@@ -52,6 +52,19 @@ impl CodexParser {
         let mut first_timestamp: Option<DateTime<Utc>> = None;
         let mut last_timestamp: Option<DateTime<Utc>> = None;
         let mut message_count: u32 = 0;
+        // Mirror the detail parser's leading-`/goal` fallback in the lightweight
+        // list path: newer codex records `/goal` only as `thread_goal_updated` (no
+        // `user_message`), so without this the sidebar/import entry is titleless
+        // and under-counted. Decide it POSITIONALLY, exactly like the detail
+        // parser: the goal is the opener iff no real user turn preceded it, and it
+        // then supplies the title + one synthetic-turn count even when a LATER real
+        // reply (e.g. "确认") exists. `has_real_user` tracks the same real-user-turn
+        // sources detail uses (an `event_msg.user_message`, or an image-bearing
+        // `response_item` user); `goal_objective` latches the first opening goal;
+        // `goal_opens_session` snapshots whether it opened the session.
+        let mut has_real_user = false;
+        let mut goal_objective: Option<String> = None;
+        let mut goal_opens_session = false;
 
         for line in reader.lines() {
             let line = match line {
@@ -114,6 +127,7 @@ impl CodexParser {
                         match payload_type {
                             "user_message" => {
                                 message_count += 1;
+                                has_real_user = true;
                                 if title.is_none() {
                                     title = payload
                                         .get("message")
@@ -123,6 +137,54 @@ impl CodexParser {
                             }
                             "agent_message" => {
                                 message_count += 1;
+                            }
+                            "thread_goal_updated" => {
+                                // Capture the first OPENING goal for the fallback,
+                                // through the SAME shared mapping the detail parser
+                                // uses — so the summary keys off exactly the objective
+                                // the detail parser would synthesize from: only a
+                                // `create_goal` (an active goal with an objective),
+                                // never a `goal:null` clear, a blank objective, or a
+                                // terminal-status goal.
+                                if goal_objective.is_none() {
+                                    if let Some(marker) = payload
+                                        .get("goal")
+                                        .and_then(crate::acp::codex_goal::goal_marker)
+                                    {
+                                        if marker.tool_name == "create_goal" {
+                                            // Positional, mirroring the detail parser:
+                                            // the goal opened the session iff no real
+                                            // user turn preceded it. Claim the title
+                                            // from the objective HERE, in stream order,
+                                            // so a later `user_message` can't steal it
+                                            // while a native `thread_name_updated` still
+                                            // overrides it.
+                                            goal_opens_session = !has_real_user;
+                                            if goal_opens_session && title.is_none() {
+                                                title = extract_codex_title_candidate(
+                                                    &marker.objective,
+                                                    true,
+                                                );
+                                            }
+                                            goal_objective = Some(marker.objective);
+                                        }
+                                    }
+                                }
+                            }
+                            "thread_name_updated" => {
+                                // Codex native thread name — newest non-empty wins
+                                // (parity with the detail parser). Accept both the
+                                // rollout `thread_name` and the live `threadName`.
+                                if let Some(name) = payload
+                                    .get("thread_name")
+                                    .or_else(|| payload.get("threadName"))
+                                    .or_else(|| payload.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(str::trim)
+                                    .filter(|n| !n.is_empty())
+                                {
+                                    title = Some(truncate_str(name, 100));
+                                }
                             }
                             _ => {}
                         }
@@ -134,9 +196,23 @@ impl CodexParser {
                             payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         if payload_type == "message" {
                             let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                            if role == "user" && title.is_none() {
-                                title = extract_codex_text_content(payload)
-                                    .and_then(|t| extract_codex_title_candidate(&t, false));
+                            // The detail parser only turns an IMAGE-bearing
+                            // `response_item` user into a real user turn
+                            // (`extract_response_item_user_image_blocks`) and only
+                            // titles from that same turn. Text-only `response_item`
+                            // users are internal envelopes (`<environment_context>`,
+                            // `<codex_internal_context>`, `<turn_aborted>`, …) or
+                            // duplicates of `event_msg.user_message` — detail ignores
+                            // them for BOTH the turn and the title, so the summary
+                            // must too. Mirroring it here keeps the pure-`/goal`
+                            // fallback (title + count) in exact sync and stops
+                            // internal text from leaking into the list title.
+                            if role == "user" && response_item_user_has_image(payload) {
+                                has_real_user = true;
+                                if title.is_none() {
+                                    title = extract_codex_text_content(payload)
+                                        .and_then(|t| extract_codex_title_candidate(&t, false));
+                                }
                             }
                         }
                     }
@@ -149,6 +225,16 @@ impl CodexParser {
             Some(ts) => ts,
             None => return Ok(None),
         };
+
+        // Leading-`/goal` fallback, positional and mirroring the detail parser:
+        // when a `/goal` opened the session (before any real user turn), the detail
+        // view synthesizes a leading user message from the objective — so count
+        // that one turn here, even when a LATER real reply exists, keeping the list
+        // entry in sync with the opened conversation. The title was already claimed
+        // in-loop (see the goal arm).
+        if goal_opens_session {
+            message_count += 1;
+        }
 
         let id = conversation_id.unwrap_or_else(|| {
             path.file_stem()
@@ -762,6 +848,27 @@ impl CodexParser {
         let mut git_branch: Option<String> = None;
         let mut model: Option<String> = None;
         let mut title: Option<String> = None;
+        // Objective of the goal run currently open while replaying `/goal`
+        // transitions, so a persisted `thread_goal_updated` with `goal: null`
+        // closes the run by objective — identical to the live path. See
+        // `crate::acp::codex_goal::next_goal_marker`.
+        let mut codex_open_goal: Option<String> = None;
+        // Objective of the FIRST goal opened, captured for a post-parse fallback:
+        // newer codex consumes `/goal <objective>` as a slash command (persists
+        // `thread_goal_updated` but no `user_message`), so the typed `/goal …`
+        // prompt has no user turn on reload. We surface the objective as the
+        // leading user message AFTER the loop — never mid-loop — so the synthetic
+        // message can never poison `should_skip_duplicate_user_message` and drop a
+        // real same-text user message that arrives later in the file.
+        let mut first_goal_objective: Option<String> = None;
+        // Whether that first `/goal` OPENED the session — i.e. no real user turn
+        // had been recorded when it arrived. This is positional, not "no user turn
+        // anywhere": newer codex records the goal first with no `user_message`, so
+        // the objective IS the opening prompt and must be surfaced as the leading
+        // user turn even when a LATER real reply (e.g. a "确认") exists. Older codex
+        // persisted the `/goal` text as the opening `user_message`, which arrives
+        // BEFORE the goal — there the flag stays false and nothing is synthesized.
+        let mut goal_opens_session = false;
         let mut last_turn_context_ts: Option<DateTime<Utc>> = None;
         let mut context_window_used_tokens: Option<u64> = None;
         let mut context_window_max_tokens: Option<u64> = None;
@@ -984,6 +1091,102 @@ impl CodexParser {
                                     model: None,
                                     completed_at: Some(timestamp),
                                 });
+                            }
+                            "thread_goal_updated" => {
+                                // codex-acp v1.1.0 (#263) routes live goals through
+                                // `session_info_update`; the CLI has always persisted
+                                // each `/goal` transition to the rollout as
+                                // `event_msg.thread_goal_updated.goal`. Synthesize the
+                                // same canonical create_goal/update_goal
+                                // tool_use+tool_result the live path emits (shared
+                                // mapping in `crate::acp::codex_goal`) so a reloaded
+                                // conversation renders goal cards identical to live —
+                                // history that never surfaced goals before.
+                                if let Some(marker) = payload.get("goal").and_then(|goal| {
+                                    crate::acp::codex_goal::next_goal_marker(
+                                        &mut codex_open_goal,
+                                        goal,
+                                    )
+                                }) {
+                                    // Remember the first opened goal's objective for
+                                    // the post-parse leading-user-message fallback (see
+                                    // `first_goal_objective`). Deferred, not synthesized
+                                    // here, so it can't interfere with duplicate
+                                    // suppression of a later real user message.
+                                    if marker.tool_name == "create_goal"
+                                        && first_goal_objective.is_none()
+                                    {
+                                        // Positional: the goal opened the session iff no
+                                        // real user turn exists yet.
+                                        goal_opens_session = !messages
+                                            .iter()
+                                            .any(|m| matches!(m.role, MessageRole::User));
+                                        // Claim the title from the objective HERE, in
+                                        // stream order, when the goal is the opener — so
+                                        // a LATER `user_message` (its own guard is
+                                        // `title.is_none()`) can't steal it, while an
+                                        // EARLIER real user (older codex) or a native
+                                        // `thread_name_updated` still wins.
+                                        if goal_opens_session && title.is_none() {
+                                            title = extract_codex_title_candidate(
+                                                &marker.objective,
+                                                true,
+                                            );
+                                        }
+                                        first_goal_objective = Some(marker.objective.clone());
+                                    }
+                                    // Occurrence id from the message index — unique
+                                    // per goal event, stable across reparse, and
+                                    // shared by this event's ToolUse + ToolResult.
+                                    let id = crate::acp::codex_goal::goal_tool_call_id(
+                                        messages.len() as u64,
+                                    );
+                                    messages.push(UnifiedMessage {
+                                        id: format!("tool-{}", messages.len()),
+                                        role: MessageRole::Assistant,
+                                        content: vec![
+                                            ContentBlock::ToolUse {
+                                                tool_use_id: Some(id.clone()),
+                                                tool_name: marker.tool_name.to_string(),
+                                                input_preview: Some(marker.input_json),
+                                                meta: None,
+                                            },
+                                            ContentBlock::ToolResult {
+                                                tool_use_id: Some(id),
+                                                output_preview: Some(marker.output_json),
+                                                is_error: false,
+                                                agent_stats: None,
+                                                images: Vec::new(),
+                                            },
+                                        ],
+                                        timestamp,
+                                        usage: None,
+                                        duration_ms: None,
+                                        model: None,
+                                        completed_at: Some(timestamp),
+                                    });
+                                }
+                            }
+                            "thread_name_updated" => {
+                                // Codex's native thread name — adopt it as the
+                                // auto-title (parity with Claude `aiTitle`, Gemini
+                                // `update_topic`, OpenCode `session.title`). Newest
+                                // non-empty wins, overriding the first-prompt
+                                // fallback; `refresh_auto_title`'s `title_locked`
+                                // guard still respects a manual rename.
+                                // Rollout persists `thread_name` (snake_case); the
+                                // live ACP notification uses `threadName`. Accept
+                                // both so the parser is robust to either source.
+                                if let Some(name) = payload
+                                    .get("thread_name")
+                                    .or_else(|| payload.get("threadName"))
+                                    .or_else(|| payload.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(str::trim)
+                                    .filter(|n| !n.is_empty())
+                                {
+                                    title = Some(truncate_str(name, 100));
+                                }
                             }
                             "agent_reasoning" => {
                                 // Buffer this streaming reasoning section. The grouped
@@ -1653,6 +1856,36 @@ impl CodexParser {
             }
         }
 
+        // Leading-`/goal` fallback: when a `/goal` opened the session (before any
+        // real user turn), newer codex recorded only `thread_goal_updated` — no
+        // `user_message` — so the typed `/goal <objective>` prompt would be missing
+        // on reload (headless, or, when a later reply like "确认" exists, starting
+        // mid-conversation). Surface it as the leading user message, prefixed with
+        // `/goal ` to match what the user actually typed and the live optimistic
+        // bubble. The title was already claimed in-loop (see the goal-capture
+        // block). Applied here, after parsing, so the synthetic turn never
+        // participates in `should_skip_duplicate_user_message`.
+        if let Some(objective) = first_goal_objective {
+            if goal_opens_session {
+                messages.insert(
+                    0,
+                    UnifiedMessage {
+                        id: "codex-goal-user".to_string(),
+                        role: MessageRole::User,
+                        content: vec![ContentBlock::Text {
+                            text: format!("/goal {objective}"),
+                        }],
+                        // Earliest event time so it sorts ahead of the goal card.
+                        timestamp: first_timestamp.unwrap_or_else(Utc::now),
+                        usage: None,
+                        duration_ms: None,
+                        model: None,
+                        completed_at: first_timestamp,
+                    },
+                );
+            }
+        }
+
         let folder_path = cwd.clone();
         let folder_name = folder_path.as_ref().map(|p| folder_name_from_path(p));
 
@@ -1890,11 +2123,20 @@ fn is_environment_context_message(input: &str) -> bool {
     trimmed.starts_with("<environment_context>") && trimmed.ends_with("</environment_context>")
 }
 
+/// codex re-injects `<codex_internal_context source="goal">Continue working …`
+/// user turns while a `/goal` is active. These are machine context, never a real
+/// prompt, so they must never become a conversation title (they otherwise leak in
+/// on the summary path, whose title fallback doesn't gate on image blocks).
+fn is_codex_internal_context_message(input: &str) -> bool {
+    input.trim_start().starts_with("<codex_internal_context")
+}
+
 fn extract_codex_title_candidate(input: &str, fallback_attached: bool) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty()
         || is_agents_instruction_message(trimmed)
         || is_environment_context_message(trimmed)
+        || is_codex_internal_context_message(trimmed)
     {
         return None;
     }
@@ -1903,6 +2145,7 @@ fn extract_codex_title_candidate(input: &str, fallback_attached: bool) -> Option
     if without_agents.is_empty()
         || is_agents_instruction_message(&without_agents)
         || is_environment_context_message(&without_agents)
+        || is_codex_internal_context_message(&without_agents)
     {
         return None;
     }
@@ -2004,6 +2247,21 @@ fn should_skip_duplicate_user_message(
     }
 
     false
+}
+
+/// Whether a `response_item` user message carries an `input_image` — the exact
+/// condition under which [`extract_response_item_user_image_blocks`] yields a
+/// real user turn in the detail parser. The lightweight summary parser uses this
+/// to detect the same real-user-turn so its pure-`/goal` fallback stays in sync.
+fn response_item_user_has_image(payload: &serde_json::Value) -> bool {
+    payload
+        .get("content")
+        .and_then(|c| c.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(|v| v.as_str()) == Some("input_image")
+            })
+        })
 }
 
 fn extract_response_item_user_image_blocks(
@@ -2151,6 +2409,8 @@ fn group_into_turns(messages: Vec<UnifiedMessage>) -> Vec<MessageTurn> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::extract_codex_title_candidate;
     use super::extract_context_window_used_tokens_from_token_count_info;
     use super::extract_response_item_user_image_blocks;
@@ -2162,7 +2422,7 @@ mod tests {
     use super::strip_blocked_resource_mentions;
     use super::CodexParser;
     use crate::models::{
-        ContentBlock, MessageRole, SessionStats, TurnRole, TurnUsage, UnifiedMessage,
+        ContentBlock, MessageRole, MessageTurn, SessionStats, TurnRole, TurnUsage, UnifiedMessage,
     };
     use chrono::{DateTime, Duration, Utc};
     use std::env;
@@ -2270,11 +2530,17 @@ mod tests {
             .as_nanos();
         let path: PathBuf = env::temp_dir().join(format!("codeg-codex-test-{nanos}.jsonl"));
 
+        // Injected/duplicate context arrives as text-only `response_item` user
+        // messages (AGENTS.md, environment_context); the real prompt is delivered
+        // by `event_msg.user_message` — the canonical prompt channel in real codex
+        // rollouts. The summary titles from the real prompt and, like the detail
+        // parser, never from a text-only `response_item` (which detail does not
+        // render as a user turn at all).
         let content = concat!(
             "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"test-1\",\"cwd\":\"/tmp/demo\"}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/demo\\n\\n<INSTRUCTIONS>\\nhello\\n</INSTRUCTIONS>\"}]}}\n",
             "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/tmp/demo</cwd>\\n</environment_context>\"}]}}\n",
-            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"真实用户标题\"}]}}\n"
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"真实用户标题\"}}\n"
         );
         fs::write(&path, content).expect("write test jsonl");
 
@@ -2484,6 +2750,694 @@ mod tests {
         assert_ne!(completed_at, wrong);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_reconstructs_goal_cards_and_native_title() {
+        // codex-acp v1.1.0 (#263): `/goal` transitions persist to the rollout as
+        // `event_msg.thread_goal_updated`. The parser must reconstruct the same
+        // create_goal/update_goal tool call the live path emits (history goal
+        // parity — which never existed before), normalizing the camelCase
+        // `ThreadGoalStatus` to the snake_case bucket the goal card expects.
+        // `thread_name_updated` must win over the first-prompt title.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-goal-{nanos}.jsonl"));
+
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"goal-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"hi\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Refactor the auth module\",\"status\":\"active\",\"tokensUsed\":0,\"timeUsedSeconds\":0}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"working\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Refactor the auth module\",\"status\":\"budgetLimited\",\"tokensUsed\":5200,\"timeUsedSeconds\":19}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:06Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_name_updated\",\"thread_id\":\"goal-1\",\"thread_name\":\"Refactor auth module\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "goal-1")
+            .expect("parse detail ok");
+
+        // Native thread name wins over the first-prompt fallback ("hi").
+        assert_eq!(
+            detail.summary.title.as_deref(),
+            Some("Refactor auth module")
+        );
+
+        // Correlate synthesized goal tool_use/tool_result blocks by id.
+        let mut names: HashMap<String, String> = HashMap::new();
+        let mut inputs: HashMap<String, String> = HashMap::new();
+        let mut outputs: HashMap<String, String> = HashMap::new();
+        for turn in &detail.turns {
+            for block in &turn.blocks {
+                match block {
+                    ContentBlock::ToolUse {
+                        tool_use_id: Some(id),
+                        tool_name,
+                        input_preview,
+                        ..
+                    } => {
+                        names.insert(id.clone(), tool_name.clone());
+                        if let Some(i) = input_preview {
+                            inputs.insert(id.clone(), i.clone());
+                        }
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id: Some(id),
+                        output_preview: Some(o),
+                        ..
+                    } => {
+                        outputs.insert(id.clone(), o.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let find = |target: &str| -> String {
+            names
+                .iter()
+                .find(|(_, n)| n.as_str() == target)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(|| panic!("{target} tool call present"))
+        };
+
+        // active → create_goal, objective + status carried in the tool_result.
+        let create_id = find("create_goal");
+        let create_out: serde_json::Value =
+            serde_json::from_str(&outputs[&create_id]).unwrap();
+        assert_eq!(create_out["goal"]["status"], "active");
+        assert_eq!(create_out["goal"]["objective"], "Refactor the auth module");
+        // Distinct goal events get distinct (occurrence-addressed) ids.
+        assert_ne!(create_id, find("update_goal"));
+
+        // budgetLimited → update_goal with the status normalized to snake_case.
+        let update_id = find("update_goal");
+        let update_out: serde_json::Value =
+            serde_json::from_str(&outputs[&update_id]).unwrap();
+        assert_eq!(update_out["goal"]["status"], "budget_limited");
+        assert_eq!(update_out["goal"]["tokensUsed"], 5200);
+        let update_in: serde_json::Value = serde_json::from_str(&inputs[&update_id]).unwrap();
+        assert_eq!(update_in["status"], "budget_limited");
+        assert_eq!(update_in["objective"], "Refactor the auth module");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_closes_goal_on_persisted_null_clear() {
+        // A persisted `thread_goal_updated` with `goal: null` must close the open
+        // run (create_goal → update_goal/complete inheriting the objective),
+        // identical to the live path — not leave it perpetually active.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-goalnull-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gc-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Ship it\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":null}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "gc-1")
+            .expect("parse detail ok");
+
+        let mut names: HashMap<String, String> = HashMap::new();
+        let mut outputs: HashMap<String, String> = HashMap::new();
+        for turn in &detail.turns {
+            for block in &turn.blocks {
+                match block {
+                    ContentBlock::ToolUse {
+                        tool_use_id: Some(id),
+                        tool_name,
+                        ..
+                    } => {
+                        names.insert(id.clone(), tool_name.clone());
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id: Some(id),
+                        output_preview: Some(o),
+                        ..
+                    } => {
+                        outputs.insert(id.clone(), o.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The null clear produced a closing update_goal (not dropped).
+        let close_id = names
+            .iter()
+            .find(|(_, n)| n.as_str() == "update_goal")
+            .map(|(id, _)| id.clone())
+            .expect("null clear closes the run with an update_goal");
+        assert!(names.values().any(|n| n == "create_goal"));
+        let close_out: serde_json::Value = serde_json::from_str(&outputs[&close_id]).unwrap();
+        assert_eq!(close_out["goal"]["status"], "complete");
+        assert_eq!(close_out["goal"]["objective"], "Ship it");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_synthesizes_user_message_for_pure_goal_session() {
+        // Newer codex consumes `/goal <objective>` as a slash command: it persists
+        // `thread_goal_updated` but NO `user_message`, so a pure-`/goal` session
+        // (the user only set a goal) reloads with no user turn and no title — the
+        // live view showed the typed prompt but reload lost it. The parser must
+        // surface the objective as the leading user message + title so the
+        // conversation isn't headless. The goal card must still render, in order.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf = env::temp_dir().join(format!("codeg-codex-puregoal-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"pg-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/tmp/demo</cwd>\\n</environment_context>\"}]}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"On it.\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "pg-1")
+            .expect("parse detail ok");
+
+        // Title falls back to the goal objective (no thread_name in this session).
+        assert_eq!(
+            detail.summary.title.as_deref(),
+            Some("Build a static test page")
+        );
+
+        // Exactly one user turn, synthesized from the objective — the internal
+        // `<environment_context>` message stays filtered, and the second active
+        // re-emit does NOT add a second user message. The message carries the
+        // `/goal ` prefix the user actually typed (the title above stays clean).
+        let user_turns: Vec<&MessageTurn> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .collect();
+        assert_eq!(user_turns.len(), 1, "one synthesized user turn");
+        let user_text = user_turns[0].blocks.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(user_text, Some("/goal Build a static test page"));
+
+        // The synthesized user turn precedes the goal card.
+        let first_user_idx = detail
+            .turns
+            .iter()
+            .position(|t| matches!(t.role, TurnRole::User))
+            .expect("user turn present");
+        let first_goal_idx = detail
+            .turns
+            .iter()
+            .position(|t| {
+                t.blocks.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolUse { tool_name, .. } if tool_name == "create_goal"
+                    )
+                })
+            })
+            .expect("goal card present");
+        assert!(
+            first_user_idx < first_goal_idx,
+            "synthesized user message precedes the goal card"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_keeps_single_user_turn_when_goal_text_persisted() {
+        // Older codex persisted the `/goal` text as a real `user_message`. The
+        // synthesis guard must NOT add a second user turn there (no duplicate).
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-goaltext-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gt-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"/goal Analyze the README\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Analyze the README\",\"status\":\"active\"}}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "gt-1")
+            .expect("parse detail ok");
+
+        let user_turns = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .count();
+        assert_eq!(user_turns, 1, "real user_message not duplicated by synthesis");
+        let user_text = detail
+            .turns
+            .iter()
+            .find(|t| matches!(t.role, TurnRole::User))
+            .and_then(|t| {
+                t.blocks.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            });
+        assert_eq!(user_text.as_deref(), Some("/goal Analyze the README"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_goal_opener_and_later_same_text_user_are_both_kept() {
+        // The leading `/goal` opener is synthesized AFTER parsing, so it can never
+        // poison `should_skip_duplicate_user_message`. A goal objective
+        // "Investigate auth" (which OPENED the session) followed by a REAL
+        // `user_message` of the same text within the dup window must yield BOTH:
+        // the synthetic "/goal Investigate auth" opener AND the real "Investigate
+        // auth" reply (no data loss, no false dedup — the prefix also keeps them
+        // textually distinct).
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-goaldup-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gd-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Investigate auth\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Investigate auth\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "gd-1")
+            .expect("parse detail ok");
+
+        let user_texts: Vec<String> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .filter_map(|t| {
+                t.blocks.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(
+            user_texts,
+            vec![
+                "/goal Investigate auth".to_string(),
+                "Investigate auth".to_string()
+            ],
+            "the synthetic /goal opener leads and the real reply survives"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_detail_goal_opener_then_confirm_reply_keeps_prompt_and_titles_from_goal() {
+        // The real bug repro: a `/goal` opens the session (goal first, no
+        // `user_message`); the agent asks for confirmation; the user replies
+        // "确认" (a REAL `user_message`). Reopening must NOT start mid-conversation
+        // at "确认" — the leading "/goal <objective>" prompt is restored as the
+        // opener, the "确认" reply is kept in place, and the title comes from the
+        // goal objective (the opening prompt), NOT from the later "确认".
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-goalconfirm-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gc-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Please confirm the plan: reply 批准 or 换主题.\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:20Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"确认\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:21Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"收到确认。\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let detail = parser
+            .parse_conversation_detail(&path, "gc-1")
+            .expect("parse detail ok");
+
+        // Title is the goal objective, NOT the later "确认" reply.
+        assert_eq!(detail.summary.title.as_deref(), Some("Build a static page"));
+
+        // Two user turns, in order: the synthetic "/goal …" opener then "确认".
+        let user_texts: Vec<String> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .filter_map(|t| {
+                t.blocks.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(
+            user_texts,
+            vec!["/goal Build a static page".to_string(), "确认".to_string()],
+            "leading /goal prompt restored ahead of the 确认 reply"
+        );
+
+        // The synthetic opener sorts ahead of the goal card.
+        let first_user_idx = detail
+            .turns
+            .iter()
+            .position(|t| matches!(t.role, TurnRole::User))
+            .expect("user turn present");
+        let first_goal_idx = detail
+            .turns
+            .iter()
+            .position(|t| {
+                t.blocks.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolUse { tool_name, .. } if tool_name == "create_goal"
+                    )
+                })
+            })
+            .expect("goal card present");
+        assert!(first_user_idx < first_goal_idx);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_summary_goal_opener_then_confirm_reply_titles_from_goal_and_counts_opener() {
+        // Summary parity with the detail repro above: a `/goal` opener followed by
+        // a later "确认" reply must title the list entry from the goal objective
+        // (not "确认") and count the synthetic opener turn.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-sumconfirm-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sc-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Please confirm.\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:20Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"确认\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:21Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"收到确认。\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+
+        // Title from the goal objective, not the "确认" reply.
+        assert_eq!(summary.title.as_deref(), Some("Build a static page"));
+        // "确认" (+1) + two agent_messages (+2) + synthetic /goal opener (+1).
+        assert_eq!(summary.message_count, 4);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_summary_titles_pure_goal_session_from_objective() {
+        // The lightweight list parser must mirror the detail fallback: a
+        // pure-`/goal` session (no `user_message`) gets its title from the goal
+        // objective — set before the `<codex_internal_context>` re-injection so
+        // that internal text never leaks into the title — and the synthesized
+        // leading user turn is counted so the entry isn't reported empty.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-sumgoal-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sg-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<codex_internal_context source=\\\"goal\\\">\\nContinue working toward the active thread goal.\\n</codex_internal_context>\"}]}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"On it.\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+
+        // Objective wins as title; the internal-context text never leaks in.
+        assert_eq!(
+            summary.title.as_deref(),
+            Some("Build a static test page")
+        );
+        // The synthesized user turn (+1) plus the agent_message (+1).
+        assert_eq!(summary.message_count, 2);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_summary_prefers_native_thread_name_over_goal_objective() {
+        // A native `thread_name_updated` wins over the goal-objective fallback
+        // (newest non-empty), matching the detail parser.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-sumname-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"sn-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Build a static test page\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_name_updated\",\"thread_name\":\"Static test page\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+
+        assert_eq!(summary.title.as_deref(), Some("Static test page"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_summary_goal_opener_then_image_user_still_synthesizes_opener() {
+        // A `/goal` that OPENED the session (goal first, no preceding user) followed
+        // by an image-bearing `response_item` user is the positional case: the goal
+        // objective is the opening prompt (its own turn) and the image is a later,
+        // separate turn. The detail parser synthesizes the leading "/goal …" opener
+        // AND keeps the image turn, titling from the objective. The summary must
+        // match: title = objective, and it counts the synthetic opener.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-sumimg-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"si-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Do the thing\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,AAAA\"}]}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"ok\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+
+        // Summary: agent_message (+1) + synthetic /goal opener (+1); title from the
+        // objective (the image-only user contributes no title).
+        assert_eq!(summary.message_count, 2);
+        assert_eq!(summary.title.as_deref(), Some("Do the thing"));
+
+        // Detail parity: title = objective, the leading "/goal …" opener precedes
+        // the image turn (two user turns total).
+        let detail = parser
+            .parse_conversation_detail(&path, "si-1")
+            .expect("parse detail ok");
+        assert_eq!(detail.summary.title.as_deref(), Some("Do the thing"));
+        let user_turns: Vec<&MessageTurn> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .collect();
+        assert_eq!(user_turns.len(), 2, "synthetic /goal opener + image turn");
+        let opener_text = user_turns[0].blocks.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(opener_text, Some("/goal Do the thing"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_summary_goal_null_clear_adds_no_synthetic_count() {
+        // A `thread_goal_updated` with `goal: null` (or a blank objective) carries
+        // no usable objective, so the detail parser never captures
+        // `first_goal_objective` and never synthesizes a user. The summary must
+        // likewise add no synthetic count and no title.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-sumnull-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"snl-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":null}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"   \",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"hmm\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+
+        // Only the agent_message counts — no synthetic user for a null/blank goal.
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.title, None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn goal_with_text_only_response_item_titles_from_objective_in_both_paths() {
+        // A text-only `response_item` user is not a real user turn in the detail
+        // parser, so a `/goal` session carrying one still falls back to the goal
+        // objective for BOTH title and the synthesized leading user. The summary
+        // must match exactly — it must NOT title from the text-only response_item.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+        let path: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-gtxt-{nanos}.jsonl"));
+        let content = concat!(
+            "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"gt2-1\",\"cwd\":\"/tmp/demo\"}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Do X\",\"status\":\"active\"}}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hello\"}]}}\n",
+            "{\"timestamp\":\"2026-03-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"...\"}}\n"
+        );
+        fs::write(&path, content).expect("write test jsonl");
+
+        let parser = CodexParser::new();
+
+        // Summary titles from the objective, not from the text-only "hello".
+        let summary = parser
+            .parse_jsonl_summary(&path)
+            .expect("parse summary ok")
+            .expect("summary present");
+        assert_eq!(summary.title.as_deref(), Some("Do X"));
+
+        // Detail matches: title = objective (clean), and the synthesized leading
+        // user carries the `/goal ` prefix (the text-only response_item never
+        // becomes a turn).
+        let detail = parser
+            .parse_conversation_detail(&path, "gt2-1")
+            .expect("parse detail ok");
+        assert_eq!(detail.summary.title.as_deref(), Some("Do X"));
+        let user_turns: Vec<&MessageTurn> = detail
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, TurnRole::User))
+            .collect();
+        assert_eq!(user_turns.len(), 1, "one synthesized user turn");
+        let user_text = user_turns[0].blocks.iter().find_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(user_text, Some("/goal Do X"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn summary_ignores_non_opening_goal_for_synthesis() {
+        // Only a `create_goal` (active) opening captures an objective for the
+        // synthetic-user fallback — via the shared `goal_marker`, exactly like the
+        // detail parser. A terminal-status goal alone must not synthesize a user
+        // or title; a later active goal is what gets captured.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time ok")
+            .as_nanos();
+
+        // (a) terminal-only goal → no capture, no synthetic count/title.
+        let path_a: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-term-{nanos}.jsonl"));
+        fs::write(
+            &path_a,
+            concat!(
+                "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"tm-1\",\"cwd\":\"/tmp/demo\"}}\n",
+                "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Terminal only\",\"status\":\"complete\"}}}\n",
+                "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"done\"}}\n"
+            ),
+        )
+        .expect("write");
+        let parser = CodexParser::new();
+        let summary_a = parser
+            .parse_jsonl_summary(&path_a)
+            .expect("ok")
+            .expect("present");
+        assert_eq!(summary_a.title, None, "terminal goal is not a title");
+        assert_eq!(summary_a.message_count, 1, "no synthetic user for terminal goal");
+        let _ = fs::remove_file(&path_a);
+
+        // (b) terminal THEN active → the active objective is captured (not the
+        // terminal one), matching the detail parser's first-create_goal capture.
+        let path_b: PathBuf =
+            env::temp_dir().join(format!("codeg-codex-termact-{nanos}.jsonl"));
+        fs::write(
+            &path_b,
+            concat!(
+                "{\"timestamp\":\"2026-03-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ta-1\",\"cwd\":\"/tmp/demo\"}}\n",
+                "{\"timestamp\":\"2026-03-01T10:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Old terminal\",\"status\":\"complete\"}}}\n",
+                "{\"timestamp\":\"2026-03-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_goal_updated\",\"goal\":{\"objective\":\"Fresh active\",\"status\":\"active\"}}}\n"
+            ),
+        )
+        .expect("write");
+        let summary_b = parser
+            .parse_jsonl_summary(&path_b)
+            .expect("ok")
+            .expect("present");
+        assert_eq!(summary_b.title.as_deref(), Some("Fresh active"));
+        let _ = fs::remove_file(&path_b);
     }
 
     #[test]

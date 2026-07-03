@@ -39,6 +39,13 @@ Codeg (Code Generation) é um workspace de codificação multiagente. Ele reúne
     </td>
     <td>Agradecemos à Compshare por patrocinar este projeto! A Compshare é a plataforma de nuvem de IA da UCloud, oferecendo planos Plan de agentes com modelos nacionais em assinatura mensal ou pagamento por uso, a partir de ¥49/mês. Também oferece acesso estável a modelos estrangeiros via proxy oficial. Compatível com Claude Code, Codex e chamadas de API. Pronto para empresas: alta concorrência, suporte técnico 24/7 e emissão de notas fiscais em autoatendimento. Quem se cadastrar através <a href="https://www.compshare.cn/?ytag=GPU_YY_git_codeg">deste link</a> ganha ¥5 de crédito de avaliação grátis na plataforma!</td>
   </tr>
+  <tr>
+    <td align="center" width="220">
+      <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE" target="_blank"><img src="../images/sui-xiang.jpg" alt="Sui-Xiang AI Gateway" width="200" /></a><br/>
+      <strong><a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">Sui-Xiang AI Gateway</a></strong>
+    </td>
+    <td>Agradecemos ao Sui-Xiang AI Gateway por patrocinar este projeto! O Sui-Xiang AI Gateway é um provedor de retransmissão de API confiável e eficiente, oferecendo serviços de retransmissão para Claude, Codex, Gemini e mais. Contas novas ganham ¥0,5 de crédito de teste a cada check-in diário após o <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">cadastro</a>; as recargas são creditadas 1:1, sem assinatura e com pagamento por uso. Redundância de múltiplas linhas, recuperação de desastres entre regiões e failover automático mantêm as conexões SSE de longa duração sem interrupções.</td>
+  </tr>
 </table>
 
 > Quer se tornar patrocinador do Codeg? [Entre em contato por e-mail.](mailto:itpkcn@gmail.com)

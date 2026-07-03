@@ -12,6 +12,8 @@ use crate::workspace_state::WorkspaceSnapshotResponse;
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRootPathParams {
     pub root_path: String,
+    // Absent = legacy full subscriber (tree/git snapshots wanted).
+    pub wants_tree_git: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -28,6 +30,7 @@ pub async fn start_workspace_state_stream(
     let result = workspace_state_commands::start_workspace_state_stream_core(
         state.emitter.clone(),
         params.root_path,
+        params.wants_tree_git.unwrap_or(true),
     )
     .await?;
     Ok(Json(result))
@@ -36,7 +39,11 @@ pub async fn start_workspace_state_stream(
 pub async fn stop_workspace_state_stream(
     Json(params): Json<WorkspaceRootPathParams>,
 ) -> Result<Json<()>, AppCommandError> {
-    workspace_state_commands::stop_workspace_state_stream_core(params.root_path).await?;
+    workspace_state_commands::stop_workspace_state_stream_core(
+        params.root_path,
+        params.wants_tree_git.unwrap_or(true),
+    )
+    .await?;
     Ok(Json(()))
 }
 

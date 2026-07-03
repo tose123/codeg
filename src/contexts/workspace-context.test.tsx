@@ -2,23 +2,116 @@ import { act, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   WorkspaceProvider,
+  useWorkspaceActions,
   useWorkspaceContext,
+  useWorkspaceExternalConflict,
+  useWorkspaceFileTabs,
+  useWorkspaceView,
 } from "@/contexts/workspace-context"
 import * as api from "@/lib/api"
+import { resetHomeDirCacheForTests } from "@/lib/file-open-target"
 
-vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string, values?: Record<string, string>) =>
-    values ? `${key}:${JSON.stringify(values)}` : key,
-}))
+vi.mock("next-intl", () => {
+  // Return a STABLE function instance across renders, mirroring next-intl's
+  // real behavior. An unstable `t` would churn every action callback that
+  // lists it as a dependency, silently breaking the actions-context
+  // stability the render-isolation suite asserts.
+  const t = (key: string, values?: Record<string, string>) =>
+    values ? `${key}:${JSON.stringify(values)}` : key
+  return { useTranslations: () => t }
+})
 
-vi.mock("@/contexts/active-folder-context", () => ({
-  useActiveFolder: () => ({
-    activeFolder: { id: 1, path: "/repo", name: "repo" },
-    activeFolderId: 1,
-  }),
-}))
+// Dynamic folder store shared by the active-folder and app-workspace mocks.
+// Tests mutate it (switch active folder, remove folders, toggle hydration)
+// inside act() and consumers re-render via useSyncExternalStore.
+const foldersMock = vi.hoisted(() => {
+  type FolderLike = { id: number; path: string; name: string; color: string }
+  const defaultFolders = (): FolderLike[] => [
+    { id: 1, path: "/repo", name: "repo", color: "inherit" },
+    { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+  ]
+  let allFolders = defaultFolders()
+  let foldersHydrated = true
+  let activeFolderId: number | null = 1
+  let snapshot: {
+    allFolders: FolderLike[]
+    foldersHydrated: boolean
+    activeFolderId: number | null
+  } = { allFolders, foldersHydrated, activeFolderId }
+  const listeners = new Set<() => void>()
+  const commit = () => {
+    snapshot = { allFolders, foldersHydrated, activeFolderId }
+    for (const listener of [...listeners]) listener()
+  }
+  return {
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    getSnapshot: () => snapshot,
+    setAllFolders(next: FolderLike[]) {
+      allFolders = next
+      commit()
+    },
+    setHydrated(value: boolean) {
+      foldersHydrated = value
+      commit()
+    },
+    setActiveFolderId(id: number | null) {
+      activeFolderId = id
+      commit()
+    },
+    reset() {
+      allFolders = defaultFolders()
+      foldersHydrated = true
+      activeFolderId = 1
+      commit()
+    },
+  }
+})
+
+vi.mock("@/contexts/active-folder-context", async () => {
+  const { useSyncExternalStore } = await import("react")
+  return {
+    useActiveFolder: () => {
+      const snap = useSyncExternalStore(
+        foldersMock.subscribe,
+        foldersMock.getSnapshot,
+        foldersMock.getSnapshot
+      )
+      const activeFolder =
+        snap.allFolders.find((f) => f.id === snap.activeFolderId) ?? null
+      return { activeFolder, activeFolderId: snap.activeFolderId }
+    },
+  }
+})
+
+vi.mock("@/contexts/app-workspace-context", async () => {
+  const { useSyncExternalStore } = await import("react")
+  return {
+    useAppWorkspace: () => {
+      const snap = useSyncExternalStore(
+        foldersMock.subscribe,
+        foldersMock.getSnapshot,
+        foldersMock.getSnapshot
+      )
+      return {
+        allFolders: snap.allFolders,
+        foldersHydrated: snap.foldersHydrated,
+        getFolder: (id: number) => snap.allFolders.find((f) => f.id === id),
+      }
+    },
+  }
+})
+
+beforeEach(() => {
+  foldersMock.reset()
+})
 
 vi.mock("@/lib/api", () => ({
+  getHomeDirectory: vi.fn(),
   readFileForEdit: vi.fn(),
   readFileBase64: vi.fn(),
   readFilePreview: vi.fn(),
@@ -28,12 +121,16 @@ vi.mock("@/lib/api", () => ({
   gitDiffWithBranch: vi.fn(),
   gitShowDiff: vi.fn(),
   saveFileContent: vi.fn(),
+  saveFileCopy: vi.fn(),
 }))
 
 // Controllable workspace-state store: WorkspaceProvider subscribes to its
-// envelopes to auto-open office previews. `emitEnvelope` lets a test push a
-// changed_paths event as if the file watcher fired. `subscribeEnvelopes`
-// identity is stable so the provider's effect doesn't churn across renders.
+// envelopes to auto-open office previews (hook path), and the tab watcher
+// acquires per-root imperative stores (getWorkspaceStateStore path).
+// `emitEnvelope` pushes an event on the office/hook stream; `emitRoot`
+// pushes on a specific root's imperative store as if that folder's file
+// watcher fired. Acquire/release totals are tracked per root so tests can
+// assert subscription stability (no churn on keystrokes).
 const workspaceStoreMock = vi.hoisted(() => {
   type EnvelopeListener = (env: {
     seq: number
@@ -41,6 +138,46 @@ const workspaceStoreMock = vi.hoisted(() => {
     changed_paths: string[]
   }) => void
   const listeners = new Set<EnvelopeListener>()
+  interface FakeRootStore {
+    acquired: number
+    acquireCalls: number
+    listeners: Set<EnvelopeListener>
+    store: {
+      acquire: () => void
+      release: () => void
+      subscribeEnvelopes: (listener: EnvelopeListener) => () => void
+    }
+  }
+  const storeByRoot = new Map<string, FakeRootStore>()
+  const getRootEntry = (rootPath: string): FakeRootStore => {
+    let entry = storeByRoot.get(rootPath)
+    if (!entry) {
+      const rootListeners = new Set<EnvelopeListener>()
+      const created: FakeRootStore = {
+        acquired: 0,
+        acquireCalls: 0,
+        listeners: rootListeners,
+        store: {
+          acquire: () => {
+            created.acquired += 1
+            created.acquireCalls += 1
+          },
+          release: () => {
+            created.acquired -= 1
+          },
+          subscribeEnvelopes: (listener: EnvelopeListener) => {
+            rootListeners.add(listener)
+            return () => {
+              rootListeners.delete(listener)
+            }
+          },
+        },
+      }
+      entry = created
+      storeByRoot.set(rootPath, entry)
+    }
+    return entry
+  }
   return {
     subscribeEnvelopes: (listener: EnvelopeListener) => {
       listeners.add(listener)
@@ -53,7 +190,26 @@ const workspaceStoreMock = vi.hoisted(() => {
         listener({ seq: 1, kind: "fs_change", changed_paths })
       }
     },
-    reset: () => listeners.clear(),
+    getStore: (rootPath: string) => getRootEntry(rootPath).store,
+    emitRoot: (
+      rootPath: string,
+      changed_paths: string[],
+      kind = "fs_change"
+    ) => {
+      const entry = storeByRoot.get(rootPath)
+      if (!entry) return
+      for (const listener of [...entry.listeners]) {
+        listener({ seq: 1, kind, changed_paths })
+      }
+    },
+    acquiredCount: (rootPath: string) =>
+      storeByRoot.get(rootPath)?.acquired ?? 0,
+    acquireCalls: (rootPath: string) =>
+      storeByRoot.get(rootPath)?.acquireCalls ?? 0,
+    reset: () => {
+      listeners.clear()
+      storeByRoot.clear()
+    },
   }
 })
 
@@ -72,13 +228,25 @@ vi.mock("@/hooks/use-workspace-state-store", () => ({
     restart: async () => {},
     subscribeEnvelopes: workspaceStoreMock.subscribeEnvelopes,
   }),
+  getWorkspaceStateStore: (rootPath: string) =>
+    workspaceStoreMock.getStore(rootPath),
 }))
 
+beforeEach(() => {
+  workspaceStoreMock.reset()
+})
+
 const mockedApi = api as unknown as {
+  getHomeDirectory: ReturnType<typeof vi.fn>
   readFileForEdit: ReturnType<typeof vi.fn>
   gitIsTracked: ReturnType<typeof vi.fn>
   gitShowFile: ReturnType<typeof vi.fn>
+  saveFileContent: ReturnType<typeof vi.fn>
 }
+
+// Tab identity under the unified model: file tabs are keyed by the
+// absolute path alone.
+const fileTabId = (absPath: string) => `file:${encodeURIComponent(absPath)}`
 
 function WorkspaceProbe() {
   const {
@@ -709,14 +877,16 @@ function BackgroundReloadProbe({
     <div>
       <button onClick={() => void openFilePreview("a.ts")}>open-a</button>
       <button onClick={() => void openFilePreview("b.ts")}>open-b</button>
-      <button onClick={() => void reloadOpenFileBackground("a.ts")}>
+      <button onClick={() => void reloadOpenFileBackground("/repo/a.ts")}>
         bg-reload-a
       </button>
-      <button onClick={() => markTabsStale("a.ts")}>stale-a</button>
+      <button onClick={() => markTabsStale("/repo/a.ts")}>stale-a</button>
       <button onClick={() => updateActiveFileContent("dirty-local")}>
         edit
       </button>
-      <button onClick={() => switchFileTab("file:a.ts")}>switch-a</button>
+      <button onClick={() => switchFileTab(fileTabId("/repo/a.ts"))}>
+        switch-a
+      </button>
     </div>
   )
 }
@@ -769,20 +939,20 @@ describe("background reload + stale semantics", () => {
     await act(async () => {
       screen.getByText("open-b").click()
     })
-    expect(snap.activeId).toBe("file:b.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/b.ts"))
 
     await act(async () => {
       screen.getByText("bg-reload-a").click()
     })
 
     // active tab stays on B; tab A content refreshed in place.
-    expect(snap.activeId).toBe("file:b.ts")
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/b.ts"))
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.content).toBe("a-v2")
     expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(3)
   })
 
-  it("markTabsStale flips stale=true on the matching tab", async () => {
+  it("markTabsStale flips stale=true on the matching non-active tab", async () => {
     mockedApi.readFileForEdit.mockResolvedValue({
       path: "a.ts",
       content: "a-v1",
@@ -799,15 +969,25 @@ describe("background reload + stale semantics", () => {
       </WorkspaceProvider>
     )
 
+    // Open A, then B — A becomes a background tab. (Marking the ACTIVE
+    // tab stale is immediately auto-resolved by the provider watcher's
+    // stale-on-activation pass, so the flag would not stay observable.)
     await act(async () => {
       screen.getByText("open-a").click()
     })
-    expect(snap.tabs[0]?.stale).toBe(false)
+    await act(async () => {
+      screen.getByText("open-b").click()
+    })
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.stale).toBe(
+      false
+    )
 
     await act(async () => {
       screen.getByText("stale-a").click()
     })
-    expect(snap.tabs[0]?.stale).toBe(true)
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.stale).toBe(
+      true
+    )
   })
 
   it("activates a stale clean tab and refetches as if reload:true was passed", async () => {
@@ -853,15 +1033,17 @@ describe("background reload + stale semantics", () => {
     await act(async () => {
       screen.getByText("stale-a").click()
     })
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.stale).toBe(true)
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.stale).toBe(
+      true
+    )
 
     // Plain activation (no reload option) must still refetch because stale.
     await act(async () => {
       screen.getByText("open-a").click()
     })
 
-    expect(snap.activeId).toBe("file:a.ts")
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/a.ts"))
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.content).toBe("a-v2")
     expect(tabA?.stale).toBe(false)
     expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(3)
@@ -881,6 +1063,17 @@ describe("background reload + stale semantics", () => {
         path: "b.ts",
         content: "b-v1",
         etag: "eb1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+      // Conflict-detection read fired by stale-on-activation for the
+      // dirty tab: disk is UNCHANGED (same etag), so no conflict and no
+      // content overwrite.
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "a-v1",
+        etag: "ea1",
         mtime_ms: 1,
         readonly: false,
         line_ending: "lf",
@@ -908,17 +1101,18 @@ describe("background reload + stale semantics", () => {
 
     const callsBefore = mockedApi.readFileForEdit.mock.calls.length
 
-    // Activate the dirty stale tab. Must NOT refetch (would clobber edits).
+    // Activate the dirty stale tab. The watcher runs ONE conflict-check
+    // read (never a content refetch) — unsaved edits must survive.
     await act(async () => {
       screen.getByText("switch-a").click()
     })
 
-    expect(snap.activeId).toBe("file:a.ts")
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/a.ts"))
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.content).toBe("dirty-local")
     expect(tabA?.stale).toBe(true)
-    expect(mockedApi.readFileForEdit.mock.calls.length).toBe(callsBefore)
+    expect(mockedApi.readFileForEdit.mock.calls.length).toBe(callsBefore + 1)
   })
 
   it("reloadOpenFileBackground is a no-op when the path is not open", async () => {
@@ -981,10 +1175,10 @@ function ApplyExternalReloadProbe({
       <button onClick={() => updateActiveFileContent("dirty-local")}>
         edit
       </button>
-      <button onClick={() => markTabsStale("a.ts")}>stale-a</button>
+      <button onClick={() => markTabsStale("/repo/a.ts")}>stale-a</button>
       <button
         onClick={() =>
-          void applyExternalReload("a.ts", {
+          void applyExternalReload("/repo/a.ts", {
             path: "a.ts",
             content: "ext-content",
             etag: "ext-etag",
@@ -998,7 +1192,7 @@ function ApplyExternalReloadProbe({
       </button>
       <button
         onClick={() =>
-          void applyExternalReload("missing.ts", {
+          void applyExternalReload("/repo/missing.ts", {
             path: "missing.ts",
             content: "x",
             etag: "x",
@@ -1048,7 +1242,7 @@ describe("applyExternalReload prefetched-write semantics", () => {
       screen.getByText("apply-a").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.content).toBe("ext-content")
     expect(tabA?.etag).toBe("ext-etag")
     expect(tabA?.loading).toBe(false)
@@ -1089,14 +1283,14 @@ describe("applyExternalReload prefetched-write semantics", () => {
     await act(async () => {
       screen.getByText("open-b").click()
     })
-    expect(snap.activeId).toBe("file:b.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/b.ts"))
 
     await act(async () => {
       screen.getByText("apply-a").click()
     })
 
-    expect(snap.activeId).toBe("file:b.ts")
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    expect(snap.activeId).toBe(fileTabId("/repo/b.ts"))
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.content).toBe("ext-content")
   })
 
@@ -1128,20 +1322,29 @@ describe("applyExternalReload prefetched-write semantics", () => {
       screen.getByText("apply-a").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.content).toBe("dirty-local")
   })
 
   it("clears stale=true on a successful apply", async () => {
-    mockedApi.readFileForEdit.mockResolvedValueOnce({
-      path: "a.ts",
-      content: "a-v1",
-      etag: "ea1",
-      mtime_ms: 1,
-      readonly: false,
-      line_ending: "lf",
-    })
+    mockedApi.readFileForEdit
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "a-v1",
+        etag: "ea1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+      .mockResolvedValueOnce({
+        path: "b.ts",
+        content: "b-v1",
+        etag: "eb1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
 
     let snap: ApplyExternalProbeSnapshot = { activeId: null, tabs: [] }
     render(
@@ -1150,19 +1353,26 @@ describe("applyExternalReload prefetched-write semantics", () => {
       </WorkspaceProvider>
     )
 
+    // A must be a BACKGROUND tab when marked stale — an active clean
+    // stale tab is auto-reloaded by the watcher before apply could run.
     await act(async () => {
       screen.getByText("open-a").click()
     })
     await act(async () => {
+      screen.getByText("open-b").click()
+    })
+    await act(async () => {
       screen.getByText("stale-a").click()
     })
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.stale).toBe(true)
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.stale).toBe(
+      true
+    )
 
     await act(async () => {
       screen.getByText("apply-a").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.stale).toBe(false)
     expect(tabA?.content).toBe("ext-content")
   })
@@ -1225,10 +1435,12 @@ function RejectFileTabProbe({
       <button onClick={() => updateActiveFileContent("dirty-local")}>
         edit
       </button>
-      <button onClick={() => rejectFileTab("a.ts", "ENOENT: file removed")}>
+      <button
+        onClick={() => rejectFileTab("/repo/a.ts", "ENOENT: file removed")}
+      >
         reject-a
       </button>
-      <button onClick={() => rejectFileTab("missing.ts", "irrelevant")}>
+      <button onClick={() => rejectFileTab("/repo/missing.ts", "irrelevant")}>
         reject-missing
       </button>
     </div>
@@ -1269,7 +1481,7 @@ describe("rejectFileTab missing-on-disk semantics", () => {
       screen.getByText("reject-a").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.saveState).toBe("error")
     expect(tabA?.saveError).toBe("ENOENT: file removed")
     expect(tabA?.loading).toBe(false)
@@ -1310,7 +1522,7 @@ describe("rejectFileTab missing-on-disk semantics", () => {
       screen.getByText("reject-a").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.content).toBe("dirty-local")
     // saveError stays null — only the watcher's markTabsStale path is
@@ -1354,7 +1566,7 @@ function ApplyThenReloadProbe({
       <button onClick={() => void openFilePreview("a.ts")}>open-a</button>
       <button
         onClick={() =>
-          void applyExternalReload("a.ts", {
+          void applyExternalReload("/repo/a.ts", {
             path: "a.ts",
             content: "ext-content",
             etag: "ext-etag",
@@ -1423,9 +1635,9 @@ describe("applyExternalReload does not block subsequent reloads on slow git base
       screen.getByText("apply-a").click()
     })
     // Content was written from the prefetched payload despite hung git.
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.content).toBe(
-      "ext-content"
-    )
+    expect(
+      snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.content
+    ).toBe("ext-content")
 
     // Foreground reload — must fire a second readFileForEdit, not be
     // deduplicated by a lingering in-flight marker from applyExternalReload.
@@ -1485,7 +1697,7 @@ function ApplyEditRaceProbe({
           // would silently clobber that edit unless its updater performs
           // an atomic isDirty re-check.
           updateActiveFileContent("dirty-local")
-          void applyExternalReload("a.ts", {
+          void applyExternalReload("/repo/a.ts", {
             path: "a.ts",
             content: "ext-content",
             etag: "ext-etag",
@@ -1499,7 +1711,7 @@ function ApplyEditRaceProbe({
       </button>
       <button
         onClick={() =>
-          void applyExternalReload("a.ts", {
+          void applyExternalReload("/repo/a.ts", {
             path: "a.ts",
             content: "ext-content",
             etag: "ext-etag",
@@ -1544,7 +1756,7 @@ function RejectEditRaceProbe({
           // queued updater is rejectFileTab — must also gate on
           // isDirty INSIDE the updater to avoid clobbering the edit.
           updateActiveFileContent("dirty-local")
-          rejectFileTab("a.ts", "boom")
+          rejectFileTab("/repo/a.ts", "boom")
         }}
       >
         edit-and-reject
@@ -1586,7 +1798,7 @@ describe("atomic dirty guard in functional updaters", () => {
       screen.getByText("edit-and-apply").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.content).toBe("dirty-local")
     // etag stays at the pre-apply value — proof that the apply was
@@ -1619,7 +1831,7 @@ describe("atomic dirty guard in functional updaters", () => {
       screen.getByText("edit-and-reject").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.content).toBe("dirty-local")
     expect(tabA?.saveState).not.toBe("error")
@@ -1656,7 +1868,7 @@ describe("atomic dirty guard in functional updaters", () => {
       screen.getByText("edit-and-apply").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.stale).toBe(true)
   })
@@ -1693,7 +1905,7 @@ describe("atomic dirty guard in functional updaters", () => {
       screen.getByText("edit-and-reject").click()
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.isDirty).toBe(true)
     expect(tabA?.stale).toBe(true)
   })
@@ -1741,7 +1953,9 @@ describe("applyExternalReload git base does not stale-write after close+reopen",
       screen.getByText("apply-a").click()
     })
     // Tab now has etag "ext-etag" (from apply-a's hardcoded fetched).
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.etag).toBe("ext-etag")
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.etag).toBe(
+      "ext-etag"
+    )
 
     // Close the tab; the stale git fetch is still pending.
     await act(async () => {
@@ -1765,14 +1979,14 @@ describe("applyExternalReload git base does not stale-write after close+reopen",
     await act(async () => {
       screen.getByText("open-a").click()
     })
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.etag).toBe(
+    expect(snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.etag).toBe(
       "etag-different"
     )
     // Sanity: reopen did not inherit a gitBaseContent (its own git path
     // was skipped via gitIsTracked → false).
-    expect(snap.tabs.find((t) => t.id === "file:a.ts")?.gitBaseContent).toBe(
-      undefined
-    )
+    expect(
+      snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.gitBaseContent
+    ).toBe(undefined)
 
     // Resolve the dangling git fetch from the FIRST (closed) tab's apply.
     // It targets the same tabId but a different etag — must be rejected.
@@ -1780,7 +1994,7 @@ describe("applyExternalReload git base does not stale-write after close+reopen",
       resolveStaleGit!("stale-base")
     })
 
-    const tabA = snap.tabs.find((t) => t.id === "file:a.ts")
+    const tabA = snap.tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
     expect(tabA?.gitBaseContent).not.toBe("stale-base")
     expect(tabA?.gitBaseContent).toBe(undefined)
   })
@@ -1806,7 +2020,7 @@ describe("WorkspaceProvider office auto-preview", () => {
 
     expect(screen.getByTestId("file-tab-count")).toHaveTextContent("1")
     expect(screen.getByTestId("active-file-tab")).toHaveTextContent(
-      "file:report.pptx"
+      fileTabId("/repo/report.pptx")
     )
     expect(screen.getByTestId("active-pane")).toHaveTextContent("files")
     expect(screen.getByTestId("mode")).toHaveTextContent("fusion")
@@ -1846,5 +2060,1053 @@ describe("WorkspaceProvider office auto-preview", () => {
 
     expect(screen.getByTestId("file-tab-count")).toHaveTextContent("0")
     expect(screen.getByTestId("active-pane")).toHaveTextContent("conversation")
+  })
+})
+
+describe("context slice render isolation", () => {
+  // The whole point of the three-way context split: fileTabs churn
+  // (keystrokes, watcher reloads) must not re-render components that only
+  // subscribe to actions (conversation path) or view (layout chrome).
+  // Render counting goes through an `onRender` callback (same pattern as
+  // the `onCapture` probes above) — direct module-scope mutation inside a
+  // component body trips react-hooks/immutability.
+  const renderCounts = { actions: 0, view: 0, fileTabs: 0 }
+
+  function ActionsProbe({ onRender }: { onRender: () => void }) {
+    onRender()
+    const { openSessionFileDiff, updateActiveFileContent } =
+      useWorkspaceActions()
+    return (
+      <div>
+        <button
+          onClick={() => openSessionFileDiff("src/a.ts", "diff --git a", "T1")}
+        >
+          slice-open-a
+        </button>
+        <button
+          onClick={() => openSessionFileDiff("src/b.ts", "diff --git b", "T1")}
+        >
+          slice-open-b
+        </button>
+        <button onClick={() => updateActiveFileContent("typed")}>
+          slice-edit
+        </button>
+      </div>
+    )
+  }
+
+  function ViewProbe({ onRender }: { onRender: () => void }) {
+    onRender()
+    const { mode } = useWorkspaceView()
+    return <output data-testid="slice-mode">{mode}</output>
+  }
+
+  function FileTabsProbe({ onRender }: { onRender: () => void }) {
+    onRender()
+    const { fileTabs } = useWorkspaceFileTabs()
+    return <output data-testid="slice-tab-count">{fileTabs.length}</output>
+  }
+
+  const countActions = () => {
+    renderCounts.actions += 1
+  }
+  const countView = () => {
+    renderCounts.view += 1
+  }
+  const countFileTabs = () => {
+    renderCounts.fileTabs += 1
+  }
+
+  beforeEach(() => {
+    renderCounts.actions = 0
+    renderCounts.view = 0
+    renderCounts.fileTabs = 0
+  })
+
+  it("keeps actions/view consumers un-rendered when fileTabs change within fusion mode", async () => {
+    render(
+      <WorkspaceProvider>
+        <ActionsProbe onRender={countActions} />
+        <ViewProbe onRender={countView} />
+        <FileTabsProbe onRender={countFileTabs} />
+      </WorkspaceProvider>
+    )
+
+    // First open flips mode conversation→fusion, so the view consumer is
+    // expected to render once more here.
+    await act(async () => {
+      screen.getByText("slice-open-a").click()
+    })
+    expect(screen.getByTestId("slice-mode")).toHaveTextContent("fusion")
+    expect(screen.getByTestId("slice-tab-count")).toHaveTextContent("1")
+
+    const actionsBefore = renderCounts.actions
+    const viewBefore = renderCounts.view
+    const fileTabsBefore = renderCounts.fileTabs
+
+    // Second open mutates fileTabs but neither mode (stays fusion) nor
+    // activePane (stays files) — only the fileTabs consumer may render.
+    await act(async () => {
+      screen.getByText("slice-open-b").click()
+    })
+    expect(screen.getByTestId("slice-tab-count")).toHaveTextContent("2")
+    expect(renderCounts.actions).toBe(actionsBefore)
+    expect(renderCounts.view).toBe(viewBefore)
+    expect(renderCounts.fileTabs).toBeGreaterThan(fileTabsBefore)
+  })
+
+  it("keeps actions/view consumers un-rendered on per-keystroke content updates", async () => {
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "a.ts",
+      content: "v1",
+      etag: "e1",
+      mtime_ms: 1,
+      readonly: false,
+      line_ending: "lf",
+    })
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+
+    function OpenFileProbe() {
+      const { openFilePreview } = useWorkspaceActions()
+      return (
+        <button onClick={() => void openFilePreview("a.ts")}>
+          slice-open-file
+        </button>
+      )
+    }
+
+    render(
+      <WorkspaceProvider>
+        <ActionsProbe onRender={countActions} />
+        <ViewProbe onRender={countView} />
+        <FileTabsProbe onRender={countFileTabs} />
+        <OpenFileProbe />
+      </WorkspaceProvider>
+    )
+
+    await act(async () => {
+      screen.getByText("slice-open-file").click()
+    })
+    expect(screen.getByTestId("slice-tab-count")).toHaveTextContent("1")
+
+    const actionsBefore = renderCounts.actions
+    const viewBefore = renderCounts.view
+
+    // Simulates the editor's onChange — the highest-frequency fileTabs write.
+    await act(async () => {
+      screen.getByText("slice-edit").click()
+    })
+
+    expect(renderCounts.actions).toBe(actionsBefore)
+    expect(renderCounts.view).toBe(viewBefore)
+  })
+})
+
+interface DecoupleSnapshot {
+  activeId: string | null
+  tabs: Array<{
+    id: string
+    folderId: number | null
+    content: string
+    isDirty: boolean
+    stale: boolean
+  }>
+}
+
+function DecoupleProbe({
+  onCapture,
+}: {
+  onCapture: (snapshot: DecoupleSnapshot) => void
+}) {
+  const {
+    openFilePreview,
+    fileTabs,
+    activeFileTabId,
+    updateActiveFileContent,
+    saveActiveFile,
+    switchFileTab,
+  } = useWorkspaceContext()
+  onCapture({
+    activeId: activeFileTabId,
+    tabs: fileTabs.map((tab) => ({
+      id: tab.id,
+      folderId: tab.folderId,
+      content: tab.content,
+      isDirty: Boolean(tab.isDirty),
+      stale: Boolean(tab.stale),
+    })),
+  })
+  return (
+    <div>
+      <button onClick={() => void openFilePreview("a.ts")}>open-a-f1</button>
+      <button onClick={() => void openFilePreview("a.ts", { folderId: 2 })}>
+        open-a-f2
+      </button>
+      <button onClick={() => updateActiveFileContent("dirty-local")}>
+        edit
+      </button>
+      <button onClick={() => void saveActiveFile()}>save</button>
+      <button onClick={() => switchFileTab(fileTabId("/repo2/a.ts"))}>
+        switch-a-f2
+      </button>
+    </div>
+  )
+}
+
+describe("file tabs decoupled from the active folder", () => {
+  beforeEach(() => {
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+    mockedApi.saveFileContent.mockReset()
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+    // Distinguishable content per folder root so routing is observable.
+    mockedApi.readFileForEdit.mockImplementation((root: string) =>
+      Promise.resolve({
+        path: "a.ts",
+        content: root === "/repo2" ? "from-repo2" : "from-repo1",
+        etag: root === "/repo2" ? "e2" : "e1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+    )
+  })
+
+  function renderDecouple() {
+    let snap: DecoupleSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <DecoupleProbe onCapture={(s) => (snap = s)} />
+      </WorkspaceProvider>
+    )
+    return () => snap
+  }
+
+  it("keeps open tabs (content and identity) across an active-folder switch", async () => {
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0]).toMatchObject({
+      id: fileTabId("/repo/a.ts"),
+      content: "from-repo1",
+    })
+
+    await act(async () => {
+      foldersMock.setActiveFolderId(2)
+    })
+
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0]).toMatchObject({
+      id: fileTabId("/repo/a.ts"),
+      // File tabs are folder-free: identity is the absolute path.
+      folderId: null,
+      content: "from-repo1",
+    })
+    expect(snap().activeId).toBe(fileTabId("/repo/a.ts"))
+  })
+
+  it("opens the same relative path from two folders as two independent tabs", async () => {
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+
+    expect(snap().tabs.map((t) => t.id)).toEqual([
+      fileTabId("/repo/a.ts"),
+      fileTabId("/repo2/a.ts"),
+    ])
+    expect(snap().tabs[0].content).toBe("from-repo1")
+    expect(snap().tabs[1].content).toBe("from-repo2")
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledWith("/repo", "a.ts")
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledWith("/repo2", "a.ts")
+  })
+
+  it("saves a folder-2 tab through folder 2's root while folder 1 is active", async () => {
+    mockedApi.saveFileContent.mockResolvedValue({
+      path: "a.ts",
+      etag: "e2-saved",
+      mtime_ms: 2,
+      readonly: false,
+      line_ending: "lf",
+    })
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    expect(snap().activeId).toBe(fileTabId("/repo2/a.ts"))
+
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    expect(snap().tabs[0].isDirty).toBe(true)
+
+    // Active WORKSPACE folder stays 1 — the save must still route to the
+    // tab's own folder root.
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+
+    expect(mockedApi.saveFileContent).toHaveBeenCalledTimes(1)
+    expect(mockedApi.saveFileContent.mock.calls[0][0]).toBe("/repo2")
+    expect(mockedApi.saveFileContent.mock.calls[0][1]).toBe("a.ts")
+    expect(mockedApi.saveFileContent.mock.calls[0][2]).toBe("dirty-local")
+  })
+
+  it("keeps every tab open when its folder is removed — the files still exist", async () => {
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    expect(snap().tabs).toHaveLength(2)
+    expect(workspaceStoreMock.acquiredCount("/repo2")).toBe(1)
+
+    await act(async () => {
+      foldersMock.setAllFolders([
+        { id: 1, path: "/repo", name: "repo", color: "inherit" },
+      ])
+    })
+
+    // Tab identity is the absolute path — removing the workspace folder
+    // does not delete the file, so the tab survives; only its live watch
+    // subscription (derived from the folder) is released.
+    expect(snap().tabs).toHaveLength(2)
+    expect(snap().activeId).toBe(fileTabId("/repo2/a.ts"))
+    expect(workspaceStoreMock.acquiredCount("/repo2")).toBe(0)
+    expect(workspaceStoreMock.acquiredCount("/repo")).toBe(1)
+  })
+
+  it("keeps tabs across a transient empty folder list (cold start / refresh)", async () => {
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    expect(snap().tabs).toHaveLength(1)
+
+    await act(async () => {
+      foldersMock.setHydrated(false)
+      foldersMock.setAllFolders([])
+    })
+    expect(snap().tabs).toHaveLength(1)
+
+    await act(async () => {
+      foldersMock.setAllFolders([
+        { id: 1, path: "/repo", name: "repo", color: "inherit" },
+        { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+      ])
+      foldersMock.setHydrated(true)
+    })
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0].id).toBe(fileTabId("/repo/a.ts"))
+  })
+
+  it("keeps a dirty tab of a removed folder editable and pre-verifies its next save", async () => {
+    mockedApi.saveFileContent.mockResolvedValue({
+      path: "a.ts",
+      etag: "e2-saved",
+      mtime_ms: 2,
+      readonly: false,
+      line_ending: "lf",
+    })
+    const snap = renderDecouple()
+
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    expect(snap().tabs[0]).toMatchObject({
+      id: fileTabId("/repo2/a.ts"),
+      isDirty: true,
+    })
+
+    await act(async () => {
+      foldersMock.setAllFolders([
+        { id: 1, path: "/repo", name: "repo", color: "inherit" },
+      ])
+    })
+
+    // Unsaved edits survive untouched — no orphan wipe, no stale flag.
+    expect(snap().tabs[0]).toMatchObject({
+      id: fileTabId("/repo2/a.ts"),
+      isDirty: true,
+      content: "dirty-local",
+    })
+
+    // The tab is now UNWATCHED (outside every registered folder), so its
+    // save must pre-verify against disk first. The mock keeps reporting
+    // the original etag, so the save proceeds through (dirname, basename).
+    const readsBefore = mockedApi.readFileForEdit.mock.calls.length
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+    expect(mockedApi.readFileForEdit.mock.calls.length).toBe(readsBefore + 1)
+    expect(mockedApi.saveFileContent).toHaveBeenCalledTimes(1)
+    expect(mockedApi.saveFileContent.mock.calls[0][0]).toBe("/repo2")
+    expect(mockedApi.saveFileContent.mock.calls[0][1]).toBe("a.ts")
+  })
+})
+
+function ConflictProbe() {
+  const { externalConflict, dismissExternalConflict } =
+    useWorkspaceExternalConflict()
+  return (
+    <div>
+      <output data-testid="conflict-head">
+        {externalConflict ? externalConflict.path : "none"}
+      </output>
+      <button onClick={dismissExternalConflict}>dismiss-conflict</button>
+    </div>
+  )
+}
+
+function WatcherProbe({
+  onCapture,
+}: {
+  onCapture: (snapshot: DecoupleSnapshot) => void
+}) {
+  const {
+    openFilePreview,
+    fileTabs,
+    activeFileTabId,
+    updateActiveFileContent,
+    saveActiveFile,
+    markTabsStale,
+  } = useWorkspaceContext()
+  onCapture({
+    activeId: activeFileTabId,
+    tabs: fileTabs.map((tab) => ({
+      id: tab.id,
+      folderId: tab.folderId,
+      content: tab.content,
+      isDirty: Boolean(tab.isDirty),
+      stale: Boolean(tab.stale),
+    })),
+  })
+  return (
+    <div>
+      <button onClick={() => void openFilePreview("a.ts")}>open-a-f1</button>
+      <button onClick={() => void openFilePreview("a.ts", { folderId: 2 })}>
+        open-a-f2
+      </button>
+      <button onClick={() => updateActiveFileContent("dirty-local")}>
+        edit
+      </button>
+      <button onClick={() => void saveActiveFile()}>save</button>
+      <button onClick={() => markTabsStale("/repo/a.ts")}>stale-a-f1</button>
+    </div>
+  )
+}
+
+describe("provider tab watcher (per-folder streams, lazy staleness)", () => {
+  beforeEach(() => {
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+    mockedApi.saveFileContent.mockReset()
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+    mockedApi.readFileForEdit.mockImplementation((root: string) =>
+      Promise.resolve({
+        path: "a.ts",
+        content: root === "/repo2" ? "from-repo2" : "from-repo1",
+        etag: root === "/repo2" ? "e2" : "e1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+    )
+  })
+
+  function renderWatcher() {
+    let snap: DecoupleSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <WatcherProbe onCapture={(s) => (snap = s)} />
+        <ConflictProbe />
+      </WorkspaceProvider>
+    )
+    return () => snap
+  }
+
+  it("acquires one refcount per folder with open tabs and releases on close, without keystroke churn", async () => {
+    renderWatcher()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    expect(workspaceStoreMock.acquiredCount("/repo")).toBe(1)
+    const callsAfterOpen = workspaceStoreMock.acquireCalls("/repo")
+
+    // Keystrokes mutate fileTabs every render — the watch signature is
+    // unchanged, so the subscription must NOT be rebuilt (blocker #13).
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    expect(workspaceStoreMock.acquireCalls("/repo")).toBe(callsAfterOpen)
+
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    expect(workspaceStoreMock.acquiredCount("/repo")).toBe(1)
+    expect(workspaceStoreMock.acquiredCount("/repo2")).toBe(1)
+  })
+
+  it("marks a background folder's tab stale on its envelope without any disk read", async () => {
+    const snap = renderWatcher()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    expect(snap().activeId).toBe(fileTabId("/repo2/a.ts"))
+    const readsBefore = mockedApi.readFileForEdit.mock.calls.length
+
+    await act(async () => {
+      workspaceStoreMock.emitRoot("/repo", ["a.ts"])
+    })
+
+    const tabF1 = snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
+    expect(tabF1?.stale).toBe(true)
+    expect(tabF1?.content).toBe("from-repo1")
+    // The lazy pillar: zero reads for background tabs.
+    expect(mockedApi.readFileForEdit.mock.calls.length).toBe(readsBefore)
+  })
+
+  it("eagerly reconciles the ACTIVE tab on its folder's envelope (clean → in-place reload)", async () => {
+    const snap = renderWatcher()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    expect(snap().tabs[0]?.content).toBe("from-repo1")
+
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "a.ts",
+      content: "external-v2",
+      etag: "e-ext",
+      mtime_ms: 2,
+      readonly: false,
+      line_ending: "lf",
+    })
+
+    await act(async () => {
+      workspaceStoreMock.emitRoot("/repo", ["a.ts"])
+    })
+
+    const tabA = snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
+    expect(tabA?.content).toBe("external-v2")
+    expect(tabA?.stale).toBe(false)
+    expect(snap().activeId).toBe(fileTabId("/repo/a.ts"))
+  })
+
+  it("queues a conflict for the ACTIVE dirty tab instead of clobbering the buffer", async () => {
+    const snap = renderWatcher()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "a.ts",
+      content: "disk-v2",
+      etag: "e-ext",
+      mtime_ms: 2,
+      readonly: false,
+      line_ending: "lf",
+    })
+
+    await act(async () => {
+      workspaceStoreMock.emitRoot("/repo", ["a.ts"])
+    })
+
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("/repo/a.ts")
+    const tabA = snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
+    expect(tabA?.content).toBe("dirty-local")
+    expect(tabA?.isDirty).toBe(true)
+  })
+
+  it("treats a resync_hint as a full sweep for that folder only", async () => {
+    const snap = renderWatcher()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("open-a-f2").click()
+    })
+    expect(snap().activeId).toBe(fileTabId("/repo2/a.ts"))
+
+    await act(async () => {
+      workspaceStoreMock.emitRoot("/repo", [], "resync_hint")
+    })
+
+    expect(
+      snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))?.stale
+    ).toBe(true)
+    // The other folder's tab is untouched — sweeps are per-stream.
+    expect(
+      snap().tabs.find((t) => t.id === fileTabId("/repo2/a.ts"))?.stale
+    ).toBe(false)
+  })
+})
+
+describe("stale-aware save guard (all write paths funnel through saveFileTab)", () => {
+  beforeEach(() => {
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+    mockedApi.saveFileContent.mockReset()
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+  })
+
+  function renderGuard() {
+    let snap: DecoupleSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <WatcherProbe onCapture={(s) => (snap = s)} />
+        <ConflictProbe />
+      </WorkspaceProvider>
+    )
+    return () => snap
+  }
+
+  it("refuses to save a stale dirty tab whose disk diverged, surfacing the conflict", async () => {
+    // Open (etag e1) — later reads keep reporting a DIVERGED disk (e-div).
+    mockedApi.readFileForEdit
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "v1",
+        etag: "e1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+      .mockResolvedValue({
+        path: "a.ts",
+        content: "disk-v2",
+        etag: "e-div",
+        mtime_ms: 2,
+        readonly: false,
+        line_ending: "lf",
+      })
+    const snap = renderGuard()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    await act(async () => {
+      screen.getByText("stale-a-f1").click()
+    })
+
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+
+    // Blind write refused: no saveFileContent, buffer intact, conflict up.
+    expect(mockedApi.saveFileContent).not.toHaveBeenCalled()
+    const tabA = snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
+    expect(tabA?.content).toBe("dirty-local")
+    expect(tabA?.isDirty).toBe(true)
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("/repo/a.ts")
+  })
+
+  it("proceeds with the save when the stale flag proves spurious (etag equal)", async () => {
+    // Disk never changed: every read reports etag e1.
+    mockedApi.readFileForEdit.mockResolvedValue({
+      path: "a.ts",
+      content: "v1",
+      etag: "e1",
+      mtime_ms: 1,
+      readonly: false,
+      line_ending: "lf",
+    })
+    mockedApi.saveFileContent.mockResolvedValue({
+      path: "a.ts",
+      etag: "e-saved",
+      mtime_ms: 3,
+      readonly: false,
+      line_ending: "lf",
+    })
+    const snap = renderGuard()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    await act(async () => {
+      screen.getByText("stale-a-f1").click()
+    })
+
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+
+    expect(mockedApi.saveFileContent).toHaveBeenCalledTimes(1)
+    const tabA = snap().tabs.find((t) => t.id === fileTabId("/repo/a.ts"))
+    expect(tabA?.isDirty).toBe(false)
+    expect(tabA?.stale).toBe(false)
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("none")
+  })
+
+  it("re-surfaces the conflict when the user saves again after dismissing the dialog", async () => {
+    mockedApi.readFileForEdit
+      .mockResolvedValueOnce({
+        path: "a.ts",
+        content: "v1",
+        etag: "e1",
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+      .mockResolvedValue({
+        path: "a.ts",
+        content: "disk-v2",
+        etag: "e-div",
+        mtime_ms: 2,
+        readonly: false,
+        line_ending: "lf",
+      })
+    renderGuard()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    await act(async () => {
+      screen.getByText("stale-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("/repo/a.ts")
+
+    // User closes the dialog without resolving.
+    await act(async () => {
+      screen.getByText("dismiss-conflict").click()
+    })
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("none")
+
+    // Saving again is still refused (disk unchanged, still diverged) —
+    // and the dialog MUST come back: a silent no-op would strand the tab.
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+    expect(mockedApi.saveFileContent).not.toHaveBeenCalled()
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent("/repo/a.ts")
+  })
+})
+
+function AbsolutePathProbe({
+  onCapture,
+}: {
+  onCapture: (snapshot: DecoupleSnapshot) => void
+}) {
+  const {
+    openFilePreview,
+    fileTabs,
+    activeFileTabId,
+    updateActiveFileContent,
+    saveActiveFile,
+    switchFileTab,
+  } = useWorkspaceContext()
+  onCapture({
+    activeId: activeFileTabId,
+    tabs: fileTabs.map((tab) => ({
+      id: tab.id,
+      folderId: tab.folderId,
+      content: tab.content,
+      isDirty: Boolean(tab.isDirty),
+      stale: Boolean(tab.stale),
+    })),
+  })
+  return (
+    <div>
+      <button onClick={() => void openFilePreview("/outside/notes/plan.md")}>
+        open-outside
+      </button>
+      <button onClick={() => void openFilePreview("~/notes/n.md")}>
+        open-home
+      </button>
+      <button onClick={() => void openFilePreview("/repo2/src/x.ts")}>
+        open-abs-f2
+      </button>
+      <button onClick={() => void openFilePreview("a.ts")}>open-a-f1</button>
+      <button onClick={() => void openFilePreview("/repo/src/../a.ts")}>
+        open-alias-a
+      </button>
+      <button onClick={() => void openFilePreview("c:/repo/src/a.ts")}>
+        open-win-alias
+      </button>
+      <button onClick={() => void openFilePreview("src/i.ts", { folderId: 3 })}>
+        open-nested-rel
+      </button>
+      <button
+        onClick={() => void openFilePreview("/repo/packages/core/src/i.ts")}
+      >
+        open-nested-abs
+      </button>
+      <button onClick={() => updateActiveFileContent("dirty-local")}>
+        edit
+      </button>
+      <button onClick={() => void saveActiveFile()}>save</button>
+      <button
+        onClick={() => switchFileTab(fileTabId("/outside/notes/plan.md"))}
+      >
+        switch-outside
+      </button>
+      <button onClick={() => switchFileTab(fileTabId("/repo/a.ts"))}>
+        switch-a-f1
+      </button>
+    </div>
+  )
+}
+
+describe("unified absolute-path file tabs (outside-workspace opens)", () => {
+  beforeEach(() => {
+    mockedApi.getHomeDirectory.mockReset()
+    mockedApi.readFileForEdit.mockReset()
+    mockedApi.gitIsTracked.mockReset()
+    mockedApi.gitShowFile.mockReset()
+    mockedApi.saveFileContent.mockReset()
+    mockedApi.gitIsTracked.mockResolvedValue(false)
+    resetHomeDirCacheForTests()
+    mockedApi.readFileForEdit.mockImplementation((root: string, rel: string) =>
+      Promise.resolve({
+        path: rel,
+        content: `content-of ${root}/${rel}`,
+        etag: `etag ${root}/${rel}`,
+        mtime_ms: 1,
+        readonly: false,
+        line_ending: "lf",
+      })
+    )
+  })
+
+  function renderAbsolute() {
+    let snap: DecoupleSnapshot = { activeId: null, tabs: [] }
+    render(
+      <WorkspaceProvider>
+        <AbsolutePathProbe onCapture={(s) => (snap = s)} />
+        <ConflictProbe />
+      </WorkspaceProvider>
+    )
+    return () => snap
+  }
+
+  it("opens a file outside every folder via (dirname, basename), unwatched and git-free", async () => {
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-outside").click()
+    })
+
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0]).toMatchObject({
+      id: fileTabId("/outside/notes/plan.md"),
+      folderId: null,
+      content: "content-of /outside/notes/plan.md",
+    })
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledWith(
+      "/outside/notes",
+      "plan.md"
+    )
+    // No owning folder → no git context and no FS watch on the directory.
+    expect(mockedApi.gitIsTracked).not.toHaveBeenCalled()
+    expect(workspaceStoreMock.acquiredCount("/outside/notes")).toBe(0)
+  })
+
+  it("expands ~ against the backend home directory", async () => {
+    mockedApi.getHomeDirectory.mockResolvedValue("/Users/me")
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-home").click()
+    })
+
+    expect(mockedApi.getHomeDirectory).toHaveBeenCalledTimes(1)
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledWith(
+      "/Users/me/notes",
+      "n.md"
+    )
+    expect(snap().tabs[0].id).toBe(fileTabId("/Users/me/notes/n.md"))
+  })
+
+  it("derives the owning folder for an absolute path: git via the folder root, watch on it", async () => {
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-abs-f2").click()
+    })
+
+    // IO is uniform (dirname, basename); the git base comes from the
+    // OWNING registered folder, and the watch subscribes to its root.
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledWith("/repo2/src", "x.ts")
+    expect(mockedApi.gitIsTracked).toHaveBeenCalledWith("/repo2", "src/x.ts")
+    expect(workspaceStoreMock.acquiredCount("/repo2")).toBe(1)
+    expect(snap().tabs[0].id).toBe(fileTabId("/repo2/src/x.ts"))
+  })
+
+  it("collapses dot-segment aliases of one file into a single tab", async () => {
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+    await act(async () => {
+      screen.getByText("open-alias-a").click()
+    })
+
+    // "/repo/src/../a.ts" IS "/repo/a.ts" — one tab, one read.
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0].id).toBe(fileTabId("/repo/a.ts"))
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it("canonicalizes root casing through the owning folder (Windows aliases)", async () => {
+    foldersMock.setAllFolders([
+      { id: 9, path: "C:/Repo", name: "win", color: "inherit" },
+    ])
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-win-alias").click()
+    })
+
+    // The agent echoed "c:/repo/…" but the registered folder is "C:/Repo" —
+    // the tab identity takes the folder's casing, which is exactly what a
+    // watch event (folder root + relative path) joins back to.
+    expect(snap().tabs[0].id).toBe(fileTabId("C:/Repo/src/a.ts"))
+    expect(workspaceStoreMock.acquiredCount("C:/Repo")).toBe(1)
+  })
+
+  it("dedupes the same physical file opened through a nested folder and an absolute path", async () => {
+    foldersMock.setAllFolders([
+      { id: 1, path: "/repo", name: "repo", color: "inherit" },
+      { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+      { id: 3, path: "/repo/packages/core", name: "core", color: "inherit" },
+    ])
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-nested-rel").click()
+    })
+    await act(async () => {
+      screen.getByText("open-nested-abs").click()
+    })
+
+    // One physical file → one tab, regardless of the entrance.
+    expect(snap().tabs).toHaveLength(1)
+    expect(snap().tabs[0].id).toBe(fileTabId("/repo/packages/core/src/i.ts"))
+    expect(mockedApi.readFileForEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it("pre-verifies every save of an unwatched file and surfaces divergence as a conflict", async () => {
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-outside").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+
+    // Disk moved on since the open — the pre-verify read reports a
+    // different etag, so the blind write must be refused.
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "plan.md",
+      content: "disk-v2",
+      etag: "e-div",
+      mtime_ms: 2,
+      readonly: false,
+      line_ending: "lf",
+    })
+    await act(async () => {
+      screen.getByText("save").click()
+    })
+
+    expect(mockedApi.saveFileContent).not.toHaveBeenCalled()
+    expect(screen.getByTestId("conflict-head")).toHaveTextContent(
+      "/outside/notes/plan.md"
+    )
+    expect(snap().tabs[0]).toMatchObject({
+      isDirty: true,
+      content: "dirty-local",
+    })
+  })
+
+  it("re-verifies an unwatched tab on activation transitions, never on keystrokes", async () => {
+    const snap = renderAbsolute()
+
+    await act(async () => {
+      screen.getByText("open-outside").click()
+    })
+    const readsAfterOpen = mockedApi.readFileForEdit.mock.calls.length
+    // The just-opened tab is active — the activation pass must NOT
+    // immediately re-read what openFilePreview just loaded.
+    expect(readsAfterOpen).toBe(1)
+
+    await act(async () => {
+      screen.getByText("open-a-f1").click()
+    })
+
+    // Disk changed while the outside tab sat inactive. Re-activating it
+    // triggers exactly one freshness read and absorbs the new content.
+    mockedApi.readFileForEdit.mockResolvedValueOnce({
+      path: "plan.md",
+      content: "outside-v2",
+      etag: "e-v2",
+      mtime_ms: 3,
+      readonly: false,
+      line_ending: "lf",
+    })
+    await act(async () => {
+      screen.getByText("switch-outside").click()
+    })
+
+    const outsideTab = snap().tabs.find(
+      (t) => t.id === fileTabId("/outside/notes/plan.md")
+    )
+    expect(outsideTab?.content).toBe("outside-v2")
+
+    // Keystroke re-renders on the same active tab must not re-read.
+    const readsAfterFreshness = mockedApi.readFileForEdit.mock.calls.length
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    await act(async () => {
+      screen.getByText("edit").click()
+    })
+    expect(mockedApi.readFileForEdit.mock.calls.length).toBe(
+      readsAfterFreshness
+    )
   })
 })

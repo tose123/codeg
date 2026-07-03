@@ -2230,7 +2230,6 @@
       "linkSafety": {
         "errorCannotOpen": "無法開啟本地檔案",
         "errorNoWorkspace": "目前沒有活躍的工作區資料夾。",
-        "errorOutsideWorkspace": "該檔案不在目前的工作區資料夾內。",
         "errorFailedOpen": "開啟本地檔案失敗",
         "errorFailedLink": "開啟連結失敗",
         "errorUnsupportedLinkProtocol": "不支援此連結協議。"

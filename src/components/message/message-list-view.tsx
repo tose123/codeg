@@ -267,13 +267,19 @@ function mergeConsecutiveAssistantTurns(
       result.push(buffer[0])
     } else {
       const allParts = buffer.flatMap((it) => it.group.parts)
+      // A goal run straddling these merged sub-turns is still live only if the
+      // final sub-turn is streaming; once it settles (stop / turn end / reload)
+      // the unfinished-run shimmer must stop. Mirror groupGoalRuns' per-turn
+      // isStreaming gate at the merge layer.
+      const mergedStreaming = buffer.some((it) => it.phase === "streaming")
       // Fold tool-groups straddling the turn boundary, then collapse runs of
       // single-poll delegation-status and background-task groups (each polling
       // round is its own turn) into one merged card.
       const mergedParts = groupGoalRuns(
         mergeAdjacentBackgroundTaskGroups(
           mergeAdjacentDelegationStatusGroups(mergeAdjacentToolGroups(allParts))
-        )
+        ),
+        mergedStreaming
       )
       const last = buffer[buffer.length - 1]
       const first = buffer[0]

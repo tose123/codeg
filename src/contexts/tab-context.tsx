@@ -14,7 +14,7 @@ import {
 import { useTranslations } from "next-intl"
 import { useAppWorkspace } from "@/contexts/app-workspace-context"
 import { useAcpActions } from "@/contexts/acp-connections-context"
-import { useWorkspaceContext } from "@/contexts/workspace-context"
+import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useSortedAvailableAgents } from "@/hooks/use-sorted-available-agents"
 import {
   getFolderConversation,

@@ -22,9 +22,23 @@
  * encoding each path segment so spaces / `#` / `?` / `%` can't corrupt the uri.
  * A POSIX path (leading `/`) yields `file://<encoded>`; anything else (a Windows
  * `C:\…` path) yields `file:///<encoded>` so the drive segment is encoded.
+ *
+ * A UNC path (`//server/share/…`) yields the canonical authority form
+ * `file://server/share/…` (host = server). Emitting `file:////…` instead
+ * would parse back with an EMPTY authority and a `//`-prefixed pathname —
+ * indistinguishable from a protocol-relative web url once re-serialized
+ * into chat markdown, so the reference would open as a web link.
  */
 export function buildFileUri(absolutePath: string): string {
   const normalized = absolutePath.replace(/\\/g, "/")
+  if (normalized.startsWith("//")) {
+    const encoded = normalized
+      .slice(2)
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")
+    return `file://${encoded}`
+  }
   const encoded = normalized.split("/").map(encodeURIComponent).join("/")
   return normalized.startsWith("/") ? `file://${encoded}` : `file:///${encoded}`
 }

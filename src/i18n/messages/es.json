@@ -2230,7 +2230,6 @@
       "linkSafety": {
         "errorCannotOpen": "No se puede abrir el archivo local",
         "errorNoWorkspace": "No hay ninguna carpeta de espacio de trabajo activa.",
-        "errorOutsideWorkspace": "El archivo está fuera de la carpeta del espacio de trabajo actual.",
         "errorFailedOpen": "Error al abrir el archivo local",
         "errorFailedLink": "Error al abrir el enlace",
         "errorUnsupportedLinkProtocol": "Este protocolo de enlace no es compatible."

@@ -21,10 +21,14 @@ const SANDBOX_TRUSTED = "allow-scripts allow-popups allow-forms allow-modals"
 
 export function HtmlPreview({
   tab,
-  folderPath,
+  rootPath,
 }: {
   tab: FileWorkspaceTab
-  folderPath: string | null
+  // Sub-resource resolution root: the owning workspace folder when the
+  // file sits inside one (so ../-style and root-relative references keep
+  // working), else the file's own directory — a natural sandbox for
+  // outside-workspace files. The tab path itself is absolute.
+  rootPath: string | null
 }) {
   const t = useTranslations("Folder.fileWorkspacePanel")
   const [inlined, setInlined] = useState<string | null>(null)
@@ -43,14 +47,17 @@ export function HtmlPreview({
 
   useEffect(() => {
     let cancelled = false
-    const root = folderPath ?? ""
-    const absFilePath = root && path ? `${root}/${path}` : null
+    const root = rootPath ?? ""
+    // The tab path IS the absolute file location; its directory anchors
+    // relative references, while `root` anchors root-relative ones and
+    // confines every read.
+    const absFilePath = path || null
     const fileDir = absFilePath ? absFilePath.replace(/\/[^/]*$/, "") : root
     inlineHtmlResources(content, {
       fileDir,
       folderPath: root,
       // The inliner hands us absolute, lexically in-root paths; convert to a
-      // workspace-relative path and read through the symlink-safe, confined
+      // root-relative path and read through the symlink-safe, confined
       // backend command (defense-in-depth over the lexical check).
       readFileBase64: (absPath) => {
         const r = root.replace(/\\/g, "/").replace(/\/+$/, "")
@@ -75,7 +82,7 @@ export function HtmlPreview({
     return () => {
       cancelled = true
     }
-  }, [content, path, folderPath])
+  }, [content, path, rootPath])
 
   const srcDoc = inlined != null ? withSandboxCsp(inlined, { trusted }) : ""
   const loading = inlined == null && error == null

@@ -50,7 +50,8 @@ import {
 import { GitCredentialProvider } from "@/contexts/git-credential-context"
 import {
   WorkspaceProvider,
-  useWorkspaceContext,
+  useWorkspaceActions,
+  useWorkspaceView,
 } from "@/contexts/workspace-context"
 import { RemoteConnectionGate } from "@/contexts/remote-connection-context"
 import { UpdateProvider } from "@/components/providers/update-provider"
@@ -59,6 +60,7 @@ import { TerminalPanel } from "@/components/terminal/terminal-panel"
 import { AuxPanel } from "@/components/layout/aux-panel"
 import { FileWorkspaceTabBar } from "@/components/files/file-workspace-tab-bar"
 import { FileWorkspacePanel } from "@/components/files/file-workspace-panel"
+import { ExternalConflictDialog } from "@/components/files/external-conflict-dialog"
 import { AppToaster } from "@/components/ui/app-toaster"
 import {
   DeepLinkBootstrap,
@@ -153,7 +155,8 @@ function resolvePanelSizeRange(
 }
 
 function WorkspaceContent({ children }: { children: React.ReactNode }) {
-  const { mode, setActivePane, filesMaximized } = useWorkspaceContext()
+  const { mode, filesMaximized } = useWorkspaceView()
+  const { setActivePane } = useWorkspaceActions()
   const panelGroupRef = useRef<ImperativePanelGroupHandle | null>(null)
   const fusionLayoutRef = useRef<[number, number]>(DEFAULT_FUSION_LAYOUT)
   const desiredLayoutRef = useRef<[number, number]>(DEFAULT_FUSION_LAYOUT)
@@ -306,7 +309,7 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
 }
 
 function MobileWorkspaceContent({ children }: { children: React.ReactNode }) {
-  const { mode, activePane } = useWorkspaceContext()
+  const { mode, activePane } = useWorkspaceView()
   const { isConversations } = useWorkbenchRoute()
 
   const showConversation =
@@ -881,6 +884,9 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
                         <TabKeysSync />
                         <DeepLinkBootstrap />
                         <PetFocusBridge />
+                        {/* Always mounted: external-change conflicts must be
+                            resolvable even with the aux file tree closed. */}
+                        <ExternalConflictDialog />
                         <SessionStatsProvider>
                           <SidebarProvider>
                             <AuxPanelProvider>

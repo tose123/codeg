@@ -15,8 +15,11 @@ import {
 import { useTranslations } from "next-intl"
 import { openPath } from "@/lib/platform"
 import { isHtmlPreviewable } from "@/lib/language-detect"
-import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useWorkspaceContext } from "@/contexts/workspace-context"
+import {
+  useWorkspaceActions,
+  useWorkspaceFileTabs,
+  useWorkspaceView,
+} from "@/contexts/workspace-context"
 import type { FileWorkspaceTab } from "@/contexts/workspace-context"
 import { useIsCoarsePointer } from "@/hooks/use-is-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -34,22 +37,18 @@ import {
 
 export function FileWorkspaceTabBar() {
   const t = useTranslations("Folder.fileWorkspace")
+  const { mode, activePane, filesMaximized } = useWorkspaceView()
+  const { fileTabs, activeFileTabId, previewFileTabIds } =
+    useWorkspaceFileTabs()
   const {
-    mode,
-    activePane,
-    fileTabs,
-    activeFileTabId,
     switchFileTab,
     closeFileTab,
     closeOtherFileTabs,
     closeAllFileTabs,
     reorderFileTabs,
-    previewFileTabIds,
     toggleFileTabPreview,
-    filesMaximized,
     toggleFilesMaximized,
-  } = useWorkspaceContext()
-  const { activeFolder: folder } = useActiveFolder()
+  } = useWorkspaceActions()
   const { shortcuts } = useShortcutSettings()
   const scrollRef = useRef<HTMLDivElement>(null)
   const isCoarsePointer = useIsCoarsePointer()
@@ -166,27 +165,25 @@ export function FileWorkspaceTabBar() {
             : ["pb-1.5", "[&::-webkit-scrollbar]:h-0"]
         )}
       >
-        {fileTabs.map((tab) => {
-          return (
-            <FileWorkspaceTabItem
-              key={tab.id}
-              tab={tab}
-              active={tab.id === activeFileTabId}
-              closeLabel={t("closeFileTab")}
-              closeText={t("close")}
-              closeOthersText={t("closeOthers")}
-              closeAllText={t("closeAll")}
-              isCoarsePointer={isCoarsePointer}
-              isTouchSorting={touchSortingTabId === tab.id}
-              onSwitch={switchFileTab}
-              onClose={closeFileTab}
-              onCloseOthers={closeOtherFileTabs}
-              onCloseAll={closeAllFileTabs}
-              onTouchSortingStart={setTouchSortingTabId}
-              onTouchSortingEnd={handleTouchSortingEnd}
-            />
-          )
-        })}
+        {fileTabs.map((tab) => (
+          <FileWorkspaceTabItem
+            key={tab.id}
+            tab={tab}
+            active={tab.id === activeFileTabId}
+            closeLabel={t("closeFileTab")}
+            closeText={t("close")}
+            closeOthersText={t("closeOthers")}
+            closeAllText={t("closeAll")}
+            isCoarsePointer={isCoarsePointer}
+            isTouchSorting={touchSortingTabId === tab.id}
+            onSwitch={switchFileTab}
+            onClose={closeFileTab}
+            onCloseOthers={closeOtherFileTabs}
+            onCloseAll={closeAllFileTabs}
+            onTouchSortingStart={setTouchSortingTabId}
+            onTouchSortingEnd={handleTouchSortingEnd}
+          />
+        ))}
       </Reorder.Group>
       {canPreview && activeFileTabId && (
         <button
@@ -206,11 +203,12 @@ export function FileWorkspaceTabBar() {
           )}
         </button>
       )}
-      {canOpenInBrowser && activeTab?.path && folder?.path && (
+      {canOpenInBrowser && activeTab?.path && (
         <button
           type="button"
           onClick={() => {
-            openPath(`${folder.path}/${activeTab.path}`).catch(() => {})
+            // File tab paths are absolute — hand the path straight to the OS.
+            openPath(activeTab.path as string).catch(() => {})
           }}
           className="shrink-0 flex items-center justify-center w-10 border-b border-border hover:bg-primary/8 transition-colors"
           aria-label={t("preview")}

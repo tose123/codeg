@@ -13,15 +13,18 @@ describe("classifyResourceKind", () => {
     ["C:\\Users\\a\\notes.txt", "file"],
     ["C:/Users/a/notes.txt", "file"],
     ["d:\\repo\\src\\main.rs", "file"],
+    // Backslash UNC (the form remark-file-uri-links emits for a UNC
+    // file:// link) — local file, distinct from forward-slash // (web).
+    ["\\\\server\\share\\doc.md", "file"],
     // POSIX absolute / explicitly-relative paths
     ["/abs/path/file.ts", "file"],
     ["/abs/path/file.ts:42", "file"],
     ["./relative.md", "file"],
     ["../up/one.md", "file"],
     ["~/home/config.toml", "file"],
-    // Protocol-relative URLs begin with "/", so link-safety's isLocalPathLike
-    // routes them to the file opener — the file icon matches that behavior.
-    ["//cdn.example.com/app.js", "file"],
+    // Protocol-relative URLs resolve against the page protocol — link-safety
+    // routes them to the browser, so the web icon matches that behavior.
+    ["//cdn.example.com/app.js", "web"],
     // Web
     ["http://example.com", "web"],
     ["https://example.com/docs?q=1#frag", "web"],

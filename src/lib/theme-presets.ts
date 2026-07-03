@@ -25,6 +25,40 @@ export const FOLDER_THEME_COLOR_INHERIT = "inherit" as const
 
 export type FolderThemeColor = ThemeColor | typeof FOLDER_THEME_COLOR_INHERIT
 
+const THEME_COLOR_SET = new Set<string>(THEME_COLORS)
+
+/**
+ * 早期版本的文件夹颜色存储的是十六进制值；迁移映射到最接近的主题预设。
+ */
+const LEGACY_FOLDER_COLOR_MAP: Record<string, FolderThemeColor> = {
+  foreground: FOLDER_THEME_COLOR_INHERIT,
+  "#ef4444": "red",
+  "#f97316": "orange",
+  "#eab308": "yellow",
+  "#84cc16": "green",
+  "#22c55e": "green",
+  "#06b6d4": "blue",
+  "#8b5cf6": "violet",
+  "#d946ef": "rose",
+  "#ec4899": "rose",
+}
+
+/**
+ * 把 FolderDetail.color 的原始存储值（预设名或遗留十六进制）规约成
+ * FolderThemeColor。未知值回退 inherit。
+ */
+export function normalizeFolderThemeColor(
+  color: string | null | undefined
+): FolderThemeColor {
+  if (!color) return FOLDER_THEME_COLOR_INHERIT
+  const normalized = color.toLowerCase()
+  if (normalized === FOLDER_THEME_COLOR_INHERIT) {
+    return FOLDER_THEME_COLOR_INHERIT
+  }
+  if (THEME_COLOR_SET.has(normalized)) return normalized as ThemeColor
+  return LEGACY_FOLDER_COLOR_MAP[normalized] ?? FOLDER_THEME_COLOR_INHERIT
+}
+
 /**
  * 默认主题色。选用 "neutral" 是因为它对应当前 globals.css 的现存 :root 值
  * （所有 chroma=0 的纯灰阶），可保证升级后视觉零差异。

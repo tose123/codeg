@@ -1378,12 +1378,18 @@ function mergeGoalObjectiveHints(
 /**
  * Wrap a Codex `/goal` lifecycle into one card-style part:
  * `create_goal` starts the run, every intervening adapted part becomes card
- * body content, and `update_goal` closes the run. An unfinished run remains
- * wrapped with `isRunning=true` so the renderer can shimmer the title while the
- * agent is still working.
+ * body content, and `update_goal` closes the run.
+ *
+ * codex keeps a `/goal` active across turns and does NOT emit a closing
+ * `update_goal` when a turn ends or is interrupted, so an unfinished run must
+ * only shimmer while its turn is actually streaming — otherwise a stopped or
+ * reloaded goal capsule spins forever. `isStreaming` gates that: an unfinished
+ * run flushes with `isRunning: isStreaming`, so it settles (static) once the
+ * turn stops or on history reload, and shimmers only while live.
  */
 export function groupGoalRuns(
-  parts: AdaptedContentPart[]
+  parts: AdaptedContentPart[],
+  isStreaming: boolean = false
 ): AdaptedContentPart[] {
   const result: AdaptedContentPart[] = []
   let active: {
@@ -1414,7 +1420,9 @@ export function groupGoalRuns(
       start: active.start,
       end: null,
       items: [...active.items],
-      isRunning: true,
+      // Unfinished run: shimmer only while the turn is live. A stopped or
+      // reloaded goal (codex never emits a closing update_goal) settles static.
+      isRunning: isStreaming,
     })
     active = null
   }
@@ -1739,7 +1747,8 @@ export function adaptMessageTurn(
                 dropHiddenFeedbackChecks(adaptedContent)
               )
             )
-          )
+          ),
+          isStreaming
         )
       : adaptedContent
 

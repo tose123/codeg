@@ -79,7 +79,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { AuxPanelNoFolderEmpty } from "@/components/layout/aux-panel-no-folder-empty"
 import { subscribe } from "@/lib/platform"
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useWorkspaceContext } from "@/contexts/workspace-context"
+import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
 import {
   getGitBranch,
@@ -754,7 +754,7 @@ export function GitLogTab() {
   const t = useTranslations("Folder.gitLogTab")
   const tCommon = useTranslations("Folder.common")
   const { activeFolder: folder } = useActiveFolder()
-  const { openCommitDiff, openFilePreview } = useWorkspaceContext()
+  const { openCommitDiff, openFilePreview } = useWorkspaceActions()
   const workspaceState = useWorkspaceStateStore(folder?.path ?? null)
   const isGitRepo = workspaceState.isGitRepo
   const [entries, setEntries] = useState<GitLogEntry[]>([])

@@ -170,6 +170,24 @@ const BASENAME_MAP: Record<string, string> = {
   ".inputrc": "shell",
 }
 
+const IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+  "bmp",
+  "ico",
+])
+
+// Images render via base64 preview and carry no etag — callers branch on
+// this before any etag-based disk reconciliation.
+export function isImageFile(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? ""
+  return IMAGE_EXTENSIONS.has(ext)
+}
+
 // HTML documents we can render in the in-app sandboxed preview. Scoped to real
 // .html/.htm files — .vue/.svelte also map to the "html" language but are not
 // standalone, renderable documents.

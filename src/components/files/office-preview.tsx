@@ -15,7 +15,6 @@ import {
   getServerBaseUrl,
 } from "@/lib/transport"
 import { extractAppCommandError } from "@/lib/app-error"
-import type { FileWorkspaceTab } from "@/contexts/workspace-context"
 
 // Machine code the backend stamps into `i18n_params.watchCode` for a missing
 // officecli (mirrors `WatchError::NotInstalled.code()` in office_watch/mod.rs).
@@ -58,11 +57,13 @@ function watchCodeOf(err: unknown): string | null {
  *   resulting cross-origin CORS. Auth is the per-watch `cap`, not the token.
  */
 export function OfficePreview({
-  tab,
-  folderPath,
+  rootPath,
+  relPath,
 }: {
-  tab: FileWorkspaceTab
-  folderPath: string | null
+  // Backend watch target as a (directory, relative file) pair — the file
+  // tab's absolute path split by the panel. No workspace folder needed.
+  rootPath: string | null
+  relPath: string | null
 }) {
   const t = useTranslations("Folder.fileWorkspacePanel")
   const [port, setPort] = useState<number | null>(null)
@@ -71,7 +72,7 @@ export function OfficePreview({
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [retryKey, setRetryKey] = useState(0)
 
-  const path = tab.path ?? ""
+  const path = relPath ?? ""
 
   // True only for a local desktop window: it loads the watch's loopback URL
   // directly. Web windows go through the proxy.
@@ -94,7 +95,7 @@ export function OfficePreview({
     // start resolves) nor over-releases a watch another tab still shares (we
     // never release a ref we didn't acquire).
     let acquired = false
-    const root = folderPath ?? ""
+    const root = rootPath ?? ""
     // Don't spawn a watch we can't display (remote-desktop, see above).
     if (!root || !path || remoteDesktop) return
     startOfficeWatch(root, path)
@@ -121,7 +122,7 @@ export function OfficePreview({
         void stopOfficeWatch(root, path).catch(() => {})
       }
     }
-  }, [path, folderPath, retryKey, remoteDesktop])
+  }, [path, rootPath, retryKey, remoteDesktop])
 
   const watchUrl = useMemo(() => {
     if (port == null) return null

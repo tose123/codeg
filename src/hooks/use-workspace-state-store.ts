@@ -18,6 +18,23 @@ import type {
 
 type WorkspaceHealth = "healthy" | "resyncing" | "degraded"
 
+// What a subscription consumes from the stream:
+//   "full"  — tree + git snapshots + changed_paths (aux file tree, git
+//             panels). The backend runs tree/git scans per watch batch
+//             while at least one full subscriber exists on the root.
+//   "paths" — changed_paths only (open-file-tab watching, office
+//             auto-preview). A root with only paths subscribers costs
+//             nothing per batch beyond the debounced FS events.
+export type WorkspaceWatchMode = "full" | "paths"
+
+// Opaque handle returned by acquire(). Release is BY TOKEN and idempotent:
+// releasing the same token twice is a no-op, so double-invoked effect
+// cleanups (StrictMode) cannot corrupt the refcount, and the full/paths
+// tally is derived from set sizes — never from an error-prone counter.
+export interface WorkspaceWatchToken {
+  readonly mode: WorkspaceWatchMode
+}
+
 export interface WorkspaceStateView {
   rootPath: string
   seq: number
@@ -149,7 +166,14 @@ class WorkspaceStateStore {
   private listeners = new Set<() => void>()
   private envelopeListeners = new Set<WorkspaceEnvelopeListener>()
   private state: WorkspaceStateView
-  private refCount = 0
+  private fullTokens = new Set<WorkspaceWatchToken>()
+  private pathsTokens = new Set<WorkspaceWatchToken>()
+  // Scan mode our CURRENT backend subscription was registered with. Only
+  // syncBackendMode transitions it (start new mode → adopt → stop old),
+  // so the backend's per-root full-subscriber count stays balanced.
+  private backendWantsTreeGit = true
+  private modeSync: Promise<void> | null = null
+  private modeSyncQueued = false
   private started = false
   private starting: Promise<void> | null = null
   private stopping: Promise<void> | null = null
@@ -186,12 +210,28 @@ class WorkspaceStateStore {
     }
   }
 
-  acquire = () => {
+  private get tokenCount(): number {
+    return this.fullTokens.size + this.pathsTokens.size
+  }
+
+  // The aggregate scan mode this store needs from the backend right now.
+  private get wantsTreeGit(): boolean {
+    return this.fullTokens.size > 0
+  }
+
+  acquire = (mode: WorkspaceWatchMode = "full"): WorkspaceWatchToken => {
+    const token: WorkspaceWatchToken = { mode }
     const wasShutdownPending = this.shutdownTimer !== null
     this.cancelPendingShutdown()
     this.cancelEviction()
-    this.refCount += 1
-    if (this.refCount === 1) {
+    const isFirstToken = this.tokenCount === 0
+    const fullBefore = this.fullTokens.size
+    if (mode === "full") {
+      this.fullTokens.add(token)
+    } else {
+      this.pathsTokens.add(token)
+    }
+    if (isFirstToken) {
       const canReuseLifecycle =
         this.lifecycleId > 0 &&
         (this.started || this.starting !== null || this.stopping !== null)
@@ -203,12 +243,12 @@ class WorkspaceStateStore {
 
       // Re-acquired within the shutdown grace window: ensureStarted is a
       // no-op because `started` is still true, but events fired while
-      // refCount was 0 may have been silently dropped (broadcaster has no
-      // receivers during a brief SSE reconnect, or the event landed during
-      // the grace and got coalesced). Pull a delta-replay snapshot so we
-      // don't keep showing pre-event state — typical symptom is git status
-      // / file tree not updating after the user switched away while an
-      // agent commit was in flight.
+      // the token count was 0 may have been silently dropped (broadcaster
+      // has no receivers during a brief SSE reconnect, or the event landed
+      // during the grace and got coalesced). Pull a delta-replay snapshot
+      // so we don't keep showing pre-event state — typical symptom is git
+      // status / file tree not updating after the user switched away while
+      // an agent commit was in flight.
       //
       // Gated on `started` so we don't race a resync against a still-in-
       // flight initial start: in that window the backend stream may not
@@ -216,17 +256,81 @@ class WorkspaceStateStore {
       // bouncing us into a needless degraded state.
       if (wasShutdownPending && this.started) {
         void this.requestResync("reacquired_within_grace")
+        // The surviving backend subscription still carries the mode from
+        // before the grace window — reconcile if the aggregate changed.
+        this.syncBackendMode()
       }
+    } else if (mode === "full" && fullBefore === 0) {
+      // paths → full upgrade: the backend must start scanning tree/git
+      // and backfill a fresh full snapshot.
+      this.syncBackendMode()
+    }
+    return token
+  }
+
+  release = (token: WorkspaceWatchToken) => {
+    const removed =
+      token.mode === "full"
+        ? this.fullTokens.delete(token)
+        : this.pathsTokens.delete(token)
+    // Unknown or already-released token — idempotent no-op by design.
+    if (!removed) return
+    if (this.tokenCount === 0) {
+      const lifecycleId = this.lifecycleId
+      this.scheduleShutdown(lifecycleId)
+      return
+    }
+    if (token.mode === "full" && this.fullTokens.size === 0) {
+      // full → paths downgrade: the stream stays up (paths tokens remain),
+      // the backend just stops scanning tree/git per batch.
+      this.syncBackendMode()
     }
   }
 
-  release = () => {
-    if (this.refCount === 0) return
-    this.refCount -= 1
-    if (this.refCount === 0) {
-      const lifecycleId = this.lifecycleId
-      this.scheduleShutdown(lifecycleId)
+  // Reconcile the backend subscription's scan mode with the local token
+  // aggregate. Transitions are serialized; a change arriving mid-transition
+  // queues exactly one more reconciliation pass. Ordering invariant: the
+  // new-mode backend ref is added BEFORE the old one is released, so the
+  // backend's total refcount never touches zero mid-transition (which
+  // would tear down the watcher and drop events).
+  private syncBackendMode = () => {
+    if (this.modeSync) {
+      this.modeSyncQueued = true
+      return
     }
+    const run = async () => {
+      do {
+        this.modeSyncQueued = false
+        if (!this.started) return
+        const desired = this.wantsTreeGit
+        if (desired === this.backendWantsTreeGit) return
+        const previous = this.backendWantsTreeGit
+        try {
+          const snapshot = await startWorkspaceStateStream(
+            this.rootPath,
+            desired
+          )
+          this.backendWantsTreeGit = desired
+          // An upgrade returns a freshly-scanned full snapshot (the
+          // backend refreshes tree/git for the first full subscriber);
+          // a downgrade returns the cached one — applying is harmless.
+          this.patchState((prev) => applySnapshot(prev, snapshot))
+          if (snapshot.full) {
+            this.hasBaselineSnapshot = true
+          }
+          await stopWorkspaceStateStream(this.rootPath, previous).catch(
+            () => {}
+          )
+        } catch {
+          // Transition failed (backend unreachable). Keep the previous
+          // subscription; the next token change retries.
+          return
+        }
+      } while (this.modeSyncQueued)
+    }
+    this.modeSync = run().finally(() => {
+      this.modeSync = null
+    })
   }
 
   requestResync = async (reason?: string) => {
@@ -292,7 +396,7 @@ class WorkspaceStateStore {
       this.hasBaselineSnapshot = false
       this.resyncInFlight = null
 
-      if (this.refCount > 0) {
+      if (this.tokenCount > 0) {
         await this.ensureStarted(nextLifecycleId)
       }
     }
@@ -324,9 +428,19 @@ class WorkspaceStateStore {
       }
 
       try {
-        const initialSnapshot = await startWorkspaceStateStream(this.rootPath)
+        // Register with the aggregate mode at THIS moment; tokens acquired
+        // while the call is in flight are reconciled by the syncBackendMode
+        // pass at the end of the start sequence.
+        const wantsTreeGit = this.wantsTreeGit
+        const initialSnapshot = await startWorkspaceStateStream(
+          this.rootPath,
+          wantsTreeGit
+        )
+        this.backendWantsTreeGit = wantsTreeGit
         if (!this.isLifecycleActive(lifecycleId)) {
-          await stopWorkspaceStateStream(this.rootPath).catch(() => {})
+          await stopWorkspaceStateStream(this.rootPath, wantsTreeGit).catch(
+            () => {}
+          )
           return
         }
         // Reset our seq baseline before applying. The backend stream is
@@ -357,7 +471,9 @@ class WorkspaceStateStore {
 
         if (!this.isLifecycleActive(lifecycleId)) {
           unlisten()
-          await stopWorkspaceStateStream(this.rootPath).catch(() => {})
+          await stopWorkspaceStateStream(this.rootPath, wantsTreeGit).catch(
+            () => {}
+          )
           return
         }
 
@@ -378,6 +494,9 @@ class WorkspaceStateStore {
             })
           }
         }
+        // Tokens may have shifted the aggregate mode while the start
+        // sequence was in flight — reconcile now that we're started.
+        this.syncBackendMode()
       } catch (error) {
         this.patchState((prev) => ({
           ...prev,
@@ -397,12 +516,20 @@ class WorkspaceStateStore {
   private shutdown = async (lifecycleId: number) => {
     void lifecycleId
     this.started = false
+    // Serialize with a possibly-in-flight mode transition so the final
+    // stop releases the mode the backend actually holds.
+    if (this.modeSync) {
+      await this.modeSync.catch(() => {})
+    }
     const unlisten = this.unlisten
     this.unlisten = null
     if (unlisten) {
       unlisten()
     }
-    await stopWorkspaceStateStream(this.rootPath).catch(() => {})
+    await stopWorkspaceStateStream(
+      this.rootPath,
+      this.backendWantsTreeGit
+    ).catch(() => {})
   }
 
   private cancelPendingShutdown = () => {
@@ -415,7 +542,7 @@ class WorkspaceStateStore {
     this.cancelPendingShutdown()
     this.shutdownTimer = setTimeout(() => {
       this.shutdownTimer = null
-      if (this.refCount !== 0) return
+      if (this.tokenCount !== 0) return
       const dispose = async () => {
         await this.shutdown(lifecycleId)
       }
@@ -423,7 +550,7 @@ class WorkspaceStateStore {
         if (this.stopping === stopping) {
           this.stopping = null
         }
-        if (this.refCount === 0) {
+        if (this.tokenCount === 0) {
           this.scheduleEviction()
         }
       })
@@ -442,7 +569,7 @@ class WorkspaceStateStore {
     this.cancelEviction()
     this.evictionTimer = setTimeout(() => {
       this.evictionTimer = null
-      if (this.refCount !== 0) return
+      if (this.tokenCount !== 0) return
       if (this.started || this.starting || this.stopping || this.unlisten)
         return
       deleteStore(this.normalizedRootPath, this)
@@ -454,7 +581,7 @@ class WorkspaceStateStore {
   }
 
   private isLifecycleActive = (lifecycleId: number) => {
-    return this.isLifecycleCurrent(lifecycleId) && this.refCount > 0
+    return this.isLifecycleCurrent(lifecycleId) && this.tokenCount > 0
   }
 
   private handleEvent = (event: WorkspaceStateEvent) => {
@@ -543,8 +670,21 @@ function getStore(rootPath: string): WorkspaceStateStore {
   return created
 }
 
+export type { WorkspaceStateStore }
+
+// Imperative access to the per-root refcounted store singleton, for callers
+// that manage several roots at once (the open-file-tabs watcher subscribes
+// to every folder that has open tabs). Callers MUST pair acquire()/release()
+// — the same refcount that keeps the aux panel's backend stream alive.
+// Client-only: never call during SSR/prerender (stores start backend
+// streams); call from effects.
+export function getWorkspaceStateStore(rootPath: string): WorkspaceStateStore {
+  return getStore(rootPath)
+}
+
 export function useWorkspaceStateStore(
-  rootPath: string | null
+  rootPath: string | null,
+  mode: WorkspaceWatchMode = "full"
 ): WorkspaceStateResult {
   const store = useMemo(() => {
     if (!rootPath) return null
@@ -553,12 +693,12 @@ export function useWorkspaceStateStore(
 
   useEffect(() => {
     if (!store || !rootPath) return
-    store.acquire()
+    const token = store.acquire(mode)
 
     return () => {
-      store.release()
+      store.release(token)
     }
-  }, [rootPath, store])
+  }, [rootPath, store, mode])
 
   const subscribeToStore = useCallback(
     (onStoreChange: () => void) => {

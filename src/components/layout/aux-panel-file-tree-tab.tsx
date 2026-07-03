@@ -18,11 +18,11 @@ import { useAuxPanelContext } from "@/contexts/aux-panel-context"
 import { useTabContext } from "@/contexts/tab-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
 import {
-  type FileWorkspaceTab,
-  isImageFile,
-  useWorkspaceContext,
+  useWorkspaceActions,
+  useWorkspaceFileTabs,
 } from "@/contexts/workspace-context"
 import { useWorkspaceStateStore } from "@/hooks/use-workspace-state-store"
+import { findOwningFolder } from "@/lib/file-open-target"
 import { AuxPanelNoFolderEmpty } from "@/components/layout/aux-panel-no-folder-empty"
 import { WorkspaceDegradedBanner } from "@/components/layout/workspace-degraded-banner"
 import { WorkspaceUploadDialog } from "@/components/layout/workspace-upload-dialog"
@@ -37,22 +37,15 @@ import {
   gitListAllBranches,
   gitRollbackFile,
   gitStatus,
-  readFileForEdit,
   readFilePreview,
   openCommitWindow,
   renameFileTreeEntry,
-  saveFileCopy,
   WORKSPACE_DOWNLOAD_CANCELLED,
 } from "@/lib/api"
 import { isDesktop, isRemoteDesktopMode } from "@/lib/transport"
 import { emitAttachFileToSession } from "@/lib/session-attachment-events"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type {
-  FileEditContent,
-  FileTreeNode,
-  GitBranchList,
-  GitStatusEntry,
-} from "@/lib/types"
+import type { FileTreeNode, GitBranchList, GitStatusEntry } from "@/lib/types"
 import {
   FileTree,
   FileTreeFolder,
@@ -137,13 +130,6 @@ interface FileActionTarget {
   kind: "file" | "dir"
   path: string
   name: string
-}
-
-interface ExternalConflictPrompt {
-  path: string
-  diskContent: string
-  unsavedContent: string
-  signature: string
 }
 
 type GitFileState =
@@ -894,19 +880,19 @@ export function FileTreeTab() {
   const { activeFolder: folder } = useActiveFolder()
   const { tabs, activeTabId } = useTabContext()
   const { createTerminalInDirectory } = useTerminalContext()
-  const {
-    activeFileTab,
-    activeFilePath,
-    fileTabs,
-    openBranchDiff,
-    openExternalConflictDiff,
-    openFilePreview,
-    openWorkingTreeDiff,
-    reloadOpenFileBackground,
-    applyExternalReload,
-    markTabsStale,
-    rejectFileTab,
-  } = useWorkspaceContext()
+  const { activeFilePath } = useWorkspaceFileTabs()
+  const { openBranchDiff, openFilePreview, openWorkingTreeDiff } =
+    useWorkspaceActions()
+  // File tab paths are absolute; the tree's node paths are relative to
+  // THIS panel's folder — derive the relative form (undefined when the
+  // active file lives outside this folder, which correctly unselects).
+  const selectedTreePath = useMemo(() => {
+    if (!activeFilePath || !folder) return undefined
+    return (
+      findOwningFolder(activeFilePath, [{ id: folder.id, path: folder.path }])
+        ?.relPath ?? undefined
+    )
+  }, [activeFilePath, folder])
   const workspaceState = useWorkspaceStateStore(folder?.path ?? null)
   const [nodes, setNodes] = useState<FileTreeNode[]>([])
   const [gitStatusByPath, setGitStatusByPath] = useState<Map<string, string>>(
@@ -935,10 +921,6 @@ export function FileTreeTab() {
   const [compareTarget, setCompareTarget] = useState<FileActionTarget | null>(
     null
   )
-  const [externalConflictPrompt, setExternalConflictPrompt] =
-    useState<ExternalConflictPrompt | null>(null)
-  const [savingExternalConflictCopy, setSavingExternalConflictCopy] =
-    useState(false)
   const [directoryGitActionType, setDirectoryGitActionType] =
     useState<DirectoryGitAction | null>(null)
   const [directoryGitActionTarget, setDirectoryGitActionTarget] =
@@ -977,8 +959,6 @@ export function FileTreeTab() {
   const [gitignoreIgnoredPaths, setGitignoreIgnoredPaths] = useState<
     Set<string>
   >(new Set())
-  const activeFileTabRef = useRef(activeFileTab)
-  const fileTabsRef = useRef<FileWorkspaceTab[]>(fileTabs)
   const filePathSetRef = useRef<Set<string>>(new Set())
   const previousExpandedPathsRef = useRef<Set<string>>(
     new Set([FILE_TREE_ROOT_PATH])
@@ -992,27 +972,13 @@ export function FileTreeTab() {
   >(null)
   const expandedPathsRef = useRef<Set<string>>(new Set([FILE_TREE_ROOT_PATH]))
   const workspaceTreeRef = useRef<FileTreeNode[]>([])
-  const externalConflictSignatureByPathRef = useRef<Map<string, string>>(
-    new Map()
-  )
-
-  useEffect(() => {
-    activeFileTabRef.current = activeFileTab
-  }, [activeFileTab])
-
-  useEffect(() => {
-    fileTabsRef.current = fileTabs
-  }, [fileTabs])
 
   useEffect(() => {
     setExpandedPaths(new Set([FILE_TREE_ROOT_PATH]))
     previousExpandedPathsRef.current = new Set([FILE_TREE_ROOT_PATH])
     setGitignoreIgnoredPaths(new Set())
-    setExternalConflictPrompt(null)
-    setSavingExternalConflictCopy(false)
     lazyLoadedChildrenByPathRef.current.clear()
     lazyLoadingDirPathsRef.current.clear()
-    externalConflictSignatureByPathRef.current.clear()
   }, [folder?.path])
 
   // Handle pending reveal path: expand all ancestor directories once tree is loaded
@@ -1032,21 +998,6 @@ export function FileTreeTab() {
       return next
     })
   }, [pendingRevealPath, consumePendingRevealPath, hasNodes])
-
-  useEffect(() => {
-    if (!activeFileTab || activeFileTab.kind !== "file") return
-    if (!activeFileTab.path) return
-    if (activeFileTab.loading || activeFileTab.isDirty) return
-    const activeFilePath = activeFileTab.path
-    externalConflictSignatureByPathRef.current.delete(activeFilePath)
-    setExternalConflictPrompt((current) =>
-      current &&
-      normalizeComparePath(current.path) ===
-        normalizeComparePath(activeFilePath)
-        ? null
-        : current
-    )
-  }, [activeFileTab])
 
   const activeSessionTabId = useMemo(() => {
     const activeTab = tabs.find((tab) => tab.id === activeTabId)
@@ -2083,71 +2034,6 @@ export function FileTreeTab() {
     [compareTarget, comparing, openBranchDiff]
   )
 
-  const handleCompareExternalConflict = useCallback(() => {
-    if (!externalConflictPrompt) return
-
-    const latestTab = activeFileTabRef.current
-    const unsavedContent =
-      latestTab &&
-      latestTab.kind === "file" &&
-      latestTab.path &&
-      normalizeComparePath(latestTab.path) ===
-        normalizeComparePath(externalConflictPrompt.path) &&
-      !latestTab.loading
-        ? latestTab.content
-        : externalConflictPrompt.unsavedContent
-
-    openExternalConflictDiff(
-      externalConflictPrompt.path,
-      externalConflictPrompt.diskContent,
-      unsavedContent
-    )
-    setExternalConflictPrompt(null)
-  }, [externalConflictPrompt, openExternalConflictDiff])
-
-  const handleReloadExternalConflict = useCallback(() => {
-    if (!externalConflictPrompt) return
-    externalConflictSignatureByPathRef.current.delete(
-      externalConflictPrompt.path
-    )
-    setExternalConflictPrompt(null)
-    void openFilePreview(externalConflictPrompt.path, { reload: true })
-  }, [externalConflictPrompt, openFilePreview])
-
-  const handleSaveExternalConflictCopy = useCallback(async () => {
-    if (!folder?.path || !externalConflictPrompt) return
-
-    const latestTab = activeFileTabRef.current
-    const unsavedContent =
-      latestTab &&
-      latestTab.kind === "file" &&
-      latestTab.path &&
-      normalizeComparePath(latestTab.path) ===
-        normalizeComparePath(externalConflictPrompt.path) &&
-      !latestTab.loading
-        ? latestTab.content
-        : externalConflictPrompt.unsavedContent
-
-    setSavingExternalConflictCopy(true)
-    try {
-      const result = await saveFileCopy(
-        folder.path,
-        externalConflictPrompt.path,
-        unsavedContent
-      )
-      toast.success(t("toasts.savedAsCopy"), {
-        description: result.path,
-      })
-      setExternalConflictPrompt(null)
-      void fetchTree({ silent: true })
-    } catch (error) {
-      const message = toErrorMessage(error)
-      toast.error(t("toasts.saveCopyFailed"), { description: message })
-    } finally {
-      setSavingExternalConflictCopy(false)
-    }
-  }, [externalConflictPrompt, fetchTree, folder?.path, t])
-
   const rootNodeName = useMemo(() => {
     if (!folder?.path) return t("workspace")
     return baseName(folder.path)
@@ -2168,319 +2054,6 @@ export function FileTreeTab() {
     () => ({ kind: "dir", path: "", name: rootNodeName }),
     [rootNodeName]
   )
-
-  type FileChangeDecision =
-    | { kind: "none" }
-    | { kind: "reload"; path: string; latest: FileEditContent }
-    | {
-        kind: "conflict"
-        path: string
-        diskContent: string
-        unsavedContent: string
-        signature: string
-      }
-    | { kind: "missing"; path: string; error: string }
-
-  // Per-tab disk-vs-buffer resolver. Compares the tab's known etag against
-  // the latest disk read for the same path. Independent of activation —
-  // callable for any open file tab so the watcher can scan inactive tabs
-  // too. Re-reads the tab from `fileTabsRef.current` after the fetch to
-  // guard against close/reopen races during the async window. The `reload`
-  // decision carries the fetched FileEditContent so the watcher can write
-  // it directly via applyExternalReload, avoiding a second readFileForEdit.
-  const resolveFileChangeDecision = useCallback(
-    async (tabSnapshot: FileWorkspaceTab): Promise<FileChangeDecision> => {
-      const rootPath = folder?.path
-      if (!rootPath) return { kind: "none" }
-      if (tabSnapshot.kind !== "file") return { kind: "none" }
-      const path = tabSnapshot.path
-      if (!path) return { kind: "none" }
-      if (tabSnapshot.loading) return { kind: "none" }
-
-      const tabId = tabSnapshot.id
-
-      const stillSameTab = (): FileWorkspaceTab | null => {
-        const latestTab = fileTabsRef.current.find((t) => t.id === tabId)
-        if (!latestTab || latestTab.kind !== "file") return null
-        if (
-          normalizeComparePath(latestTab.path ?? "") !==
-          normalizeComparePath(path)
-        ) {
-          return null
-        }
-        if (latestTab.loading) return null
-        return latestTab
-      }
-
-      let latest: FileEditContent
-      try {
-        latest = await readFileForEdit(rootPath, path)
-      } catch (error) {
-        // Disk read failed — most commonly an external delete, but also
-        // permission revocation, an exclusive lock, or a transient FS
-        // error. Surface this as its own decision: the watcher routes it
-        // to rejectFileTab (clean) or markTabsStale (dirty) so the user
-        // is never silently shown a buffer that no longer matches disk.
-        const latestTab = stillSameTab()
-        if (!latestTab) return { kind: "none" }
-        return { kind: "missing", path, error: toErrorMessage(error) }
-      }
-
-      const latestTab = stillSameTab()
-      if (!latestTab) return { kind: "none" }
-
-      const latestTabEtag = latestTab.etag ?? null
-      if (latest.etag === latestTabEtag) return { kind: "none" }
-
-      if (latestTab.isDirty) {
-        return {
-          kind: "conflict",
-          path,
-          diskContent: latest.content,
-          unsavedContent: latestTab.content,
-          signature: `${path}:${latest.etag}`,
-        }
-      }
-
-      return { kind: "reload", path, latest }
-    },
-    [folder?.path]
-  )
-
-  // Surface a conflict prompt for `decision`, deduping by signature so a
-  // repeated workspace event or activation transition does not flicker
-  // the UI.
-  const announceConflict = useCallback(
-    (decision: Extract<FileChangeDecision, { kind: "conflict" }>) => {
-      const shownSignature = externalConflictSignatureByPathRef.current.get(
-        decision.path
-      )
-      if (shownSignature === decision.signature) return
-      externalConflictSignatureByPathRef.current.set(
-        decision.path,
-        decision.signature
-      )
-      setExternalConflictPrompt((current) => {
-        if (current?.signature === decision.signature) return current
-        return {
-          path: decision.path,
-          diskContent: decision.diskContent,
-          unsavedContent: decision.unsavedContent,
-          signature: decision.signature,
-        }
-      })
-    },
-    []
-  )
-
-  // Envelope-driven change watcher.
-  //
-  // Replaces the prior workspaceState.seq polling loop, which forced a
-  // full open-tab scan on every workspace event and read each candidate
-  // file twice (resolver + reload). The new path:
-  //   • subscribes to envelopes and uses `changed_paths` to scope work to
-  //     tabs whose paths actually changed;
-  //   • falls back to a full sweep only on `resync_hint` or envelopes
-  //     missing changed_paths, so external changes cannot be lost when
-  //     the backend cannot enumerate paths;
-  //   • coalesces bursts (e.g. git checkout) via queueMicrotask and a
-  //     single in-flight drainer, so concurrent reconciliations cannot
-  //     double-fire;
-  //   • skips image tabs (no etag — would otherwise trigger spurious
-  //     full base64 re-reads every workspace event);
-  //   • re-reads activeFileTabRef.current AFTER each per-tab resolve
-  //     await so a user mid-scan tab switch is honored;
-  //   • dispatches reload via applyExternalReload — handing the prefetched
-  //     content from the resolver to the context — instead of triggering
-  //     a second readFileForEdit through openFilePreview.
-  useEffect(() => {
-    if (!folder?.path) return
-    if (!subscribeWorkspaceEnvelopes) return
-
-    const pendingPaths = new Set<string>()
-    let pendingFullScan = false
-    let flushScheduled = false
-    let flushPromise: Promise<void> | null = null
-    let disposed = false
-
-    const reconcileChanges = async (
-      paths: string[],
-      fullScan: boolean
-    ): Promise<void> => {
-      const openFileTabs = fileTabsRef.current.filter(
-        (t) => t.kind === "file" && t.path && !t.loading
-      )
-
-      const candidates = (() => {
-        if (fullScan) return openFileTabs
-        const pathSet = new Set(paths.map(normalizeComparePath))
-        return openFileTabs.filter(
-          (t) => t.path && pathSet.has(normalizeComparePath(t.path))
-        )
-      })()
-
-      for (const tab of candidates) {
-        if (disposed) return
-        const path = tab.path
-        if (!path) continue
-
-        // Image tabs do not carry an etag and load via readFileBase64.
-        // Bypass the text-file resolver: a single path-match is enough
-        // to trigger a refresh, and only when changed_paths actually
-        // names the image (full-scan covers the resync fallback).
-        if (isImageFile(path)) {
-          void reloadOpenFileBackground(path)
-          continue
-        }
-
-        const decision = await resolveFileChangeDecision(tab)
-        if (disposed) return
-        if (decision.kind === "none") continue
-
-        // CRITICAL: re-read active tab id AFTER the resolver await. If
-        // we used a snapshot captured before the loop, a tab the user
-        // switched away from could be silently re-activated by a
-        // foreground reload — which is the exact bug this guards.
-        const isActive = tab.id === (activeFileTabRef.current?.id ?? null)
-
-        if (decision.kind === "reload") {
-          // Either active or inactive: applyExternalReload writes the
-          // prefetched payload without changing activeFileTabId, so the
-          // user's focus is preserved either way and no second
-          // readFileForEdit fires.
-          externalConflictSignatureByPathRef.current.delete(decision.path)
-          void applyExternalReload(decision.path, decision.latest)
-          continue
-        }
-
-        if (decision.kind === "missing") {
-          // Disk read failed on a path that an envelope flagged as
-          // changed — the file is gone, locked, or otherwise unreadable.
-          // Clean tab: reject to error state so the user is never shown a
-          // stale buffer that no longer corresponds to disk. Dirty tab:
-          // mark stale to preserve unsaved edits; the next save attempt
-          // (or activation transition) surfaces the failure.
-          externalConflictSignatureByPathRef.current.delete(decision.path)
-          const liveTab = fileTabsRef.current.find((t) => t.id === tab.id)
-          if (liveTab?.isDirty) {
-            markTabsStale(decision.path)
-          } else {
-            rejectFileTab(decision.path, decision.error)
-          }
-          continue
-        }
-
-        if (isActive) {
-          announceConflict(decision)
-        } else {
-          markTabsStale(decision.path)
-        }
-      }
-    }
-
-    const ensureFlushing = () => {
-      if (flushPromise || flushScheduled) return
-      flushScheduled = true
-      queueMicrotask(() => {
-        flushScheduled = false
-        if (disposed) return
-        flushPromise = (async () => {
-          try {
-            // Drain anything pending — including envelopes that arrive
-            // while we're awaiting reconcileChanges. ensureFlushing()
-            // calls from those listener callbacks see flushPromise !=
-            // null and return; their paths land in pendingPaths and the
-            // next loop iteration picks them up.
-            while (!disposed && (pendingPaths.size > 0 || pendingFullScan)) {
-              const paths = Array.from(pendingPaths)
-              pendingPaths.clear()
-              const fullScan = pendingFullScan
-              pendingFullScan = false
-              await reconcileChanges(paths, fullScan)
-            }
-          } finally {
-            flushPromise = null
-          }
-        })()
-      })
-    }
-
-    const unsubscribe = subscribeWorkspaceEnvelopes(
-      ({ changed_paths, kind }) => {
-        if (
-          kind === "resync_hint" ||
-          !changed_paths ||
-          changed_paths.length === 0
-        ) {
-          // Resync or untargeted event — we cannot scope work, so cover
-          // every open tab. Targeted paths from later envelopes are
-          // additive (full scan is a superset).
-          pendingFullScan = true
-        } else {
-          for (const path of changed_paths) {
-            pendingPaths.add(path)
-          }
-        }
-        ensureFlushing()
-      }
-    )
-
-    return () => {
-      disposed = true
-      unsubscribe()
-      pendingPaths.clear()
-    }
-  }, [
-    folder?.path,
-    subscribeWorkspaceEnvelopes,
-    resolveFileChangeDecision,
-    applyExternalReload,
-    reloadOpenFileBackground,
-    markTabsStale,
-    rejectFileTab,
-    announceConflict,
-  ])
-
-  // Stale-on-activation: when the user switches to (or just opened) a tab
-  // that the watcher previously flagged stale, fire the appropriate action
-  // now — without waiting for the next workspace event. Clean stale is
-  // promoted to reload by openFilePreview's decideLoad path; this effect
-  // covers dirty stale (conflict prompt) and the defensive fallback for
-  // clean stale that somehow survived activation (e.g. switchFileTab).
-  useEffect(() => {
-    const tab = activeFileTab
-    if (!tab || tab.kind !== "file" || !tab.path) return
-    if (!tab.stale || tab.loading) return
-
-    const path = tab.path
-    if (!tab.isDirty) {
-      void openFilePreview(path, { reload: true })
-      return
-    }
-
-    void (async () => {
-      const decision = await resolveFileChangeDecision(tab)
-      if (decision.kind === "conflict") {
-        announceConflict(decision)
-      } else if (decision.kind === "reload") {
-        void applyExternalReload(decision.path, decision.latest)
-      } else if (decision.kind === "missing") {
-        // File vanished while the dirty buffer sat in a non-active tab.
-        // The buffer is still dirty here (this branch only runs for
-        // tab.isDirty === true) so we keep markTabsStale on the path —
-        // refusing to silently lose the user's unsaved edits. The user
-        // discovers the deletion on save (backend recreates or errors).
-        markTabsStale(decision.path)
-      }
-    })()
-  }, [
-    activeFileTab,
-    openFilePreview,
-    applyExternalReload,
-    resolveFileChangeDecision,
-    announceConflict,
-    markTabsStale,
-  ])
 
   if (!folder) {
     return <AuxPanelNoFolderEmpty />
@@ -2529,7 +2102,7 @@ export function FileTreeTab() {
               className="border-0 rounded-none bg-transparent w-max min-w-full"
               expanded={expandedPaths}
               onExpandedChange={setExpandedPaths}
-              selectedPath={activeFilePath ?? undefined}
+              selectedPath={selectedTreePath}
               onSelect={handleTreeSelect}
             >
               {folder?.path && (
@@ -3203,57 +2776,6 @@ export function FileTreeTab() {
               </Button>
             </DialogFooter>
           </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={Boolean(externalConflictPrompt)}
-        onOpenChange={(open) => {
-          if (open) return
-          setExternalConflictPrompt(null)
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("externalConflictDialog.title")}</DialogTitle>
-            <DialogDescription>
-              {externalConflictPrompt
-                ? t("externalConflictDialog.descriptionWithPath", {
-                    path: externalConflictPrompt.path,
-                  })
-                : t("externalConflictDialog.descriptionFallback")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={savingExternalConflictCopy}
-              onClick={handleCompareExternalConflict}
-            >
-              {t("externalConflictDialog.compare")}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={savingExternalConflictCopy}
-              onClick={() => {
-                void handleSaveExternalConflictCopy()
-              }}
-            >
-              {savingExternalConflictCopy
-                ? t("externalConflictDialog.savingCopy")
-                : t("externalConflictDialog.saveAsCopy")}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={savingExternalConflictCopy}
-              onClick={handleReloadExternalConflict}
-            >
-              {t("externalConflictDialog.reload")}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 

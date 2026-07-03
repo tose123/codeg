@@ -296,6 +296,11 @@ function isExternalRef(url: string): boolean {
 // normalized to "/" first so Windows-style "..\\..\\x" traversal cannot slip
 // through as a single opaque segment. Mirrors resolveRelativePath in
 // file-workspace-panel.tsx.
+//
+// Known limitation (shared with the markdown preview pipeline): a UNC base
+// ("//server/share/…") collapses to a single-slash form here, so sub-
+// resources of UNC-hosted documents fail to inline — a clean, root-confined
+// load failure, never a read of a different file.
 export function resolveAbsPath(base: string, relative: string): string {
   const cleaned = normSlashes(relative).replace(/[#?].*$/, "")
   const normBase = normSlashes(base)

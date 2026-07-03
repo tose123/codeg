@@ -19,6 +19,16 @@ describe("buildFileUri", () => {
   it("percent-encodes spaces, # and ? within segments (not the separators)", () => {
     expect(buildFileUri("/a/b c#d?e.ts")).toBe("file:///a/b%20c%23d%3Fe.ts")
   })
+  it("builds the canonical authority form for a UNC path", () => {
+    // file://server/share/doc.md (host=server), NOT file:////server/... which
+    // would parse back to an empty authority + //-pathname (a web-looking url).
+    expect(buildFileUri("//server/share/doc.md")).toBe(
+      "file://server/share/doc.md"
+    )
+    expect(buildFileUri("\\\\server\\share\\doc.md")).toBe(
+      "file://server/share/doc.md"
+    )
+  })
 })
 
 describe("unescapeReferenceLabel", () => {

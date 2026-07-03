@@ -29,8 +29,6 @@ import {
   isRemoteDesktopMode,
   getServerBaseUrl,
 } from "@/lib/transport"
-import type { FileWorkspaceTab } from "@/contexts/workspace-context"
-
 import { OfficePreview } from "./office-preview"
 
 const mockStart = vi.mocked(startOfficeWatch)
@@ -39,12 +37,6 @@ const mockOpenSettings = vi.mocked(openSettingsWindow)
 const mockIsDesktop = vi.mocked(isDesktop)
 const mockIsRemote = vi.mocked(isRemoteDesktopMode)
 const mockBaseUrl = vi.mocked(getServerBaseUrl)
-
-const tab = {
-  id: "file:reports/a.docx",
-  kind: "file",
-  path: "reports/a.docx",
-} as unknown as FileWorkspaceTab
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -60,10 +52,10 @@ describe("OfficePreview", () => {
     mockIsDesktop.mockReturnValue(false)
     mockStart.mockResolvedValue({ port: 26315, cap: "capval" })
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     await waitFor(() =>
-      expect(mockStart).toHaveBeenCalledWith("/root", "reports/a.docx")
+      expect(mockStart).toHaveBeenCalledWith("/root/reports", "a.docx")
     )
     const iframe = await screen.findByTitle("officePreviewTitle")
     expect(iframe.getAttribute("src")).toBe(
@@ -80,7 +72,7 @@ describe("OfficePreview", () => {
     mockIsRemote.mockReturnValue(false)
     mockStart.mockResolvedValue({ port: 30000, cap: "ignored" })
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     const iframe = await screen.findByTitle("officePreviewTitle")
     expect(iframe.getAttribute("src")).toBe("http://127.0.0.1:30000/")
@@ -93,7 +85,7 @@ describe("OfficePreview", () => {
     mockIsDesktop.mockReturnValue(true)
     mockIsRemote.mockReturnValue(true)
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     expect(
       await screen.findByText("officeRemoteDesktopUnsupported")
@@ -105,11 +97,13 @@ describe("OfficePreview", () => {
     mockIsDesktop.mockReturnValue(false)
     mockStart.mockResolvedValue({ port: 1, cap: "c" })
 
-    const { unmount } = render(<OfficePreview tab={tab} folderPath="/root" />)
+    const { unmount } = render(
+      <OfficePreview rootPath="/root/reports" relPath="a.docx" />
+    )
     await screen.findByTitle("officePreviewTitle")
     unmount()
 
-    expect(mockStop).toHaveBeenCalledWith("/root", "reports/a.docx")
+    expect(mockStop).toHaveBeenCalledWith("/root/reports", "a.docx")
   })
 
   it("desktop NOT_INSTALLED: offers Open Settings", async () => {
@@ -121,7 +115,7 @@ describe("OfficePreview", () => {
       i18n_params: { watchCode: "NOT_INSTALLED" },
     })
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     const btn = await screen.findByText("officeOpenSettings")
     fireEvent.click(btn)
@@ -136,7 +130,7 @@ describe("OfficePreview", () => {
       i18n_params: { watchCode: "NOT_INSTALLED" },
     })
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     expect(await screen.findByText("officeServerInstallHint")).toBeTruthy()
     expect(screen.queryByText("officeOpenSettings")).toBeNull()
@@ -151,7 +145,7 @@ describe("OfficePreview", () => {
     })
     mockStart.mockResolvedValueOnce({ port: 5, cap: "c" })
 
-    render(<OfficePreview tab={tab} folderPath="/root" />)
+    render(<OfficePreview rootPath="/root/reports" relPath="a.docx" />)
 
     const retry = await screen.findByText("officeWatchRetry")
     expect(mockStart).toHaveBeenCalledTimes(1)

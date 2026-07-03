@@ -66,7 +66,7 @@ vi.mock("@/contexts/app-workspace-context", () => ({
 }))
 
 vi.mock("@/contexts/workspace-context", () => ({
-  useWorkspaceContext: () => ({
+  useWorkspaceActions: () => ({
     activateConversationPane: activateConversationPaneMock,
   }),
 }))

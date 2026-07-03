@@ -28,8 +28,11 @@ const WINDOWS_ABSOLUTE_PATH = /^[a-zA-Z]:[\\/]/
 const URL_SCHEME = /^([a-zA-Z][a-zA-Z\d+\-.]*):/
 
 function isLocalPathLike(path: string): boolean {
+  // Mirrors link-safety.tsx: forward-slash "//host/…" is protocol-relative
+  // (web); backslash "\\server\share" is a local UNC path.
   return (
-    path.startsWith("/") ||
+    (path.startsWith("/") && !path.startsWith("//")) ||
+    path.startsWith("\\\\") ||
     path.startsWith("./") ||
     path.startsWith("../") ||
     path.startsWith("~/") ||
@@ -57,13 +60,15 @@ export function classifyResourceKind(rawUrl: string): ResourceKind | null {
     return null
   }
 
-  // Schemeless targets that begin with a slash — absolute (/…),
-  // protocol-relative (//host/path) and explicitly-relative (./ ../ ~/) — are
-  // all routed to the workspace file opener by link-safety's `isLocalPathLike`
-  // (it accepts any leading "/"), so they get the file icon to match the actual
-  // click behavior. Note this means `//host` is treated as a path, not a web
-  // URL. Bare-relative targets (src/main.rs, www.example.com) aren't openable
-  // and stay untagged.
+  // Protocol-relative "//host/path" routes to the browser (link-safety
+  // resolves it against the page protocol) — web icon.
+  if (trimmed.startsWith("//")) return "web"
+
+  // Schemeless targets that begin with a slash — absolute (/…) and
+  // explicitly-relative (./ ../ ~/) — are routed to the workspace file
+  // opener by link-safety's `isLocalPathLike`, so they get the file icon to
+  // match the actual click behavior. Bare-relative targets (src/main.rs,
+  // www.example.com) aren't openable and stay untagged.
   if (isLocalPathLike(trimmed)) return "file"
 
   return null

@@ -9,7 +9,7 @@ import {
 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useWorkspaceContext } from "@/contexts/workspace-context"
+import { useWorkspaceActions } from "@/contexts/workspace-context"
 import type { FileChangeStat } from "@/lib/session-files"
 import type { MessageScrollContextValue } from "@/components/message/message-scroll-context"
 import { CollapsedOverlayChip } from "@/components/chat/collapsed-overlay-chip"
@@ -74,7 +74,7 @@ export const ConversationMessageNav = memo(function ConversationMessageNav({
   scrollApiRef,
 }: ConversationMessageNavProps) {
   const t = useTranslations("Folder.chat.messageNav")
-  const { openSessionFileDiff } = useWorkspaceContext()
+  const { openSessionFileDiff } = useWorkspaceActions()
   const { activeFolder: folder } = useActiveFolder()
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
 
