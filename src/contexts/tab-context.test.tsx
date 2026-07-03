@@ -21,6 +21,7 @@ const activateConversationPaneMock = vi.fn()
 const disconnectMock = vi.fn()
 const subscribeMock = vi.fn()
 const onTransportReconnectMock = vi.fn()
+const isLocalDesktopMock = vi.fn(() => true)
 const loadLastActiveContextMock = vi.fn()
 const saveLastActiveContextMock = vi.fn()
 const clearLastActiveContextMock = vi.fn()
@@ -47,6 +48,7 @@ vi.mock("@/lib/api", () => ({
 }))
 
 vi.mock("@/lib/platform", () => ({
+  isLocalDesktop: () => isLocalDesktopMock(),
   subscribe: (...args: unknown[]) => subscribeMock(...args),
   onTransportReconnect: (...args: unknown[]) =>
     onTransportReconnectMock(...args),
@@ -182,6 +184,11 @@ const defaultConversationsMock: DbConversationSummary[] = [
 let conversationsMock: DbConversationSummary[] = defaultConversationsMock
 
 let latestContext: ReturnType<typeof useTabContext> | null = null
+
+beforeEach(() => {
+  isLocalDesktopMock.mockReturnValue(true)
+  window.sessionStorage.clear()
+})
 
 function Probe() {
   const ctx = useTabContext()
@@ -1129,6 +1136,62 @@ describe("TabProvider cross-client sync", () => {
     await waitFor(() => {
       expect(screen.getByTestId("tabs")).toHaveTextContent("conv-1-codex-1")
     })
+  })
+})
+
+describe("TabProvider web tab isolation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    isLocalDesktopMock.mockReturnValue(false)
+    foldersMock = defaultFoldersMock
+    allFoldersMock = defaultFoldersMock
+    conversationsMock = defaultConversationsMock
+    conversationsLoadingMock = false
+    listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
+    saveOpenedTabsMock.mockResolvedValue({
+      accepted: true,
+      version: 1,
+      tabs: [],
+    })
+    getFolderConversationMock.mockReset()
+    getFolderConversationMock.mockReturnValue(new Promise(() => {}))
+    tabsChangedHandler = null
+    conversationChangedHandler = null
+    subscribeMock.mockImplementation((event: string, handler: unknown) => {
+      if (event === TABS_CHANGED_EVENT)
+        tabsChangedHandler = handler as (change: TabsChanged) => void
+      if (event === CONVERSATION_CHANGED_EVENT)
+        conversationChangedHandler = handler as (
+          change: ConversationChange
+        ) => void
+      return Promise.resolve(() => {})
+    })
+    disconnectMock.mockResolvedValue(undefined)
+    onTransportReconnectMock.mockReturnValue(() => {})
+  })
+
+  it("stores opened tabs in sessionStorage without shared tabs sync", async () => {
+    renderTabs()
+    await act(async () => {})
+
+    expect(listOpenedTabsMock).not.toHaveBeenCalled()
+    expect(tabsChangedHandler).toBeNull()
+    expect(
+      subscribeMock.mock.calls.some(([event]) => event === TABS_CHANGED_EVENT)
+    ).toBe(false)
+
+    act(() => {
+      latestContext?.openTab(1, 1, "codex", true, "First")
+    })
+
+    await waitFor(() => {
+      const items = JSON.parse(
+        window.sessionStorage.getItem("codeg:opened-tabs:session:v1") ?? "[]"
+      ) as OpenedTab[]
+      expect(items.map((item) => item.conversation_id)).toEqual([1])
+      expect(items[0]?.is_active).toBe(true)
+    })
+    expect(saveOpenedTabsMock).not.toHaveBeenCalled()
   })
 })
 

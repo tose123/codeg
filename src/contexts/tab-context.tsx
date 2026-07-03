@@ -21,7 +21,7 @@ import {
   listOpenedTabs,
   saveOpenedTabs,
 } from "@/lib/api"
-import { onTransportReconnect, subscribe } from "@/lib/platform"
+import { isLocalDesktop, onTransportReconnect, subscribe } from "@/lib/platform"
 import { resolveDefaultAgent } from "@/lib/resolve-default-agent"
 import { formatConversationTitle } from "@/lib/conversation-title"
 import {
@@ -264,12 +264,51 @@ interface TabState {
 }
 
 const TILE_MODE_STORAGE_KEY = "workspace:tile-mode"
+const SESSION_OPENED_TABS_STORAGE_KEY = "codeg:opened-tabs:session:v1"
 
 /** Per-window/session identity stamped on every tab save and echoed back on
  *  `tabs://changed`, so this client ignores its own broadcast (echo
  *  suppression). Regenerated each load — it identifies the window for echo
  *  suppression, not the user, so nothing about it needs to persist. */
 const TAB_ORIGIN = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+function isStoredOpenedTab(value: unknown): value is OpenedTab {
+  if (!value || typeof value !== "object") return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.id === "number" &&
+    typeof item.folder_id === "number" &&
+    typeof item.conversation_id === "number" &&
+    typeof item.agent_type === "string" &&
+    typeof item.position === "number" &&
+    typeof item.is_active === "boolean" &&
+    typeof item.is_pinned === "boolean"
+  )
+}
+
+function loadSessionOpenedTabs(): OpenedTab[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_OPENED_TABS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter(isStoredOpenedTab) : []
+  } catch {
+    return []
+  }
+}
+
+function saveSessionOpenedTabs(items: OpenedTab[]): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(
+      SESSION_OPENED_TABS_STORAGE_KEY,
+      JSON.stringify(items)
+    )
+  } catch {
+    /* ignore storage quota/permission failures */
+  }
+}
 
 /** Build the persisted (synced) tab payload: conversation-bound tabs only
  *  (drafts are device-local), `position` = display index, and `is_active` set on
@@ -296,6 +335,7 @@ function buildPersistItems(
 
 export function TabProvider({ children }: TabProviderProps) {
   const t = useTranslations("Folder.tabContext")
+  const syncOpenedTabs = isLocalDesktop()
   const { activateConversationPane } = useWorkspaceContext()
   const {
     conversations,
@@ -580,17 +620,16 @@ export function TabProvider({ children }: TabProviderProps) {
     }
   }, [acpDisconnect, draftRetargetRequests])
 
-  // Hydrate from persisted opened_tabs on mount. Persisted tabs are
-  // conversation-bound (drafts are device-local, never persisted); focus is
-  // restored from the synced `is_active` flag, so a reload — or a brand-new
-  // client — lands on the same tab every other client is showing. Seeds the
-  // version + last-saved payload so the initial render doesn't echo the
-  // just-loaded set back as a save.
+  // Local desktop restores the shared `opened_tabs`; web/remote-desktop keeps
+  // its own per-browser tab set in `sessionStorage`. Both paths only persist
+  // conversation-bound tabs, so drafts stay device-local.
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
-        const snap = await listOpenedTabs()
+        const snap = syncOpenedTabs
+          ? await listOpenedTabs()
+          : { items: loadSessionOpenedTabs(), version: 0 }
         if (cancelled) return
         versionRef.current = snap.version
         const restored: TabItemInternal[] = snap.items.map((it) => ({
@@ -638,11 +677,13 @@ export function TabProvider({ children }: TabProviderProps) {
         if (!cancelled) {
           tabsHydratedRef.current = true
           setTabsHydrated(true)
-          // Apply a remote change that raced ahead of hydration.
-          const pending = pendingRemoteRef.current
-          if (pending && pending.version > versionRef.current) {
-            pendingRemoteRef.current = null
-            applyRemoteSnapshotRef.current(pending)
+          if (syncOpenedTabs) {
+            // Apply a remote change that raced ahead of hydration.
+            const pending = pendingRemoteRef.current
+            if (pending && pending.version > versionRef.current) {
+              pendingRemoteRef.current = null
+              applyRemoteSnapshotRef.current(pending)
+            }
           }
         }
       }
@@ -650,7 +691,7 @@ export function TabProvider({ children }: TabProviderProps) {
     return () => {
       cancelled = true
     }
-  }, [setActiveTabId, setTabs, t])
+  }, [setActiveTabId, setTabs, syncOpenedTabs, t])
 
   // Debounced compare-and-set save + broadcast. The conversation-bound set AND
   // which tab is focused sync; draft-only changes match `lastSavedPayloadRef`
@@ -681,6 +722,16 @@ export function TabProvider({ children }: TabProviderProps) {
         clearTimeout(saveTimerRef.current)
         saveTimerRef.current = null
       }
+      return
+    }
+
+    if (!syncOpenedTabs) {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+      }
+      saveSessionOpenedTabs(items)
+      lastSavedPayloadRef.current = payload
       return
     }
 
@@ -722,7 +773,7 @@ export function TabProvider({ children }: TabProviderProps) {
           // Ignore save errors; the reconnect refetch reconciles.
         })
     }, 500)
-  }, [rawTabs, activeTabId, tabsHydrated, saveReconcileTick])
+  }, [rawTabs, activeTabId, tabsHydrated, saveReconcileTick, syncOpenedTabs])
 
   // Clear a pending save only on unmount — NOT on every effect re-run, so a
   // no-op change can't cancel a real save still waiting out its debounce.
@@ -1239,6 +1290,7 @@ export function TabProvider({ children }: TabProviderProps) {
   // while disconnected were dropped by the broadcaster). Returns null on
   // desktop IPC (no disconnect window) → no-op there.
   const refetchTabs = useCallback(async () => {
+    if (!syncOpenedTabs) return
     try {
       const snap = await listOpenedTabs()
       const change: TabsChanged = {
@@ -1264,12 +1316,13 @@ export function TabProvider({ children }: TabProviderProps) {
     } catch (err) {
       console.error("[TabProvider] refetchTabs failed:", err)
     }
-  }, [])
+  }, [syncOpenedTabs])
 
   // Subscribe to the global `tabs://changed` side-channel so any client's
   // open/close/reorder/pin reaches this client live. Ignore our own echo
   // (origin), drop stale versions, buffer events that beat hydration.
   useEffect(() => {
+    if (!syncOpenedTabs) return
     let disposed = false
     let unlisten: (() => void) | undefined
 
@@ -1317,7 +1370,7 @@ export function TabProvider({ children }: TabProviderProps) {
       unlisten?.()
       offReconnect?.()
     }
-  }, [refetchTabs])
+  }, [refetchTabs, syncOpenedTabs])
 
   const closeTab = useCallback(
     (tabId: string) => {
