@@ -336,7 +336,7 @@ function buildPersistItems(
 export function TabProvider({ children }: TabProviderProps) {
   const t = useTranslations("Folder.tabContext")
   const syncOpenedTabs = isLocalDesktop()
-  const { activateConversationPane } = useWorkspaceContext()
+  const { activateConversationPane } = useWorkspaceActions()
   const {
     conversations,
     conversationsLoading,
