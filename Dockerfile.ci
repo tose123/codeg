@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     qpdf \
     pdftk-java \
     tesseract-ocr \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 # libicu72: OfficeCLI ships as a self-contained binary with an embedded .NET
 # runtime, which requires the system ICU library at startup. node:*-bookworm-slim
