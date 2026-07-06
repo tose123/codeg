@@ -7,6 +7,7 @@ import {
   listOpenedTabs,
   saveOpenedTabs,
 } from "@/lib/api"
+import { isLocalDesktop } from "@/lib/platform"
 import { resolveDefaultAgent } from "@/lib/resolve-default-agent"
 import { formatConversationTitle } from "@/lib/conversation-title"
 import {
@@ -14,6 +15,7 @@ import {
   saveLastActiveContext,
   clearLastActiveContext,
 } from "@/lib/last-active-context-storage"
+import { readRecentConversationAgent } from "@/lib/selector-prefs-storage"
 import type {
   AgentType,
   ConversationChange,
@@ -200,6 +202,7 @@ export interface TabStoreState {
 }
 
 const TILE_MODE_STORAGE_KEY = "workspace:tile-mode"
+const SESSION_OPENED_TABS_STORAGE_KEY = "codeg:opened-tabs:session:v1"
 
 /** Per-window/session identity stamped on every tab save and echoed back on
  *  `tabs://changed`, so this client ignores its own broadcast (echo
@@ -271,6 +274,44 @@ function makeConversationTabId(
 
 function makeNewConversationTabId(): string {
   return `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function isStoredOpenedTab(value: unknown): value is OpenedTab {
+  if (!value || typeof value !== "object") return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.id === "number" &&
+    typeof item.folder_id === "number" &&
+    typeof item.conversation_id === "number" &&
+    typeof item.agent_type === "string" &&
+    typeof item.position === "number" &&
+    typeof item.is_active === "boolean" &&
+    typeof item.is_pinned === "boolean"
+  )
+}
+
+function loadSessionOpenedTabs(): OpenedTab[] {
+  if (typeof window === "undefined") return []
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_OPENED_TABS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter(isStoredOpenedTab) : []
+  } catch {
+    return []
+  }
+}
+
+function saveSessionOpenedTabs(items: OpenedTab[]): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(
+      SESSION_OPENED_TABS_STORAGE_KEY,
+      JSON.stringify(items)
+    )
+  } catch {
+    /* ignore storage quota/permission failures */
+  }
 }
 
 function findTabIndexForConversation(
@@ -405,6 +446,7 @@ function resolveAgentForFolder(
     folderDefault,
     inherit,
     sortedTypes: runtime.sortedAvailableAgents,
+    recentAgent: readRecentConversationAgent(),
     fresh: runtime.agentsFresh,
   })
 }
@@ -982,9 +1024,12 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
 
   hydrate: () => {
     let cancelled = false
+    const syncOpenedTabs = isLocalDesktop()
     void (async () => {
       try {
-        const snap = await listOpenedTabs()
+        const snap = syncOpenedTabs
+          ? await listOpenedTabs()
+          : { items: loadSessionOpenedTabs(), version: 0 }
         if (cancelled) return
         version = snap.version
         const restored: TabItemInternal[] = snap.items.map((it) => ({
@@ -1033,10 +1078,12 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
           // applyRemoteSnapshot directly (not handleTabsChanged): `pending` is
           // an authoritative server snapshot, and routing it through the live
           // handler's `version` gate would drop an equal-version reconcile.
-          const pending = pendingRemote
-          if (pending && pending.version > version) {
-            pendingRemote = null
-            applyRemoteSnapshot(pending)
+          if (syncOpenedTabs) {
+            const pending = pendingRemote
+            if (pending && pending.version > version) {
+              pendingRemote = null
+              applyRemoteSnapshot(pending)
+            }
           }
         }
       }
@@ -1048,6 +1095,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
 
   runSaveEffect: () => {
     const st = get()
+    const syncOpenedTabs = isLocalDesktop()
     if (!st.tabsHydrated) return
 
     // A remote snapshot just mutated rawTabs/focus — consume the one-shot guard
@@ -1065,6 +1113,16 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
         clearTimeout(saveTimer)
         saveTimer = null
       }
+      return
+    }
+
+    if (!syncOpenedTabs) {
+      if (saveTimer) {
+        clearTimeout(saveTimer)
+        saveTimer = null
+      }
+      saveSessionOpenedTabs(items)
+      lastSavedPayload = payload
       return
     }
 
@@ -1231,6 +1289,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   handleTabsChanged: (change) => {
+    if (!isLocalDesktop()) return
     if (change.origin === TAB_ORIGIN) {
       if (change.version > version) version = change.version
       return
@@ -1247,6 +1306,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   refetchTabs: async () => {
+    if (!isLocalDesktop()) return
     try {
       const snap = await listOpenedTabs()
       const change: TabsChanged = {

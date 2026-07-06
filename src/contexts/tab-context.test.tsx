@@ -1198,10 +1198,7 @@ describe("TabProvider web tab isolation", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     isLocalDesktopMock.mockReturnValue(false)
-    foldersMock = defaultFoldersMock
-    allFoldersMock = defaultFoldersMock
-    conversationsMock = defaultConversationsMock
-    conversationsLoadingMock = false
+    seedWorkspaceStore()
     listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
     saveOpenedTabsMock.mockResolvedValue({
       accepted: true,
