@@ -38,6 +38,7 @@ import { useEffect, type ReactNode } from "react"
 import {
   buildStreamingTurnsFromLiveMessage,
   ConversationRuntimeProvider,
+  resetConversationRuntimeStore,
   useConversationRuntime,
 } from "@/contexts/conversation-runtime-context"
 import type {
@@ -157,6 +158,13 @@ function renderProvider(children: ReactNode = <Probe />) {
     <ConversationRuntimeProvider>{children}</ConversationRuntimeProvider>
   )
 }
+
+// Runtime state is now a module-level singleton store (was per-provider reducer
+// state). Reset it before every test — this file-level hook runs ahead of each
+// describe's own beforeEach — so the singleton never leaks across tests.
+beforeEach(() => {
+  resetConversationRuntimeStore()
+})
 
 describe("ConversationRuntimeProvider fetch-generation guard", () => {
   let originalConsoleError: typeof console.error

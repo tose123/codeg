@@ -523,7 +523,9 @@ impl AgentParser for ClaudeParser {
                     continue;
                 }
 
-                match self.parse_jsonl_summary(&file_path) {
+                match super::summary_cache::get_or_parse(AgentType::ClaudeCode, &file_path, || {
+                    self.parse_jsonl_summary(&file_path)
+                }) {
                     Ok(Some(mut summary)) => {
                         // If folder_path is still None, derive from directory name
                         if summary.folder_path.is_none() {

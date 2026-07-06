@@ -6,8 +6,8 @@ import { toast } from "sonner"
 import { gitCheckout, resolveWorktreeFolder } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { planBranchSwitch } from "@/lib/branch-switch"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTaskContext } from "@/contexts/task-context"
 import type { FolderDetail, WorktreeResolution } from "@/lib/types"
@@ -50,15 +50,7 @@ export function useSwitchToBranch(): (
   args: SwitchToBranchArgs
 ) => Promise<void> {
   const t = useTranslations("Folder.branchDropdown")
-  const {
-    folders,
-    allFolders,
-    addFolderToWorkspaceById,
-    openWorktreeFolder,
-    setBranch,
-    refreshFolder,
-  } = useAppWorkspace()
-  const { openNewConversationTab } = useTabContext()
+  const { openNewConversationTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
   const { addTask, updateTask } = useTaskContext()
 
@@ -92,6 +84,11 @@ export function useSwitchToBranch(): (
         }
       }
 
+      // Workspace state/actions are event-time reads — getState() sees the
+      // lists as of *now* (post-await), never a stale render capture.
+      const { allFolders, openWorktreeFolder, setBranch, refreshFolder } =
+        useAppWorkspaceStore.getState()
+
       const plan = planBranchSwitch({
         activeFolder,
         resolution,
@@ -103,8 +100,9 @@ export function useSwitchToBranch(): (
       // it, so `resolveAgentForFolder` can see the folder (and apply its saved
       // default agent). `addFolderToWorkspaceById` awaits the backend upsert.
       const ensureOpen = async (folderId: number) => {
-        if (!folders.some((f) => f.id === folderId)) {
-          await addFolderToWorkspaceById(folderId)
+        const workspace = useAppWorkspaceStore.getState()
+        if (!workspace.folders.some((f) => f.id === folderId)) {
+          await workspace.addFolderToWorkspaceById(folderId)
         }
       }
 
@@ -192,18 +190,6 @@ export function useSwitchToBranch(): (
         }
       }
     },
-    [
-      folders,
-      allFolders,
-      addFolderToWorkspaceById,
-      openWorktreeFolder,
-      setBranch,
-      refreshFolder,
-      openConversations,
-      openNewConversationTab,
-      addTask,
-      updateTask,
-      t,
-    ]
+    [openConversations, openNewConversationTab, addTask, updateTask, t]
   )
 }

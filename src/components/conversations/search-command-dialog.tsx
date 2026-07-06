@@ -7,8 +7,8 @@ import { File, Folder } from "lucide-react"
 import { useLocale, useTranslations } from "next-intl"
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { listAllConversations } from "@/lib/api"
@@ -48,7 +48,7 @@ export function SearchCommandDialog({
   const dateFnsLocale =
     locale === "zh-CN" ? zhCN : locale === "zh-TW" ? zhTW : enUS
   const { activeFolder: folder, activeFolderId } = useActiveFolder()
-  const { conversations: allConversations } = useAppWorkspace()
+  const allConversations = useAppWorkspaceStore((s) => s.conversations)
   const folderId = activeFolderId ?? 0
   const conversations = useMemo(
     () =>
@@ -57,7 +57,7 @@ export function SearchCommandDialog({
         : allConversations.filter((c) => c.folder_id === activeFolderId),
     [allConversations, activeFolderId]
   )
-  const { openTab } = useTabContext()
+  const { openTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
   const { openFilePreview } = useWorkspaceActions()
   const { revealInFileTree } = useAuxPanelContext()

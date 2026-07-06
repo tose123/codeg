@@ -15,7 +15,7 @@ import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useTabStore } from "@/contexts/tab-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
 import {
   useWorkspaceActions,
@@ -878,7 +878,8 @@ export function FileTreeTab() {
   const tCommon = useTranslations("Folder.common")
   const { pendingRevealPath, consumePendingRevealPath } = useAuxPanelContext()
   const { activeFolder: folder } = useActiveFolder()
-  const { tabs, activeTabId } = useTabContext()
+  const tabs = useTabStore((s) => s.tabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
   const { createTerminalInDirectory } = useTerminalContext()
   const { activeFilePath } = useWorkspaceFileTabs()
   const { openBranchDiff, openFilePreview, openWorkingTreeDiff } =

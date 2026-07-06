@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use crate::acp::types::EventEnvelope;
+use crate::acp::types::{AcpEvent, EventEnvelope, ToolCallImageInfo, UserMessageBlock};
 
 /// Capacity of the per-connection broadcast channel. Sized to absorb a brief
 /// burst when a slow subscriber lags; broadcast::channel drops oldest events
@@ -193,23 +193,286 @@ impl RecentEventsBuffer {
     }
 }
 
-/// Best-effort size estimate for an event envelope. Uses serialized JSON
-/// length, falling back to a small constant if serialization fails (which
-/// shouldn't happen for well-formed AcpEvents but we don't want to panic).
+/// Serialized-JSON length of a string: its UTF-8 byte length plus the extra
+/// bytes JSON escaping adds (the two surrounding quotes, `\"`, `\\`, and
+/// control-char escapes), computed WITHOUT allocating. Escape-awareness matters
+/// because this feeds the per-event size cap: an escape-heavy payload (tool
+/// output full of quotes/newlines, say) serializes much larger than its raw byte
+/// length and must still be recognized as oversized.
+fn json_str_len(s: &str) -> usize {
+    let mut extra = 0usize;
+    for b in s.bytes() {
+        match b {
+            // `"`, `\`, and the short control escapes (\b \t \n \f \r) each
+            // serialize to two bytes → one extra byte over the raw byte.
+            b'"' | b'\\' | 0x08 | 0x09 | 0x0A | 0x0C | 0x0D => extra += 1,
+            // Any other control char serializes as `\u00XX` (six bytes) → +5.
+            c if c < 0x20 => extra += 5,
+            _ => {}
+        }
+    }
+    // + 2 for the surrounding quotes.
+    2 + s.len() + extra
+}
+
+/// Decimal digit count of `n` (0 → 1), without allocating.
+fn decimal_len(n: u64) -> usize {
+    if n == 0 {
+        1
+    } else {
+        (n.ilog10() as usize) + 1
+    }
+}
+
+/// Serialized length of a JSON number, without allocating. Integers are sized by
+/// exact digit count (plus a sign byte); non-integers (f64) fall back to a
+/// conservative upper bound — serde_json prints an f64 to at most ~24 bytes — so
+/// a number-dense payload is never undercounted.
+fn number_size(n: &serde_json::Number) -> usize {
+    if let Some(u) = n.as_u64() {
+        decimal_len(u)
+    } else if let Some(i) = n.as_i64() {
+        1 + decimal_len(i.unsigned_abs())
+    } else {
+        24
+    }
+}
+
+/// Cheap byte estimate for a JSON value's footprint — sums (escape-aware) string
+/// and key lengths, numbers, and the structural punctuation JSON serialization
+/// adds: brackets/braces, the `:` after each key, and the `,` BETWEEN elements.
+/// Computed without serializing and never undercounting, so it stays a safe
+/// proxy for the per-event size cap even for dense arrays/objects.
+fn json_value_size(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
+        serde_json::Value::Number(n) => number_size(n),
+        serde_json::Value::String(s) => json_str_len(s),
+        serde_json::Value::Array(items) => {
+            // `[` + elements + `,` between them + `]`.
+            2 + items.len().saturating_sub(1)
+                + items.iter().map(json_value_size).sum::<usize>()
+        }
+        serde_json::Value::Object(map) => {
+            // `{` + `"key":value` pairs + `,` between them + `}`.
+            2 + map.len().saturating_sub(1)
+                + map
+                    .iter()
+                    .map(|(k, v)| json_str_len(k) + 1 + json_value_size(v))
+                    .sum::<usize>()
+        }
+    }
+}
+
+fn opt_str_size(s: &Option<String>) -> usize {
+    s.as_ref().map_or(0, |v| json_str_len(v))
+}
+
+fn opt_json_size(v: &Option<serde_json::Value>) -> usize {
+    v.as_ref().map_or(0, json_value_size)
+}
+
+/// Sum the payload of any attached images: the `[` `]` brackets, each image's
+/// `{"data":"..","mime_type":".."[,"uri":".."]}` object structure, and its
+/// fields. `data` (the base64 image, the dominant term) is sized escape-aware
+/// like every other string — for valid base64 that is just its byte length plus
+/// the two quotes, but `data` is a plain `String`, so sizing it defensively
+/// rather than by raw `len()` keeps the `estimate >= serialized` invariant true
+/// even if a producer put JSON-escapable bytes in the field (else an oversized
+/// image could slip under the per-event cap). This does scan `data`, but with no
+/// allocation — far cheaper than the full-envelope `serde_json::to_vec` this
+/// replaced — and image events are infrequent (not on the per-token path).
+fn images_size(images: &Option<Vec<ToolCallImageInfo>>) -> usize {
+    images.as_ref().map_or(0, |imgs| {
+        // `PER_IMAGE_STRUCT` conservatively bounds each object's keys/braces and
+        // the trailing comma; `+ 2` is the array brackets.
+        const PER_IMAGE_STRUCT: usize = 48;
+        2 + imgs
+            .iter()
+            .map(|img| {
+                PER_IMAGE_STRUCT
+                    + json_str_len(&img.data)
+                    + json_str_len(&img.mime_type)
+                    + opt_str_size(&img.uri)
+            })
+            .sum::<usize>()
+    })
+}
+
+/// Byte size of a single user-message block, including its `{"type":..,..}`
+/// object structure (keys/braces) as a small conservative constant on top of the
+/// escape-aware value bytes (image `data` sized like `images_size`).
+fn user_block_size(block: &UserMessageBlock) -> usize {
+    match block {
+        // `{"type":"text","text":<v>}`
+        UserMessageBlock::Text { text } => 24 + json_str_len(text),
+        // `{"type":"image","data":"<d>","mime_type":<v>}`
+        UserMessageBlock::Image { data, mime_type } => {
+            48 + json_str_len(data) + json_str_len(mime_type)
+        }
+    }
+}
+
+/// Best-effort byte estimate for an event envelope's footprint in the recent-
+/// events ring buffer. Feeds BOTH the running byte cap and the per-event
+/// `RECENT_EVENT_MAX_BYTES` threshold, so it must track the serialized size
+/// closely enough that oversized events (large tool output, base64 images) still
+/// trip the per-event cap and force a snapshot fallback — hence the escape-aware
+/// string sizing (see `json_str_len`).
+///
+/// `emit_with_state` calls this on every event while holding the `SessionState`
+/// write lock. The hot, high-frequency, and potentially-large variants —
+/// streaming text/thinking deltas, tool calls and updates and user messages
+/// (which can carry multi-MB base64 images), and forwarded Claude SDK messages —
+/// are therefore estimated STRUCTURALLY from their string/JSON fields, with no
+/// serialization: serializing a per-token delta or a multi-MB image on that
+/// locked hot path only to measure and discard the bytes was the cost this
+/// replaced. Every other variant is small and infrequent, so it falls back to an
+/// exact serialized length — cheap here, faithful to the prior sizing, and
+/// needing no upkeep as variants are added.
 fn estimate_envelope_size(envelope: &EventEnvelope) -> usize {
-    serde_json::to_vec(envelope).map(|v| v.len()).unwrap_or(256)
+    // Conservative fixed overhead: the envelope skeleton (`{"seq":N,...}`), the
+    // `type` tag, and every structural variant's field KEYS/colons plus the
+    // `null`s that its non-skipped `Option::None` fields serialize to. It must
+    // exceed the largest structural variant's fixed serialized overhead
+    // (ToolCall / ToolCallUpdate: ~190 B with a 20-digit seq and several `null`
+    // fields) so `base + payload` NEVER undercounts the serialized envelope — the
+    // invariant the per-event cap relies on to reject oversized events, asserted
+    // for every structural branch by `estimate_never_undercounts_serialized_*`.
+    // Over-counting small events is harmless: streaming deltas hit the count cap
+    // long before this matters, and it is negligible against a large payload.
+    const ENVELOPE_OVERHEAD: usize = 256;
+    // `connection_id` is sized escape-aware like every other string so the
+    // `estimate >= serialized` invariant holds for ANY id, not just the
+    // UUID-shaped ones production emits. (`ENVELOPE_OVERHEAD` covers its key.)
+    let base = ENVELOPE_OVERHEAD + json_str_len(&envelope.connection_id);
+    let payload = match &envelope.payload {
+        AcpEvent::ContentDelta { text } | AcpEvent::Thinking { text } => {
+            json_str_len(text)
+        }
+        AcpEvent::ClaudeSdkMessage {
+            session_id,
+            message,
+        } => json_str_len(session_id) + json_value_size(message),
+        AcpEvent::ToolCall {
+            tool_call_id,
+            title,
+            kind,
+            status,
+            content,
+            raw_input,
+            raw_output,
+            locations,
+            meta,
+            images,
+        } => {
+            json_str_len(tool_call_id)
+                + json_str_len(title)
+                + json_str_len(kind)
+                + json_str_len(status)
+                + opt_str_size(content)
+                + opt_str_size(raw_input)
+                + opt_str_size(raw_output)
+                + opt_json_size(locations)
+                + opt_json_size(meta)
+                + images_size(images)
+        }
+        AcpEvent::ToolCallUpdate {
+            tool_call_id,
+            title,
+            status,
+            content,
+            raw_input,
+            raw_output,
+            locations,
+            meta,
+            images,
+            // Spelled out (not `..`) so a newly-added large field forces this
+            // estimator to be revisited rather than silently under-counted.
+            raw_output_append: _,
+        } => {
+            json_str_len(tool_call_id)
+                + opt_str_size(title)
+                + opt_str_size(status)
+                + opt_str_size(content)
+                + opt_str_size(raw_input)
+                + opt_str_size(raw_output)
+                + opt_json_size(locations)
+                + opt_json_size(meta)
+                + images_size(images)
+        }
+        // Can carry a base64 `UserMessageBlock::Image` from a pasted prompt
+        // image, so it is sized structurally too — otherwise a multi-MB user
+        // image would be fully serialized under the write lock via the fallback.
+        AcpEvent::UserMessage { message_id, blocks } => {
+            // `"blocks":[` + block objects + `,` between them + `]` (the
+            // `message_id`/`blocks` keys themselves are covered by the base).
+            json_str_len(message_id)
+                + 2
+                + blocks.len().saturating_sub(1)
+                + blocks.iter().map(user_block_size).sum::<usize>()
+        }
+        // Small, infrequent variants: an exact serialized length is cheap here
+        // and preserves the prior threshold behavior; the 256 fallback only
+        // guards the (practically impossible) serialization failure.
+        other => serde_json::to_vec(other).map_or(256, |v| v.len()),
+    };
+    base + payload
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::types::AcpEvent;
 
     fn make_envelope(seq: u64, text: &str) -> Arc<EventEnvelope> {
         Arc::new(EventEnvelope {
             seq,
             connection_id: "c".into(),
             payload: AcpEvent::ContentDelta { text: text.into() },
+        })
+    }
+
+    fn tool_update_with_image(seq: u64, base64: String) -> Arc<EventEnvelope> {
+        Arc::new(EventEnvelope {
+            seq,
+            connection_id: "c".into(),
+            payload: AcpEvent::ToolCallUpdate {
+                tool_call_id: "t1".into(),
+                title: None,
+                status: None,
+                content: None,
+                raw_input: None,
+                raw_output: None,
+                raw_output_append: None,
+                locations: None,
+                meta: None,
+                images: Some(vec![ToolCallImageInfo {
+                    data: base64,
+                    mime_type: "image/png".into(),
+                    uri: None,
+                }]),
+            },
+        })
+    }
+
+    fn user_message_with_image(seq: u64, base64: String) -> Arc<EventEnvelope> {
+        Arc::new(EventEnvelope {
+            seq,
+            connection_id: "c".into(),
+            payload: AcpEvent::UserMessage {
+                message_id: "u1".into(),
+                blocks: vec![UserMessageBlock::Image {
+                    data: base64,
+                    mime_type: "image/png".into(),
+                }],
+            },
         })
     }
 
@@ -295,6 +558,334 @@ mod tests {
         // snapshot path because `range_after(0)` returns None.
         assert!(buf.range_after(0).is_none());
         assert!(buf.range_after(2).is_none());
+    }
+
+    #[test]
+    fn estimate_counts_tool_call_image_base64_bytes() {
+        // The structural estimate must still include the base64 image payload
+        // (no serialization), so an image-bearing tool update sizes the same
+        // ballpark as the old serialize-based estimate and trips the per-event
+        // cap → snapshot fallback, rather than being under-counted and replayed.
+        let big = "A".repeat(100_000);
+        let size = estimate_envelope_size(&tool_update_with_image(1, big.clone()));
+        assert!(
+            size >= big.len(),
+            "estimate {size} must include the {}-byte image payload",
+            big.len()
+        );
+        assert!(size > RECENT_EVENT_MAX_BYTES);
+    }
+
+    #[test]
+    fn image_bearing_tool_update_trips_per_event_cap() {
+        let mut buf = RecentEventsBuffer::new();
+        assert_eq!(buf.push(make_envelope(1, "a")), 0);
+        // A large base64 image (counted structurally) exceeds the per-event cap
+        // and clears the buffer, exactly like an oversized text event.
+        let huge_image = "A".repeat(RECENT_EVENT_MAX_BYTES + 1);
+        let evicted = buf.push(tool_update_with_image(2, huge_image));
+        assert_eq!(evicted, 1, "oversized image event clears the buffer");
+        assert!(buf.range_after(0).is_none());
+    }
+
+    #[test]
+    fn small_content_delta_estimate_is_cheap_and_stored() {
+        let mut buf = RecentEventsBuffer::new();
+        assert_eq!(buf.push(make_envelope(1, "hello")), 0);
+        assert_eq!(buf.len(), 1);
+        // A per-token delta estimates as its text length plus bounded overhead —
+        // far under the per-event cap, so it is retained for replay.
+        let size = estimate_envelope_size(&make_envelope(2, "hello"));
+        assert!(size >= "hello".len());
+        // Bounded fixed overhead — far under the per-event cap.
+        assert!(size < RECENT_EVENT_MAX_BYTES);
+    }
+
+    #[test]
+    fn estimate_counts_user_message_image_base64_bytes() {
+        // A pasted prompt image rides in UserMessage; it must be sized
+        // structurally (not via the serialize fallback) so its base64 is not
+        // serialized under the write lock, yet is still counted toward the cap.
+        let big = "A".repeat(100_000);
+        let size = estimate_envelope_size(&user_message_with_image(1, big.clone()));
+        assert!(
+            size >= big.len(),
+            "estimate {size} must include the {}-byte image payload",
+            big.len()
+        );
+        assert!(size > RECENT_EVENT_MAX_BYTES);
+    }
+
+    #[test]
+    fn image_bearing_user_message_trips_per_event_cap() {
+        let mut buf = RecentEventsBuffer::new();
+        assert_eq!(buf.push(make_envelope(1, "a")), 0);
+        let huge_image = "A".repeat(RECENT_EVENT_MAX_BYTES + 1);
+        let evicted = buf.push(user_message_with_image(2, huge_image));
+        assert_eq!(evicted, 1, "oversized user-image event clears the buffer");
+        assert!(buf.range_after(0).is_none());
+    }
+
+    #[test]
+    fn escape_heavy_text_estimate_tracks_serialized_size() {
+        // 40 KiB of quotes: the RAW length is under the per-event cap, but each
+        // `"` serializes to `\"`, so the JSON is ~80 KiB and the old exact sizing
+        // rejected it. A raw-`len()` estimate would wrongly retain it; the
+        // escape-aware estimate must likewise exceed the cap and never undercount
+        // the true serialized length.
+        let text = "\"".repeat(40 * 1024);
+        let env = make_envelope(1, &text);
+        let est = estimate_envelope_size(&env);
+        let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+        assert!(
+            text.len() < RECENT_EVENT_MAX_BYTES,
+            "raw text must be under the cap for this test to be meaningful"
+        );
+        assert!(serialized > RECENT_EVENT_MAX_BYTES);
+        assert!(
+            est > RECENT_EVENT_MAX_BYTES,
+            "escape-aware estimate {est} must trip the cap like serialized {serialized}"
+        );
+        // Never undercount the serialized envelope (the per-event cap invariant).
+        assert!(est >= serialized, "estimate {est} < serialized {serialized}");
+    }
+
+    #[test]
+    fn json_value_size_accounts_for_structural_commas_over_the_cap() {
+        // 30k empty strings inside a ClaudeSdkMessage: the element bytes alone
+        // (~60 KiB) are UNDER the per-event cap, but the 29,999 commas push the
+        // serialized JSON (~90 KiB) over it. A walker that ignores commas would
+        // undercount and wrongly retain an oversized replay event.
+        let arr: Vec<serde_json::Value> = (0..30_000)
+            .map(|_| serde_json::Value::String(String::new()))
+            .collect();
+        let env = Arc::new(EventEnvelope {
+            seq: 1,
+            connection_id: "c".into(),
+            payload: AcpEvent::ClaudeSdkMessage {
+                session_id: "s".into(),
+                message: serde_json::Value::Array(arr),
+            },
+        });
+        let est = estimate_envelope_size(&env);
+        let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+        assert!(serialized > RECENT_EVENT_MAX_BYTES);
+        assert!(
+            est > RECENT_EVENT_MAX_BYTES,
+            "comma-aware estimate {est} must trip the cap like serialized {serialized}"
+        );
+        assert!(est >= serialized, "estimate {est} < serialized {serialized}");
+    }
+
+    #[test]
+    fn json_value_size_never_undercounts_numbers_and_structure() {
+        // Mixed structure with integers, a nested array, a negative number, and
+        // a bool: the estimate must be >= the true serialized length (it may
+        // over-count slightly, never under).
+        let v = serde_json::json!({
+            "a": 12345,
+            "b": [1, 2, 3],
+            "c": -9_999_999_999i64,
+            "d": true,
+        });
+        let est = json_value_size(&v);
+        let serialized = serde_json::to_vec(&v).expect("serialize").len();
+        assert!(
+            est >= serialized,
+            "estimate {est} must be >= serialized {serialized}"
+        );
+    }
+
+    fn assert_ge_serialized(env: &Arc<EventEnvelope>) {
+        let est = estimate_envelope_size(env);
+        let serialized = serde_json::to_vec(&**env).expect("serialize").len();
+        assert!(
+            est >= serialized,
+            "estimate {est} < serialized {serialized} for {:?}",
+            env.payload
+        );
+    }
+
+    #[test]
+    fn estimate_never_undercounts_serialized_for_structural_variants() {
+        // The per-event cap rejects events whose SERIALIZED size exceeds it, so
+        // the structural estimate must never fall below the serialized length for
+        // any structural branch — else an oversized event would be wrongly
+        // retained and replayed. Covers plain/escape-heavy text, thinking, nested
+        // Claude SDK JSON, a fully-populated ToolCall, an all-`null`-but-near-cap
+        // ToolCallUpdate, and user messages with many blocks / an image.
+        let cases: Vec<Arc<EventEnvelope>> = vec![
+            make_envelope(1, "plain"),
+            make_envelope(2, &"\"\\\n\t".repeat(500)),
+            Arc::new(EventEnvelope {
+                seq: 3,
+                connection_id: "conn-xyz".into(),
+                payload: AcpEvent::Thinking {
+                    text: "reason\"ing\n".into(),
+                },
+            }),
+            Arc::new(EventEnvelope {
+                seq: 4,
+                connection_id: "c".into(),
+                payload: AcpEvent::ClaudeSdkMessage {
+                    session_id: "s".into(),
+                    message: serde_json::json!({
+                        "a": [1, 2, 3],
+                        "b": "x\"y",
+                        "c": true,
+                        "d": null,
+                        "e": 1.5,
+                        "f": {"g": -7},
+                    }),
+                },
+            }),
+            Arc::new(EventEnvelope {
+                seq: 5,
+                connection_id: "cc".into(),
+                payload: AcpEvent::ToolCall {
+                    tool_call_id: "call_1".into(),
+                    title: "Ti\"tle".into(),
+                    kind: "edit".into(),
+                    status: "in_progress".into(),
+                    content: Some("co\nnt".into()),
+                    raw_input: Some("{\"x\":1}".into()),
+                    raw_output: Some("out\tput".into()),
+                    locations: Some(serde_json::json!([{"path": "a.rs", "line": 3}])),
+                    meta: Some(serde_json::json!({"k": "v"})),
+                    images: Some(vec![ToolCallImageInfo {
+                        data: "AAAA".into(),
+                        mime_type: "image/png".into(),
+                        uri: Some("u".into()),
+                    }]),
+                },
+            }),
+            Arc::new(EventEnvelope {
+                seq: 6,
+                connection_id: "c".into(),
+                payload: AcpEvent::ToolCallUpdate {
+                    tool_call_id: "t".into(),
+                    title: None,
+                    status: None,
+                    content: None,
+                    raw_input: None,
+                    raw_output: Some("z".repeat(65_450)),
+                    raw_output_append: None,
+                    locations: None,
+                    meta: None,
+                    images: None,
+                },
+            }),
+            Arc::new(EventEnvelope {
+                seq: 7,
+                connection_id: "c".into(),
+                payload: AcpEvent::UserMessage {
+                    message_id: "u".into(),
+                    blocks: (0..2000)
+                        .map(|_| UserMessageBlock::Text {
+                            text: String::new(),
+                        })
+                        .collect(),
+                },
+            }),
+            user_message_with_image(8, "A".repeat(1000)),
+            tool_update_with_image(9, "A".repeat(1000)),
+        ];
+        for env in &cases {
+            assert_ge_serialized(env);
+        }
+    }
+
+    #[test]
+    fn tool_update_near_cap_trips_via_field_key_overhead() {
+        // raw_output alone is just under 64 KiB, but the other fields' keys and
+        // `null`s push the serialized envelope over it. A values-only estimate
+        // would wrongly retain it; the estimate must also trip the cap.
+        let env = Arc::new(EventEnvelope {
+            seq: 1,
+            connection_id: "c".into(),
+            payload: AcpEvent::ToolCallUpdate {
+                tool_call_id: "t".into(),
+                title: None,
+                status: None,
+                content: None,
+                raw_input: None,
+                raw_output: Some("z".repeat(65_450)),
+                raw_output_append: None,
+                locations: None,
+                meta: None,
+                images: None,
+            },
+        });
+        let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+        assert!(serialized > RECENT_EVENT_MAX_BYTES, "serialized {serialized}");
+        assert!(
+            estimate_envelope_size(&env) > RECENT_EVENT_MAX_BYTES,
+            "estimate must trip the cap like serialized {serialized}"
+        );
+    }
+
+    #[test]
+    fn user_message_many_small_blocks_trips_per_event_cap() {
+        // Thousands of empty text blocks: payload strings are ~0 bytes, but the
+        // per-block `{"type":"text","text":""}` wrappers + commas serialize well
+        // over 64 KiB. The estimate must count that structure and trip the cap.
+        let blocks: Vec<UserMessageBlock> = (0..4000)
+            .map(|_| UserMessageBlock::Text {
+                text: String::new(),
+            })
+            .collect();
+        let env = Arc::new(EventEnvelope {
+            seq: 1,
+            connection_id: "c".into(),
+            payload: AcpEvent::UserMessage {
+                message_id: "u".into(),
+                blocks,
+            },
+        });
+        let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+        assert!(serialized > RECENT_EVENT_MAX_BYTES, "serialized {serialized}");
+        assert!(estimate_envelope_size(&env) > RECENT_EVENT_MAX_BYTES);
+    }
+
+    #[test]
+    fn escape_heavy_image_data_trips_per_event_cap() {
+        // `data` is a plain String, not validated base64 here. A producer that
+        // put escapable bytes in it (65,200 quotes ≈ 65 KiB raw, UNDER the cap)
+        // serializes to ~130 KiB (each `"` → `\"`). Escape-aware `data` sizing
+        // must count that expansion so the event still trips the cap, in BOTH the
+        // UserMessage and ToolCall image paths — a raw-`len()` estimate would put
+        // it under the cap and wrongly retain a >64 KiB replay event.
+        let evil = "\"".repeat(65_200);
+        for env in [
+            user_message_with_image(1, evil.clone()),
+            tool_update_with_image(1, evil.clone()),
+        ] {
+            let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+            assert!(serialized > RECENT_EVENT_MAX_BYTES, "serialized {serialized}");
+            assert!(
+                estimate_envelope_size(&env) > RECENT_EVENT_MAX_BYTES,
+                "escape-aware image sizing must trip the cap (serialized {serialized})"
+            );
+            assert_ge_serialized(&env);
+        }
+    }
+
+    #[test]
+    fn escape_heavy_connection_id_trips_per_event_cap() {
+        // connection_id lives on the envelope, not the payload; it must be sized
+        // escape-aware too. A quote-filled id (raw ~65 KiB, under the cap) that
+        // serializes to ~130 KiB would otherwise be wrongly retained.
+        let env = Arc::new(EventEnvelope {
+            seq: 1,
+            connection_id: "\"".repeat(65_200),
+            payload: AcpEvent::ContentDelta {
+                text: String::new(),
+            },
+        });
+        let serialized = serde_json::to_vec(&*env).expect("serialize").len();
+        assert!(serialized > RECENT_EVENT_MAX_BYTES, "serialized {serialized}");
+        assert!(estimate_envelope_size(&env) > RECENT_EVENT_MAX_BYTES);
+        assert_ge_serialized(&env);
     }
 
     #[test]

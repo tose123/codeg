@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ConversationFolderBranchPicker } from "./conversation-context-bar"
 import type { FolderDetail } from "@/lib/types"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 
 // ---------------------------------------------------------------------------
 // Mocks. The picker reads three contexts/hooks and one api call; everything
@@ -34,7 +38,8 @@ vi.mock("@/lib/api", () => ({
   gitCheckout: (path: string, branch: string) => gitCheckout(path, branch),
 }))
 
-// Tab/workspace state, mutated per test before render.
+// Tab state, mutated per test before render. Workspace state (folders /
+// branches) is seeded into the real zustand store in beforeEach.
 let tabs: Array<{
   id: string
   folderId: number
@@ -42,20 +47,18 @@ let tabs: Array<{
   isChat?: boolean
 }> = []
 let activeTabId: string | null = null
-let allFolders: FolderDetail[] = []
-let branches = new Map<number, string>()
 
 vi.mock("@/contexts/tab-context", () => ({
-  useTabContext: () => ({
-    tabs,
-    activeTabId,
+  useTabStore: (
+    selector: (s: {
+      tabs: typeof tabs
+      activeTabId: typeof activeTabId
+    }) => unknown
+  ) => selector({ tabs, activeTabId }),
+  useTabActions: () => ({
     openNewConversationTab,
     openChatModeTab: vi.fn(),
   }),
-}))
-
-vi.mock("@/contexts/app-workspace-context", () => ({
-  useAppWorkspace: () => ({ folders: allFolders, allFolders, branches }),
 }))
 
 function mkFolder(p: Partial<FolderDetail> & { id: number }): FolderDetail {
@@ -90,8 +93,12 @@ beforeEach(() => {
     remote: [],
     worktree_branches: ["feat-x"],
   })
-  allFolders = [repo]
-  branches = new Map([[1, "main"]])
+  resetAppWorkspaceStore()
+  useAppWorkspaceStore.setState({
+    folders: [repo],
+    allFolders: [repo],
+    branches: new Map([[1, "main"]]),
+  })
 })
 
 afterEach(() => cleanup())

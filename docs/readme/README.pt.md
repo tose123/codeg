@@ -41,10 +41,10 @@ Codeg (Code Generation) é um workspace de codificação multiagente. Ele reúne
   </tr>
   <tr>
     <td align="center" width="220">
-      <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE" target="_blank"><img src="../images/sui-xiang.jpg" alt="Sui-Xiang AI Gateway" width="200" /></a><br/>
-      <strong><a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">Sui-Xiang AI Gateway</a></strong>
+      <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE" target="_blank"><img src="../images/sui-xiang.jpg" alt="随想AI中转站" width="200" /></a><br/>
+      <strong><a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">随想AI中转站</a></strong>
     </td>
-    <td>Agradecemos ao Sui-Xiang AI Gateway por patrocinar este projeto! O Sui-Xiang AI Gateway é um provedor de retransmissão de API confiável e eficiente, oferecendo serviços de retransmissão para Claude, Codex, Gemini e mais. Contas novas ganham ¥0,5 de crédito de teste a cada check-in diário após o <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">cadastro</a>; as recargas são creditadas 1:1, sem assinatura e com pagamento por uso. Redundância de múltiplas linhas, recuperação de desastres entre regiões e failover automático mantêm as conexões SSE de longa duração sem interrupções.</td>
+    <td>Agradecemos ao 随想AI中转站 por patrocinar este projeto! O 随想AI中转站 é um provedor de retransmissão de API confiável e eficiente, oferecendo serviços de retransmissão para Claude, Codex, Gemini e mais. Contas novas ganham ¥0,5 de crédito de teste a cada check-in diário após o <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">cadastro</a>; as recargas são creditadas 1:1, sem assinatura e com pagamento por uso. Redundância de múltiplas linhas, recuperação de desastres entre regiões e failover automático mantêm as conexões SSE de longa duração sem interrupções.</td>
   </tr>
 </table>
 

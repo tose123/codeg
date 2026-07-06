@@ -1,43 +1,28 @@
 "use client"
 
-import { createContext, useContext, useMemo, type ReactNode } from "react"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useShallow } from "zustand/react/shallow"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import type { FolderDetail } from "@/lib/types"
 
-interface ActiveFolderContextValue {
+interface ActiveFolderValue {
   activeFolderId: number | null
   activeFolder: FolderDetail | null
 }
 
-const ActiveFolderContext = createContext<ActiveFolderContextValue | null>(null)
-
-export function useActiveFolder() {
-  const ctx = useContext(ActiveFolderContext)
-  if (!ctx) {
-    throw new Error("useActiveFolder must be used within ActiveFolderProvider")
-  }
-  return ctx
-}
-
-export function ActiveFolderProvider({ children }: { children: ReactNode }) {
-  const { allFolders, activeFolderId } = useAppWorkspace()
-
-  const activeFolder = useMemo(
-    () =>
-      activeFolderId != null
-        ? (allFolders.find((f) => f.id === activeFolderId) ?? null)
-        : null,
-    [activeFolderId, allFolders]
-  )
-
-  const value = useMemo<ActiveFolderContextValue>(
-    () => ({ activeFolderId, activeFolder }),
-    [activeFolderId, activeFolder]
-  )
-
-  return (
-    <ActiveFolderContext.Provider value={value}>
-      {children}
-    </ActiveFolderContext.Provider>
+/**
+ * Derived view over the app-workspace store: the active folder id (driven by
+ * the active tab) plus its resolved `FolderDetail`. `useShallow` keeps the
+ * returned pair stable, so consumers only re-render when the id or the folder
+ * object itself changes — not on unrelated folder-list churn.
+ */
+export function useActiveFolder(): ActiveFolderValue {
+  return useAppWorkspaceStore(
+    useShallow((s) => ({
+      activeFolderId: s.activeFolderId,
+      activeFolder:
+        s.activeFolderId != null
+          ? (s.allFolders.find((f) => f.id === s.activeFolderId) ?? null)
+          : null,
+    }))
   )
 }

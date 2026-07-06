@@ -23,30 +23,42 @@ const mockAnswerQuestion = vi.fn()
 const mockSyncCancel = vi.fn()
 const mockSyncTurnMetadata = vi.fn(() => mockSyncCancel)
 
-vi.mock("@/contexts/conversation-runtime-context", async () => {
+vi.mock("@/stores/conversation-runtime-store", async () => {
   const actual = await vi.importActual<
-    typeof import("@/contexts/conversation-runtime-context")
-  >("@/contexts/conversation-runtime-context")
+    typeof import("@/stores/conversation-runtime-store")
+  >("@/stores/conversation-runtime-store")
   return {
     ...actual,
-    useConversationRuntime: () => ({
+    // Bridge + body pull mutators from the stable actions bundle.
+    useConversationRuntimeActions: () => ({
       setLiveMessage: mockSetLiveMessage,
       completeTurn: mockCompleteTurn,
       removeConversation: mockRemoveConversation,
       fetchDetail: mockFetchDetail,
       refetchDetail: mockRefetchDetail,
       setLiveOwnsActiveTurn: mockSetLiveOwnsActiveTurn,
-      getSession: mockGetSession,
-      getTimelineTurns: mockGetTimelineTurns,
       syncTurnMetadata: mockSyncTurnMetadata,
-      // Members that the body / list view may call but the bridge doesn't.
+      // Members the body / list view may call but the bridge doesn't.
       appendOptimisticTurn: vi.fn(),
+      removeOptimisticTurn: vi.fn(),
+      appendViewerUserTurn: vi.fn(),
       setExternalId: vi.fn(),
       setSyncState: vi.fn(),
       setPendingCleanup: vi.fn(),
       setAcpLoadError: vi.fn(),
-      getConversationIdByExternalId: vi.fn(),
+      migrateConversation: vi.fn(),
+      reset: vi.fn(),
     }),
+    // Session reads flow through a `byConversationId` selector (useConversationDetail
+    // + MessageListView); the timeline read flows through `selectTimelineTurns`.
+    // Route both back to the same spies the old `getSession`/`getTimelineTurns`
+    // mock drove.
+    useConversationRuntimeStore: (selector: (s: unknown) => unknown) =>
+      selector({
+        byConversationId: { get: (id: number) => mockGetSession(id) },
+        conversationIdByExternalId: { get: () => undefined },
+      }),
+    selectTimelineTurns: () => mockGetTimelineTurns(),
   }
 })
 

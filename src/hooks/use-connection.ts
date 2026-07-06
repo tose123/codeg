@@ -1,13 +1,12 @@
 "use client"
 
-import { useCallback, useMemo, useSyncExternalStore } from "react"
+import { useCallback, useMemo, useRef, useSyncExternalStore } from "react"
 import {
   useAcpActions,
   useConnectionStore,
   getCachedSelectors,
   type ClaudeApiRetryState,
   type ConnectionState,
-  type LiveMessage,
   type PendingPermission,
   type PendingUserMessage,
   type PendingQuestion,
@@ -53,7 +52,6 @@ export interface UseConnectionReturn {
   modes: SessionModeStateInfo | null
   configOptions: SessionConfigOptionInfo[] | null
   availableCommands: AvailableCommandInfo[] | null
-  liveMessage: LiveMessage | null
   pendingPermission: PendingPermission | null
   pendingUserMessage: PendingUserMessage | null
   pendingQuestion: PendingQuestion | null
@@ -104,6 +102,39 @@ function derive(conn: ConnectionState | undefined) {
   return conn
 }
 
+// ConnectionState fields that change at streaming frequency but are NOT part of
+// `UseConnectionReturn` (no consumer renders them), so a change to one of these
+// alone must NOT re-render this hook's consumers:
+//   - `liveMessage`: the accumulating assistant message (per STREAM_BATCH),
+//     rendered from the conversation-runtime store instead.
+//   - `lastAppliedSeq`: the seq-dedup cursor, advanced by EVENT_APPLIED after
+//     EVERY accepted envelope — so without excluding it a `content_delta` token
+//     would still churn the snapshot and re-render the keep-alive panel per event.
+const CONN_NON_RENDER_KEYS = new Set<keyof ConnectionState>([
+  "liveMessage",
+  "lastAppliedSeq",
+])
+
+// Shallow-equal two connection snapshots for RENDER purposes: equal iff every
+// field a useConnection consumer can observe is identical. Keys are iterated
+// dynamically so a newly-added ConnectionState field is compared by default
+// (fail toward re-rendering, never toward a silently-missed update); only the
+// explicitly internal keys above are ignored. Exported for tests.
+export function connRenderEqual(
+  a: ConnectionState | null,
+  b: ConnectionState | null
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  const aKeys = Object.keys(a) as (keyof ConnectionState)[]
+  if (aKeys.length !== Object.keys(b).length) return false
+  for (const key of aKeys) {
+    if (CONN_NON_RENDER_KEYS.has(key)) continue
+    if (!Object.is(a[key], b[key])) return false
+  }
+  return true
+}
+
 export function useConnection(contextKey: string): UseConnectionReturn {
   const store = useConnectionStore()
   const actions = useAcpActions()
@@ -112,10 +143,37 @@ export function useConnection(contextKey: string): UseConnectionReturn {
     (cb: () => void) => store.subscribeKey(contextKey, cb),
     [store, contextKey]
   )
-  const getSnapshot = useCallback(
-    () => derive(store.getConnection(contextKey)),
-    [store, contextKey]
-  )
+  // Keep the snapshot reference STABLE across streaming-only changes (liveMessage
+  // and the lastAppliedSeq dedup cursor) so this hook — and its consumers,
+  // notably the keep-alive conversation panel — do NOT re-render on every
+  // streaming token. The live message reaches the UI via the conversation-runtime
+  // store (mirrored there by the connection dispatch; see
+  // `registerLiveMessageSink`), so no useConnection consumer renders it. A
+  // per-instance cache recomputes the stable snapshot only when a render-relevant
+  // field changes; a contextKey change resets it.
+  const cacheRef = useRef<{
+    key: string
+    raw: ConnectionState | null
+    stable: ConnectionState | null
+  }>({ key: contextKey, raw: null, stable: null })
+  const getSnapshot = useCallback((): ConnectionState | null => {
+    const cache = cacheRef.current
+    if (cache.key !== contextKey) {
+      cache.key = contextKey
+      cache.raw = null
+      cache.stable = null
+    }
+    const raw = derive(store.getConnection(contextKey))
+    if (raw === cache.raw) return cache.stable
+    cache.raw = raw
+    if (connRenderEqual(cache.stable, raw)) {
+      // Only internal streaming state (liveMessage / lastAppliedSeq) changed →
+      // keep the previous reference so consumers don't re-render per token.
+      return cache.stable
+    }
+    cache.stable = raw
+    return raw
+  }, [store, contextKey])
   const connection = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 
   const connectionId = connection?.connectionId ?? null
@@ -135,7 +193,6 @@ export function useConnection(contextKey: string): UseConnectionReturn {
   const configOptions =
     connection?.configOptions ?? cached?.configOptions ?? null
   const availableCommands = connection?.availableCommands ?? null
-  const liveMessage = connection?.liveMessage ?? null
   const pendingPermission = connection?.pendingPermission ?? null
   const pendingUserMessage = connection?.pendingUserMessage ?? null
   const pendingQuestion = connection?.pendingQuestion ?? null
@@ -234,7 +291,6 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       modes,
       configOptions,
       availableCommands,
-      liveMessage,
       pendingPermission,
       pendingUserMessage,
       pendingQuestion,
@@ -270,7 +326,6 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       modes,
       configOptions,
       availableCommands,
-      liveMessage,
       pendingPermission,
       pendingUserMessage,
       pendingQuestion,

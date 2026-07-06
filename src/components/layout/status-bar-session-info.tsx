@@ -2,26 +2,31 @@
 
 import { useMemo } from "react"
 import { GitBranch } from "lucide-react"
-import { useTabContext } from "@/contexts/tab-context"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useTabStore } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 export function StatusBarSessionInfo() {
-  const { tabs, activeTabId } = useTabContext()
-  const { conversations } = useAppWorkspace()
+  const tabs = useTabStore((s) => s.tabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
 
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? null,
     [tabs, activeTabId]
   )
 
-  const summary = useMemo(() => {
+  // Selecting the matching summary (not the whole list) keeps this component
+  // inert to unrelated conversation updates: `find` returns the same object
+  // reference until this conversation itself changes.
+  const summary = useAppWorkspaceStore((s) => {
     if (!activeTab || activeTab.kind !== "conversation") return null
-    return conversations.find(
-      (c) =>
-        c.id === activeTab.conversationId &&
-        c.agent_type === activeTab.agentType
+    return (
+      s.conversations.find(
+        (c) =>
+          c.id === activeTab.conversationId &&
+          c.agent_type === activeTab.agentType
+      ) ?? null
     )
-  }, [activeTab, conversations])
+  })
 
   if (!summary) return null
 

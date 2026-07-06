@@ -211,3 +211,60 @@ describe("RichComposer configurable submit / newline (Phase 3)", () => {
     expect(ref.current?.getJSON().content?.length).toBeGreaterThanOrEqual(2)
   })
 })
+
+/**
+ * Dispatch a keydown and return the event so the caller can inspect
+ * `defaultPrevented` — i.e. whether the composer consumed the key. (Returning
+ * true from ProseMirror's handleKeyDown calls preventDefault.)
+ */
+function pressKey(dom: HTMLElement, init: KeyboardEventInit): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  })
+  act(() => {
+    dom.dispatchEvent(event)
+  })
+  return event
+}
+
+describe("RichComposer paste without formatting (Ctrl/⌘+Shift+V)", () => {
+  it("routes Ctrl+Shift+V to onPlainPaste and consumes the key when handled", async () => {
+    const onPlainPaste = vi.fn(() => true)
+    const { ref } = await mount({ onPlainPaste })
+    const dom = ref.current?.getEditor()?.view.dom as HTMLElement
+    const event = pressKey(dom, { key: "V", ctrlKey: true, shiftKey: true })
+    expect(onPlainPaste).toHaveBeenCalledTimes(1)
+    // Consumed → the browser's native rich paste is suppressed.
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it("routes ⌘+Shift+V (metaKey) to onPlainPaste as well", async () => {
+    const onPlainPaste = vi.fn(() => true)
+    const { ref } = await mount({ onPlainPaste })
+    const dom = ref.current?.getEditor()?.view.dom as HTMLElement
+    const event = pressKey(dom, { key: "V", metaKey: true, shiftKey: true })
+    expect(onPlainPaste).toHaveBeenCalledTimes(1)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it("does not consume the key when onPlainPaste declines (returns false)", async () => {
+    const onPlainPaste = vi.fn(() => false)
+    const { ref } = await mount({ onPlainPaste })
+    const dom = ref.current?.getEditor()?.view.dom as HTMLElement
+    const event = pressKey(dom, { key: "V", ctrlKey: true, shiftKey: true })
+    expect(onPlainPaste).toHaveBeenCalledTimes(1)
+    // Declined → the browser's native "paste and match style" proceeds.
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it("ignores a plain Ctrl+V so the native rich paste stays in effect", async () => {
+    const onPlainPaste = vi.fn(() => true)
+    const { ref } = await mount({ onPlainPaste })
+    const dom = ref.current?.getEditor()?.view.dom as HTMLElement
+    const event = pressKey(dom, { key: "v", ctrlKey: true })
+    expect(onPlainPaste).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+})

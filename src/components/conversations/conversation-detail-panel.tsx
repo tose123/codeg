@@ -24,8 +24,8 @@ import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { useAcpActions, useAcpEvent } from "@/contexts/acp-connections-context"
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions, useTabStore } from "@/contexts/tab-context"
 import { useSessionStats } from "@/contexts/session-stats-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { cn, copyTextFromMenu, randomUUID } from "@/lib/utils"
@@ -59,7 +59,13 @@ import {
   shouldRejectDuplicateCreate,
 } from "@/lib/queue-flush"
 import { TurnBusyError } from "@/lib/turn-busy"
-import { useConversationRuntime } from "@/contexts/conversation-runtime-context"
+import {
+  getConversationIdByExternalIdFromStore,
+  getRuntimeSession,
+  useConversationRuntimeActions,
+  useConversationRuntimeStore,
+} from "@/stores/conversation-runtime-store"
+import { useShallow } from "zustand/react/shallow"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
 import {
   extractUserImagesFromDraft,
@@ -192,11 +198,32 @@ const ConversationTabView = memo(function ConversationTabView({
   const t = useTranslations("Folder.conversation")
   const tWelcome = useTranslations("Folder.chat.welcomeInputPanel")
   const sharedT = useTranslations("Folder.chat.shared")
-  const { activeFolder: folder, activeFolderId } = useActiveFolder()
-  const { refreshConversations, upsertFolder } = useAppWorkspace()
-  const folderId = activeFolderId ?? 0
+  const refreshConversations = useAppWorkspaceStore(
+    (s) => s.refreshConversations
+  )
+  const upsertFolder = useAppWorkspaceStore((s) => s.upsertFolder)
+  // Subscribe to ONLY this tab's own row (identified by `tabId`), not the whole
+  // `tabs` array — so a sibling tab changing, or a tab-switch (isActive rides in
+  // as a prop), never re-renders this keep-alive panel. `find` returns the same
+  // object reference across derives until this tab itself changes.
+  const ownTab = useTabStore(
+    (s) => s.tabs.find((tab) => tab.id === tabId) ?? null
+  )
+  // Resolve this panel's folder from ITS OWN tab, not the global active folder.
+  // A keep-alive panel for a background tab must NOT re-render when the active
+  // tab switches to a different folder. For the active tab this equals the old
+  // `activeFolderId` (which is itself derived from the active tab's folderId via
+  // `syncActiveFolderId`); it also avoids the brief post-switch window where the
+  // global `activeFolderId` still lags on the previous tab's folder (same
+  // rationale as the per-tab `workingDir` used for the connection below).
+  const ownFolderId = ownTab?.folderId ?? null
+  const folder = useAppWorkspaceStore((s) =>
+    ownFolderId != null
+      ? (s.allFolders.find((f) => f.id === ownFolderId) ?? null)
+      : null
+  )
+  const folderId = ownFolderId ?? 0
   const {
-    tabs,
     bindConversationTab,
     setChatDraftWorkingDir,
     setTabRuntimeConversationId,
@@ -205,14 +232,13 @@ const ConversationTabView = memo(function ConversationTabView({
     closeTab,
     confirmDraftAgent,
     setDraftAgentFromFallback,
-  } = useTabContext()
+  } = useTabActions()
   const { setSessionStats } = useSessionStats()
   const {
     appendOptimisticTurn,
     removeOptimisticTurn,
     appendViewerUserTurn,
     completeTurn,
-    getSession,
     refetchDetail,
     syncTurnMetadata,
     removeConversation,
@@ -221,7 +247,7 @@ const ConversationTabView = memo(function ConversationTabView({
     setLiveMessage,
     setPendingCleanup,
     setSyncState,
-  } = useConversationRuntime()
+  } = useConversationRuntimeActions()
   const acpActions = useAcpActions()
 
   // Stable runtime session key — set once at mount, never changes.
@@ -266,10 +292,10 @@ const ConversationTabView = memo(function ConversationTabView({
   // real workingDir so the ACP connection can spawn BEFORE the first send — the
   // composer is gated on `connected` like any normal conversation (no offline
   // compose). Once bound it has a persisted row + workingDir and this is false.
-  const isChatDraft = useMemo(() => {
-    const ownTab = tabs.find((tab) => tab.id === tabId)
-    return ownTab?.isChat === true && !hasPersistedConversation
-  }, [tabs, tabId, hasPersistedConversation])
+  const isChatDraft = useMemo(
+    () => ownTab?.isChat === true && !hasPersistedConversation,
+    [ownTab, hasPersistedConversation]
+  )
 
   // Expose the runtime session key to the tab so the aux panel (Diff sidebar)
   // can look up live turns even before the DB conversation is created.
@@ -374,8 +400,29 @@ const ConversationTabView = memo(function ConversationTabView({
     acpLoadError,
   } = useConversationDetail(effectiveConversationId)
 
-  const runtimeSession = getSession(effectiveConversationId)
-  const effectiveSessionStats = runtimeSession?.sessionStats ?? null
+  // Subscribe to only the fields this panel actually reads from its runtime
+  // session — NOT the whole session object. The live-message sink rewrites the
+  // session object on every streaming batch (~60/s, via SET_LIVE_MESSAGE); a
+  // whole-object selector here would re-render this keep-alive panel (and the
+  // composer subtree it wraps) on every streaming token, even though none of
+  // these three fields change mid-stream. `useShallow` keeps the returned slice
+  // reference-stable across batches, so the panel re-renders only when one of
+  // them actually changes. (message-list-view subscribes to the session's
+  // liveMessage separately to render the live stream.)
+  const {
+    sessionStats: effectiveSessionStats,
+    externalId: runtimeExternalId,
+    syncState: runtimeSyncState,
+  } = useConversationRuntimeStore(
+    useShallow((s) => {
+      const session = s.byConversationId.get(effectiveConversationId)
+      return {
+        sessionStats: session?.sessionStats ?? null,
+        externalId: session?.externalId ?? null,
+        syncState: session?.syncState ?? "idle",
+      }
+    })
+  )
 
   useEffect(() => {
     if (!isActive) return
@@ -385,7 +432,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // Two-source resolution for the session id passed to acp_connect:
   //   1. detail.summary.external_id — DB value, available for tabs opened
   //      from the sidebar (effectiveConversationId equals the real cid).
-  //   2. runtimeSession.externalId — populated by the connSessionId effect
+  //   2. runtimeExternalId — populated by the connSessionId effect
   //      below when SessionStarted fires. This is the ONLY source for tabs
   //      that started as a new conversation: their effectiveConversationId
   //      is locked to a virtual negative id (line 186 useState initializer
@@ -395,7 +442,7 @@ const ConversationTabView = memo(function ConversationTabView({
   //      backend takes session/new → DB.external_id is overwritten on the
   //      next prompt → original sid orphaned, agent loses prior context.
   const externalId =
-    detail?.summary.external_id ?? runtimeSession?.externalId ?? undefined
+    detail?.summary.external_id ?? runtimeExternalId ?? undefined
   // For persisted conversations opened from the sidebar, wait until the
   // session's external_id has been resolved before auto-connecting.
   // Otherwise the auto-connect effect fires with sessionId=undefined and
@@ -520,10 +567,10 @@ const ConversationTabView = memo(function ConversationTabView({
     setAcpLoadError(effectiveConversationId, connLoadError ?? null)
   }, [connLoadError, effectiveConversationId, setAcpLoadError])
 
-  // completeTurn MUST be declared BEFORE setLiveMessage so that React runs
-  // its cleanup/setup before setLiveMessage's cleanup. When connStatus
-  // transitions away from "prompting", completeTurn snapshots and promotes
-  // the liveMessage first, then setLiveMessage's cleanup safely clears it.
+  // Promote the completed turn on the prompting→idle edge. (There is no longer
+  // an ordering constraint against a setLiveMessage cleanup: the liveMessage
+  // sink writes the runtime store from the connection dispatch, not a React
+  // effect — see registerLiveMessageSink.)
   const prevConnStatusRef = useRef(connStatus)
   useEffect(() => {
     const wasPrompting = prevConnStatusRef.current === "prompting"
@@ -531,12 +578,13 @@ const ConversationTabView = memo(function ConversationTabView({
     if (!wasPrompting || connStatus === "prompting") return
 
     // Turn completed — promote liveMessage + optimisticTurns to localTurns.
-    // Pass conn.liveMessage explicitly: when turn_complete arrives in the
-    // same React batch as the final STREAM_BATCH (typical case), the mirror
-    // effect that syncs conn.liveMessage into the runtime session has not
-    // run yet for this render, so session.liveMessage would be missing the
-    // final text chunk. The connections-context value is authoritative.
-    completeTurn(effectiveConversationId, conn.liveMessage)
+    // Don't pass conn.liveMessage: this panel no longer subscribes to it (the
+    // connection snapshot is stable across streaming tokens — see useConnection),
+    // so reading it here would be stale. COMPLETE_TURN falls back to
+    // session.liveMessage, which the connection dispatch's sink wrote
+    // synchronously as the final chunk landed (turn_complete flushes the stream
+    // queue BEFORE the status change), so it already holds the final message.
+    completeTurn(effectiveConversationId)
 
     // Cancel previous metadata sync (handles rapid consecutive turns)
     syncCancelRef.current?.()
@@ -549,13 +597,7 @@ const ConversationTabView = memo(function ConversationTabView({
         effectiveConversationId
       )
     }
-  }, [
-    completeTurn,
-    connStatus,
-    conn.liveMessage,
-    effectiveConversationId,
-    syncTurnMetadata,
-  ])
+  }, [completeTurn, connStatus, effectiveConversationId, syncTurnMetadata])
 
   // Auto-send queued messages when agent finishes responding.
   // Refs are synced via useEffect; the auto-send effect is declared
@@ -589,7 +631,6 @@ const ConversationTabView = memo(function ConversationTabView({
   // which blocks re-entry until that send settles (the turn completes, or it
   // bounces and rolls back to idle to retry the next item). A bounce backoff
   // rate-limits retries against a still-busy backend.
-  const runtimeSyncState = runtimeSession?.syncState ?? "idle"
   useEffect(() => {
     if (connStatus !== "connected") return
     // Don't flush onto a connection whose cwd doesn't match the tab's intended
@@ -627,34 +668,23 @@ const ConversationTabView = memo(function ConversationTabView({
     workingDirForConnection,
   ])
 
+  // Mirror the connection's liveMessage into the runtime session OUTSIDE React.
+  // The connection dispatch invokes this sink synchronously whenever liveMessage
+  // changes (streaming deltas, tool updates, the prompt-start reset), so the
+  // streaming content flows straight to the runtime store — which the message
+  // list renders — WITHOUT this keep-alive panel re-rendering per token (the old
+  // mirror effect required a per-token render just to run). The sink writes
+  // non-null values with isLive = (status === "prompting"), which tells the
+  // runtime reducer to bypass its stale-reconnect-replay guard (matters for the
+  // rekey path: close+reopen mid-turn, where detail.turns may already hold user
+  // turns that would otherwise drop the live assistant stream). Turn-end clearing
+  // is owned by COMPLETE_TURN (nulls liveMessage); unmount clearing by
+  // removeConversation. `tabId` is the connection contextKey.
   useEffect(() => {
-    // Only sync non-null liveMessage updates to state. When conn.liveMessage
-    // goes null (agent finished streaming), don't clear state.liveMessage —
-    // COMPLETE_TURN needs to snapshot it when connStatus transitions.
-    // Clearing is handled by COMPLETE_TURN (sets liveMessage = null) and
-    // by this effect's cleanup (when not prompting).
-    if (conn.liveMessage != null) {
-      // isLive=true when actively prompting tells the runtime reducer to
-      // bypass its stale-reconnect-replay guard. This matters for the
-      // rekey path (close+reopen mid-turn): the runtime session for the
-      // persisted conversation id is fresh and may have user turns in
-      // detail.turns post-load, which would otherwise drop the live
-      // assistant stream on the floor.
-      setLiveMessage(
-        effectiveConversationId,
-        conn.liveMessage,
-        connStatus === "prompting"
-      )
-    }
-    return () => {
-      // Don't clear liveMessage if agent is still responding — the session
-      // is kept via pendingCleanup, and clearing here would cause the
-      // SET_LIVE_MESSAGE guard to block the reconnect liveMessage on reopen.
-      if (connStatusRef.current !== "prompting") {
-        setLiveMessage(effectiveConversationId, null)
-      }
-    }
-  }, [conn.liveMessage, connStatus, effectiveConversationId, setLiveMessage])
+    return acpActions.registerLiveMessageSink(tabId, (liveMessage, isLive) =>
+      setLiveMessage(effectiveConversationId, liveMessage, isLive)
+    )
+  }, [acpActions, tabId, effectiveConversationId, setLiveMessage])
 
   // Cross-client VIEWER (Bug 2): mirror the connection's in-flight user prompt
   // (from a snapshot's `pending_user_message`, captured when we attach
@@ -772,7 +802,7 @@ const ConversationTabView = memo(function ConversationTabView({
       // createChatConversation, reusing this eager dir). The composer is gated
       // on `connected` for chat drafts too, so by the time we get here the agent
       // is live and the prompt is delivered inline — never parked in the queue.
-      const sendOwnTab = tabs.find((tab) => tab.id === tabId)
+      const sendOwnTab = ownTab
 
       if (!hasPersistedConversation && !canAutoConnect) {
         setAgentConnectError(tWelcome("enableAgentFirstPlaceholder"))
@@ -842,8 +872,7 @@ const ConversationTabView = memo(function ConversationTabView({
       }
 
       // Pin the tab if it was a temporary preview (single-click opened)
-      const currentTab = tabs.find((tab) => tab.id === tabId)
-      if (currentTab && !currentTab.isPinned) {
+      if (ownTab && !ownTab.isPinned) {
         pinTab(tabId)
       }
 
@@ -1009,7 +1038,7 @@ const ConversationTabView = memo(function ConversationTabView({
       setPendingCleanup,
       setSyncState,
       sharedT,
-      tabs,
+      ownTab,
       tWelcome,
       tabId,
       upsertFolder,
@@ -1528,21 +1557,16 @@ export function ConversationDetailPanel() {
   const tDetails = useTranslations("Folder.sessionDetails")
   const {
     completeTurn: runtimeCompleteTurn,
-    getConversationIdByExternalId,
-    getSession,
     removeConversation: runtimeRemoveConversation,
-  } = useConversationRuntime()
+  } = useConversationRuntimeActions()
   const { activeFolder: folder } = useActiveFolder()
-  const { conversations, getFolder } = useAppWorkspace()
-  const {
-    tabs,
-    activeTabId,
-    isTileMode,
-    openNewConversationTab,
-    closeTab,
-    switchTab,
-    onPreviewTabReplaced,
-  } = useTabContext()
+  const conversations = useAppWorkspaceStore((s) => s.conversations)
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
+  const tabs = useTabStore((s) => s.tabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const isTileMode = useTabStore((s) => s.isTileMode)
+  const { openNewConversationTab, closeTab, switchTab, onPreviewTabReplaced } =
+    useTabActions()
   const newConversation = useMemo(() => {
     const activeTab = tabs.find((tab) => tab.id === activeTabId)
     if (!activeTab || activeTab.conversationId != null) return null
@@ -1601,12 +1625,17 @@ export function ConversationDetailPanel() {
       (envelope: EventEnvelope) => {
         if (envelope.type !== "turn_complete") return
 
-        const runtimeConversationId = getConversationIdByExternalId(
+        const runtimeConversationId = getConversationIdByExternalIdFromStore(
           envelope.session_id
         )
-        const summary = conversations.find(
-          (item) => item.external_id === envelope.session_id
-        )
+        // Event-time read: fresher than a render capture ("`conversations`
+        // may lag the tab update on fast turns" below applies to the render
+        // snapshot; getState() narrows that window).
+        const summary = useAppWorkspaceStore
+          .getState()
+          .conversations.find(
+            (item) => item.external_id === envelope.session_id
+          )
         const matchedConversationId =
           runtimeConversationId ?? summary?.id ?? null
         if (!matchedConversationId) return
@@ -1636,20 +1665,14 @@ export function ConversationDetailPanel() {
         // Promote liveMessage + optimisticTurns to localTurns immediately
         runtimeCompleteTurn(matchedConversationId)
 
-        // If tab was closed while agent was responding, clean up now
-        const session = getSession(matchedConversationId)
+        // If tab was closed while agent was responding, clean up now.
+        // Event-time read: fresh via getState(), no reactive subscription.
+        const session = getRuntimeSession(matchedConversationId)
         if (session?.pendingCleanup) {
           runtimeRemoveConversation(matchedConversationId)
         }
       },
-      [
-        conversations,
-        tabs,
-        getConversationIdByExternalId,
-        getSession,
-        runtimeCompleteTurn,
-        runtimeRemoveConversation,
-      ]
+      [tabs, runtimeCompleteTurn, runtimeRemoveConversation]
     )
   )
 
@@ -1744,27 +1767,50 @@ export function ConversationDetailPanel() {
     closeTab(activeTabId)
   }, [activeTabId, closeTab])
 
-  const canExport =
-    activeConversationTab?.conversationId != null &&
-    getSession(activeConversationTab.conversationId)?.detail != null
+  // Narrow reactive reads for the ACTIVE conversation only — a background
+  // conversation's streaming token no longer re-renders this panel. `canExport`
+  // keys on the tab's persisted `conversationId`; the session-details
+  // resolution keys on `runtimeConversationId ?? conversationId` (a brand-new
+  // conversation streams under a virtual runtime id whose live stats differ), so
+  // the two are subscribed SEPARATELY — collapsing them to one lookup would
+  // diverge during the virtual→persisted reconciliation window.
+  const activeExportConversationId =
+    activeConversationTab?.conversationId ?? null
+  const canExport = useConversationRuntimeStore(
+    (s) =>
+      activeExportConversationId != null &&
+      s.byConversationId.get(activeExportConversationId)?.detail != null
+  )
 
   // Resolve the active conversation's summary + live token usage the same way
   // the tab view renders them — a new conversation streams under a virtual
   // `runtimeConversationId` with its usage on `sessionStats`. Extracted so the
   // resolution is unit-tested (see active-session-details.test.ts).
+  const activeRuntimeId =
+    activeConversationTab?.runtimeConversationId ??
+    activeConversationTab?.conversationId ??
+    null
+  const activeRuntimeSession = useConversationRuntimeStore((s) =>
+    activeRuntimeId != null
+      ? (s.byConversationId.get(activeRuntimeId) ?? null)
+      : null
+  )
   const {
     summary: activeSessionSummary,
     stats: activeSessionStats,
     model: activeSessionModel,
   } = resolveActiveSessionDetails(
     activeConversationTab,
-    getSession,
+    // resolveActiveSessionDetails reads only `getSession(runtimeId)`, and its
+    // internal `runtimeId` equals `activeRuntimeId` (identical computation), so
+    // resolving that single pre-selected session is exact.
+    (id) => (id === activeRuntimeId ? activeRuntimeSession : null),
     conversations
   )
 
   const getExportData = useCallback(() => {
     if (!activeConversationTab?.conversationId) return null
-    const session = getSession(activeConversationTab.conversationId)
+    const session = getRuntimeSession(activeConversationTab.conversationId)
     if (!session?.detail) return null
     return {
       summary: session.detail.summary,
@@ -1772,7 +1818,7 @@ export function ConversationDetailPanel() {
       sessionStats: session.detail.session_stats,
       labels: exportLabels,
     }
-  }, [activeConversationTab, getSession, exportLabels])
+  }, [activeConversationTab, exportLabels])
 
   const handleExportMarkdown = useCallback(async () => {
     const data = getExportData()
@@ -1888,7 +1934,10 @@ export function ConversationDetailPanel() {
           tabId={tab.id}
           conversationId={tab.conversationId}
           agentType={tab.agentType}
-          workingDir={tab.workingDir ?? getFolder(tab.folderId)?.path}
+          workingDir={
+            tab.workingDir ??
+            allFolders.find((f) => f.id === tab.folderId)?.path
+          }
           isActive={active}
           showActiveFlow={canTile && active}
           reloadSignal={reloadByTabId[tab.id] ?? 0}

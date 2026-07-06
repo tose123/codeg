@@ -177,6 +177,8 @@ export function FontSettingsSection() {
     setEditorFontSize,
     editorLigatures,
     setEditorLigatures,
+    editorWordWrap,
+    setEditorWordWrap,
   } = useEditorFont()
   const {
     terminalFont,
@@ -252,6 +254,15 @@ export function FontSettingsSection() {
           enabledLabel={t("fonts.ligatures")}
           unavailableLabel={t("fonts.ligaturesUnavailable")}
         />
+        <label className="flex items-center gap-2">
+          <Switch
+            checked={editorWordWrap}
+            onCheckedChange={setEditorWordWrap}
+          />
+          <span className="text-xs text-muted-foreground">
+            {t("fonts.wordWrap")}
+          </span>
+        </label>
       </div>
 
       {/* ===== 终端字体 ===== */}

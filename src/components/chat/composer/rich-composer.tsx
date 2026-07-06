@@ -14,6 +14,7 @@ import { type Editor, type JSONContent } from "@tiptap/core"
 import { EditorContent, useEditor } from "@tiptap/react"
 import { exitSuggestion } from "@tiptap/suggestion"
 
+import { matchShortcutEvent } from "@/lib/keyboard-shortcuts"
 import { cn } from "@/lib/utils"
 
 import { buildComposerExtensions } from "./editor-config"
@@ -152,6 +153,15 @@ export interface RichComposerProps {
    * does not also insert it as text.
    */
   onPasteFiles?: (event: ClipboardEvent) => boolean
+  /**
+   * Paste-without-formatting intent: fired when `Ctrl/⌘+Shift+V` is pressed. The
+   * host owns the clipboard read (and its non-secure fallback). Return true when
+   * the host took over so the editor consumes the key and the browser's native
+   * rich paste is suppressed; return false (or omit the prop) to let the native
+   * "paste and match style" proceed (e.g. in a non-secure context where the async
+   * clipboard read is unavailable).
+   */
+  onPlainPaste?: () => boolean
 }
 
 /**
@@ -183,6 +193,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
       isExternalMenuOpen,
       onExternalMenuKeyDown,
       onPasteFiles,
+      onPlainPaste,
     },
     ref
   ) {
@@ -202,6 +213,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
     const isExternalMenuOpenRef = useRef(isExternalMenuOpen)
     const onExternalMenuKeyDownRef = useRef(onExternalMenuKeyDown)
     const onPasteFilesRef = useRef(onPasteFiles)
+    const onPlainPasteRef = useRef(onPlainPaste)
     // The live editor, captured for command access inside editorProps handlers
     // (which are created before `editor` is assigned in this closure).
     const editorInstanceRef = useRef<Editor | null>(null)
@@ -217,6 +229,7 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
       isExternalMenuOpenRef.current = isExternalMenuOpen
       onExternalMenuKeyDownRef.current = onExternalMenuKeyDown
       onPasteFilesRef.current = onPasteFiles
+      onPlainPasteRef.current = onPlainPaste
     })
 
     // ── Unified `@` mention panel state bridge ──
@@ -284,6 +297,14 @@ export const RichComposer = forwardRef<RichComposerHandle, RichComposerProps>(
           // list) to let the inline token keep growing.
           if (isExternalMenuOpenRef.current) {
             return onExternalMenuKeyDownRef.current?.(event) ?? false
+          }
+          // Paste without formatting: Ctrl/⌘+Shift+V routes to the host, which
+          // owns the clipboard read. Consume the key (suppressing the browser's
+          // native rich paste) only when the host takes over; otherwise return
+          // false so the native "paste and match style" proceeds — the correct
+          // fallback in a non-secure context where the async read is unavailable.
+          if (matchShortcutEvent(event, "mod+shift+v")) {
+            return onPlainPasteRef.current?.() === true
           }
           // Bindings are free-form (Enter, Shift+Enter, Mod+Enter, Tab, …), so
           // we can't pre-filter by key. Instead, run a cheap first pass with no

@@ -108,8 +108,14 @@
       "fontSize": "Schriftgröße",
       "ligatures": "Ligaturen aktivieren",
       "ligaturesUnavailable": "Diese Schriftart hat keine Ligaturen",
+      "wordWrap": "Zeilenumbruch aktivieren",
       "terminalLigaturesHint": "Terminal-Ligaturen gelten nur für mitgelieferte Programmierschriftarten.",
       "preview": "Vorschau"
+    },
+    "welcomePanel": {
+      "sectionTitle": "Modusauswahlbereich",
+      "sectionDescription": "Die Shortcut-Karten „Code-Entwicklung / Büroarbeit“ über dem Eingabefeld auf der Seite für eine neue Konversation.",
+      "showQuickActions": "Auf der Seite für neue Konversationen anzeigen"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "Zum Chat hinzufügen",
       "addSelectionToChatDone": "{label} zur Unterhaltung hinzugefügt",
       "addFileToChat": "Datei zum Chat hinzufügen",
+      "toggleWordWrap": "Zeilenumbruch umschalten",
       "addFileToChatDone": "{label} zur Unterhaltung hinzugefügt",
       "viewDiff": "Diff anzeigen",
       "openFile": "Datei öffnen",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "Verfolgte Änderungen einklappen",
       "expandUntracked": "Nicht verfolgte Dateien ausklappen",
       "collapseUntracked": "Nicht verfolgte Dateien einklappen",
+      "showRemainingItems": "{count} weitere Einträge anzeigen",
       "actions": {
         "commitCode": "Code committen",
         "rollback": "Zurücksetzen",
@@ -2044,7 +2052,7 @@
         "quickMessages": "Schnellnachrichten",
         "quickMessagesEmpty": "Noch keine Schnellnachrichten",
         "quickMessagesLoading": "Wird geladen...",
-        "paste": "Einfügen",
+        "pasteAsPlainText": "Als reinen Text einfügen",
         "cut": "Ausschneiden",
         "copy": "Kopieren",
         "selectAll": "Alles auswählen",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "Block {index}",
       "loadingHunk": "Hunk wird geladen...",
-      "noDiffData": "Keine Diff-Daten"
+      "noDiffData": "Keine Diff-Daten",
+      "showRemainingLines": "{count} weitere Zeilen anzeigen"
     },
     "conversationContextBar": {
       "folderTitle": "Arbeitsordner",

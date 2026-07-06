@@ -28,7 +28,6 @@ import {
   useRef,
   useState,
 } from "react"
-import { createHighlighter } from "shiki"
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // biome-ignore lint/suspicious/noBitwiseOperators: shiki bitflag check
@@ -144,10 +143,17 @@ const getHighlighter = (
     return cached
   }
 
-  const highlighterPromise = createHighlighter({
-    langs: [language],
-    themes: ["github-light", "github-dark"],
-  })
+  // Load Shiki's engine lazily: a static `import` would pull it (and its
+  // textmate machinery) into the first-paint bundle for every message list,
+  // even a text-only conversation. Highlighting is already async with an
+  // immediate raw-token fallback (see `createRawTokens`), so deferring the
+  // engine import only extends that existing pre-highlight window slightly.
+  const highlighterPromise = import("shiki").then(({ createHighlighter }) =>
+    createHighlighter({
+      langs: [language],
+      themes: ["github-light", "github-dark"],
+    })
+  )
 
   highlighterCache.set(language, highlighterPromise)
   return highlighterPromise

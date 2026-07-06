@@ -1,22 +1,21 @@
-import { render, waitFor, cleanup } from "@testing-library/react"
+import { act, render, waitFor, cleanup } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 
-// Mutable hook returns so a test can flip hydration across rerenders. The mocks
-// read these module-level vars, so reassigning + rerendering simulates the
-// provider state changing.
-let workspace: {
-  foldersHydrated: boolean
-  folders: { id: number }[]
-  addFolderToWorkspaceById: ReturnType<typeof vi.fn>
-}
+// The workspace half lives in the real zustand store: tests seed it via
+// setState in beforeEach and flip hydration with act(setState). The tab half
+// is still a mutable hook mock — the mock reads this module-level var, so
+// reassigning + rerendering simulates the provider state changing.
 let tabs: { tabsHydrated: boolean; openTab: ReturnType<typeof vi.fn> }
+let addFolderToWorkspaceById: ReturnType<typeof vi.fn>
 let capturedHandler: ((p: unknown) => void) | null = null
 
-vi.mock("@/contexts/app-workspace-context", () => ({
-  useAppWorkspace: () => workspace,
-}))
 vi.mock("@/contexts/tab-context", () => ({
-  useTabContext: () => tabs,
+  useTabStore: (selector: (s: typeof tabs) => unknown) => selector(tabs),
+  useTabActions: () => tabs,
 }))
 vi.mock("@/lib/transport", () => ({
   getTransport: () => ({
@@ -32,11 +31,13 @@ import { PetFocusBridge } from "./deep-link-bootstrap"
 describe("PetFocusBridge", () => {
   beforeEach(() => {
     capturedHandler = null
-    workspace = {
+    addFolderToWorkspaceById = vi.fn()
+    resetAppWorkspaceStore()
+    useAppWorkspaceStore.setState({
       foldersHydrated: false,
-      folders: [{ id: 7 }],
-      addFolderToWorkspaceById: vi.fn(),
-    }
+      folders: [{ id: 7 }] as never,
+      addFolderToWorkspaceById,
+    })
     tabs = { tabsHydrated: false, openTab: vi.fn() }
   })
   afterEach(() => cleanup())
@@ -51,9 +52,11 @@ describe("PetFocusBridge", () => {
     expect(tabs.openTab).not.toHaveBeenCalled()
 
     // Hydration completes → queued request replays.
-    workspace = { ...workspace, foldersHydrated: true }
     tabs = { ...tabs, tabsHydrated: true }
     rerender(<PetFocusBridge />)
+    act(() => {
+      useAppWorkspaceStore.setState({ foldersHydrated: true })
+    })
 
     await waitFor(() =>
       expect(tabs.openTab).toHaveBeenCalledWith(7, 42, "claude_code", true)
@@ -61,7 +64,7 @@ describe("PetFocusBridge", () => {
   })
 
   it("opens immediately when already hydrated, without re-adding an open folder", async () => {
-    workspace = { ...workspace, foldersHydrated: true }
+    useAppWorkspaceStore.setState({ foldersHydrated: true })
     tabs = { ...tabs, tabsHydrated: true }
     render(<PetFocusBridge />)
     await waitFor(() => expect(capturedHandler).toBeTruthy())
@@ -70,11 +73,11 @@ describe("PetFocusBridge", () => {
     await waitFor(() =>
       expect(tabs.openTab).toHaveBeenCalledWith(7, 9, "codex", true)
     )
-    expect(workspace.addFolderToWorkspaceById).not.toHaveBeenCalled()
+    expect(addFolderToWorkspaceById).not.toHaveBeenCalled()
   })
 
   it("ignores malformed payloads", async () => {
-    workspace = { ...workspace, foldersHydrated: true }
+    useAppWorkspaceStore.setState({ foldersHydrated: true })
     tabs = { ...tabs, tabsHydrated: true }
     render(<PetFocusBridge />)
     await waitFor(() => expect(capturedHandler).toBeTruthy())

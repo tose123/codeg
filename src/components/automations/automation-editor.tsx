@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Folder, Globe, Wand2 } from "lucide-react"
 import { useTranslations } from "next-intl"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { AgentSelector } from "@/components/chat/agent-selector"
 import {
   RichComposer,
@@ -86,7 +86,7 @@ export function AutomationEditor({
   const t = useTranslations("Automations")
   // The @-mention panel chrome reuses the chat composer's existing keys.
   const tComposer = useTranslations("Folder.chat.messageInput")
-  const { folders } = useAppWorkspace()
+  const folders = useAppWorkspaceStore((s) => s.folders)
 
   const [name, setName] = useState(automation?.name ?? "")
   const [agentType, setAgentType] = useState<AgentType>(

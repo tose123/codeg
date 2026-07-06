@@ -1,7 +1,7 @@
 "use client"
 
 import { useActiveFolder } from "@/contexts/active-folder-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useTabStore } from "@/contexts/tab-context"
 
 /**
  * True when the active conversation is folderless "chat mode" — either a bound
@@ -14,7 +14,8 @@ import { useTabContext } from "@/contexts/tab-context"
  */
 export function useIsActiveChatMode(): boolean {
   const { activeFolder } = useActiveFolder()
-  const { tabs, activeTabId } = useTabContext()
+  const tabs = useTabStore((s) => s.tabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
   if (activeFolder?.kind === "chat") return true
   const activeTab = tabs.find((t) => t.id === activeTabId)
   return activeTab?.isChat === true

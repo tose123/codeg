@@ -108,8 +108,14 @@
       "fontSize": "字号",
       "ligatures": "启用连字",
       "ligaturesUnavailable": "该字体不含连字",
+      "wordWrap": "启用自动换行",
       "terminalLigaturesHint": "终端连字仅对内置编程字体生效。",
       "preview": "预览"
+    },
+    "welcomePanel": {
+      "sectionTitle": "模式选择区域",
+      "sectionDescription": "新会话页面输入框上方显示的「代码开发 / 日常办公」快捷卡片区域。",
+      "showQuickActions": "在新会话页面显示"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "加入会话",
       "addSelectionToChatDone": "已将 {label} 加入会话",
       "addFileToChat": "添加文件到会话",
+      "toggleWordWrap": "切换自动换行",
       "addFileToChatDone": "已将 {label} 加入会话",
       "viewDiff": "查看差异",
       "openFile": "打开文件",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "折叠已跟踪改动",
       "expandUntracked": "展开未跟踪文件",
       "collapseUntracked": "折叠未跟踪文件",
+      "showRemainingItems": "显示其余 {count} 项",
       "actions": {
         "commitCode": "提交代码",
         "rollback": "回滚",
@@ -2046,7 +2054,7 @@
         "quickMessages": "快捷消息",
         "quickMessagesEmpty": "暂无快捷消息",
         "quickMessagesLoading": "加载中...",
-        "paste": "粘贴",
+        "pasteAsPlainText": "粘贴为纯文本",
         "cut": "剪切",
         "copy": "复制",
         "selectAll": "全选",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "代码块 {index}",
       "loadingHunk": "正在加载代码块...",
-      "noDiffData": "无差异数据"
+      "noDiffData": "无差异数据",
+      "showRemainingLines": "显示剩余 {count} 行"
     },
     "conversationContextBar": {
       "folderTitle": "工作文件夹",

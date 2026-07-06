@@ -15,6 +15,10 @@ import {
   automationDelete,
 } from "@/lib/api"
 import type { Automation } from "@/lib/types"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 
 // ── Context + side-effect mocks ────────────────────────────────────────────
 const refetch = vi.fn().mockResolvedValue(undefined)
@@ -27,10 +31,7 @@ vi.mock("@/contexts/workbench-route-context", () => ({
   useWorkbenchRoute: () => ({ openConversations: vi.fn() }),
 }))
 vi.mock("@/contexts/tab-context", () => ({
-  useTabContext: () => ({ openTab: vi.fn() }),
-}))
-vi.mock("@/contexts/app-workspace-context", () => ({
-  useAppWorkspace: () => ({ folders: [{ id: 1, name: "repo" }] }),
+  useTabActions: () => ({ openTab: vi.fn() }),
 }))
 vi.mock("@/lib/platform", () => ({
   subscribe: vi.fn().mockResolvedValue(() => {}),
@@ -69,6 +70,15 @@ vi.mock("./automation-editor", () => ({
 }))
 
 import { AutomationsPage } from "./automations-page"
+
+// Components select `folders` from the real zustand store — seed it with the
+// same data the old context mock provided.
+beforeEach(() => {
+  resetAppWorkspaceStore()
+  useAppWorkspaceStore.setState({
+    folders: [{ id: 1, name: "repo" }] as never,
+  })
+})
 
 function renderPage() {
   return render(

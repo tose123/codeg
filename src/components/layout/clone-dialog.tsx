@@ -8,7 +8,7 @@ import { cloneRepository } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { isDesktop, openFileDialog } from "@/lib/platform"
 import { getActiveRemoteConnectionId } from "@/lib/transport"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useGitCredential } from "@/contexts/git-credential-context"
 import {
   Dialog,
@@ -30,7 +30,7 @@ interface CloneDialogProps {
 export function CloneDialog({ open, onOpenChange }: CloneDialogProps) {
   const t = useTranslations("Folder.cloneDialog")
   const tToasts = useTranslations("Folder.toasts")
-  const { openFolder } = useAppWorkspace()
+  const openFolder = useAppWorkspaceStore((s) => s.openFolder)
   const { withCredentialRetry } = useGitCredential()
   const [url, setUrl] = useState("")
   const [targetDir, setTargetDir] = useState("")

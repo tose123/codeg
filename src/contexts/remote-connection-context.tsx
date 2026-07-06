@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react"
@@ -15,6 +16,7 @@ import {
   clearRemoteDesktopTransport,
   configureRemoteDesktopTransport,
 } from "@/lib/transport"
+import { resetBackendScopedStores } from "@/stores/backend-scoped-store-reset"
 import { getRemoteWorkspaceConnection } from "@/lib/remote-workspace"
 import { toErrorMessage } from "@/lib/app-error"
 import type { RemoteWorkspaceConnection } from "@/lib/types"
@@ -45,6 +47,27 @@ function createFallbackRemoteWindowId() {
 
 export function useRemoteConnection() {
   return useContext(RemoteConnectionContext)
+}
+
+/**
+ * Best-effort reset of the backend-scoped module stores when the realm's backend
+ * identity changes. A PASSIVE post-render effect (fires after commit, not a
+ * render gate) that skips the initial mount, so today — where the identity is
+ * immutable per realm (see the gate) — it never fires. Clears store STATE only;
+ * it does NOT cancel in-flight backend fetches. Exported for tests; used only by
+ * `RemoteConnectionGate`.
+ */
+export function useResetBackendScopedStoresOnIdentityChange(
+  backendKey: string
+): void {
+  const prevKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevKeyRef.current
+    prevKeyRef.current = backendKey
+    if (prev !== null && prev !== backendKey) {
+      resetBackendScopedStores()
+    }
+  }, [backendKey])
 }
 
 export function RemoteConnectionGate({ children }: { children: ReactNode }) {
@@ -111,6 +134,34 @@ export function RemoteConnectionGate({ children }: { children: ReactNode }) {
       cancelled = true
     }
   }, [remoteConnectionId, remoteWindowId])
+
+  // ── Backend-identity invariant ─────────────────────────────────────────────
+  // A workspace realm's backend identity — (remoteConnectionId, remoteWindowId),
+  // both born from the URL — does not change for the realm's lifetime via any
+  // SUPPORTED navigation path. It is enforced structurally, not asserted:
+  // `open_remote_workspace` opens/focuses a distinct `remote-workspace-{id}`
+  // window per connection (each its own JS realm), the main window is always
+  // local, the web build hides the remote-workspace UI (isDesktop gate), and
+  // `DeepLinkBootstrap` strips only deep-link params (folderId / conversationId),
+  // which never coexist with the remote identity params in a `workspace?…` URL.
+  // (settings / git windows are separate labels per remote id — different realms,
+  // not in-place switches.) So the backend-scoped module singletons (workspace /
+  // tab / conversation-runtime stores, and the remote transport itself) are
+  // correctly scoped per realm — the old per-window Providers relied on exactly
+  // this same window boundary.
+  //
+  // The guard below makes that invariant EXPLICIT: if the identity ever changes
+  // within a live realm it best-effort resets the backend-scoped store STATE. It
+  // is a TRIPWIRE, not a complete live-switch solution — it never fires today. A
+  // real in-place backend switcher would additionally need to: epoch-invalidate
+  // in-flight store fetches (this reset clears state but can't stop an in-flight
+  // backend-A fetch from re-committing — see `resetConversationRuntimeStore` and
+  // app-workspace `fetchFolders` / `refreshConversations`), reconfigure the
+  // transport, handle the acp-agents refcount, and gate rendering (this is a
+  // passive post-render effect, so a remote→local switch — which shows no loading
+  // gate — would paint one stale commit before the reset runs).
+  const backendKey = `${remoteConnectionId ?? "local"}::${remoteWindowId}`
+  useResetBackendScopedStoresOnIdentityChange(backendKey)
 
   const value = useMemo(
     () => ({

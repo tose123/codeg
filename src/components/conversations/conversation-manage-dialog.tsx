@@ -46,8 +46,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { AgentIcon } from "@/components/agent-icon"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions } from "@/contexts/tab-context"
 import {
   deleteConversation,
   listAllConversations,
@@ -103,8 +103,10 @@ export function ConversationManageDialog({
   const tCommon = useTranslations("Folder.common")
   const tStatus = useTranslations("Folder.statusLabels")
 
-  const { refreshConversations } = useAppWorkspace()
-  const { closeConversationTab } = useTabContext()
+  const refreshConversations = useAppWorkspaceStore(
+    (s) => s.refreshConversations
+  )
+  const { closeConversationTab } = useTabActions()
 
   const [search, setSearch] = useState("")
   const [agentFilter, setAgentFilter] = useState<AgentType | "all">("all")

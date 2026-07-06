@@ -299,7 +299,9 @@ impl AgentParser for CodexParser {
                 continue;
             }
 
-            match self.parse_jsonl_summary(&path) {
+            match super::summary_cache::get_or_parse(AgentType::Codex, &path, || {
+                self.parse_jsonl_summary(&path)
+            }) {
                 Ok(Some(summary)) => conversations.push(summary),
                 _ => continue,
             }

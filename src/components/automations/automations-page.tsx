@@ -34,8 +34,8 @@ import {
 } from "lucide-react"
 import { useAutomationsView } from "@/contexts/automations-view-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
-import { useTabContext } from "@/contexts/tab-context"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useTabActions } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { AutomationEditor } from "./automation-editor"
 import {
   templateToDraft,
@@ -203,7 +203,7 @@ type EditingState =
 export function AutomationsPage() {
   const t = useTranslations("Automations")
   const { automations, unseenFailures, refetch } = useAutomationsView()
-  const { folders } = useAppWorkspace()
+  const folders = useAppWorkspaceStore((s) => s.folders)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [mode, setMode] = useState<"detail" | "gallery" | "editor">("detail")
   const [editing, setEditing] = useState<EditingState | null>(null)
@@ -853,7 +853,7 @@ function AutomationDetail({
   onEdit: () => void
 }) {
   const t = useTranslations("Automations")
-  const { folders } = useAppWorkspace()
+  const folders = useAppWorkspaceStore((s) => s.folders)
   const [busy, setBusy] = useState(false)
 
   const run = async (fn: () => Promise<unknown>) => {
@@ -1023,7 +1023,7 @@ function RunHistory({
   onChanged: () => Promise<void>
 }) {
   const t = useTranslations("Automations")
-  const { openTab } = useTabContext()
+  const { openTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
   const [runs, setRuns] = useState<AutomationRun[]>([])
   const [loading, setLoading] = useState(true)

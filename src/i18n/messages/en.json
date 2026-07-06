@@ -108,8 +108,14 @@
       "fontSize": "Font size",
       "ligatures": "Enable font ligatures",
       "ligaturesUnavailable": "This font has no ligatures",
+      "wordWrap": "Enable word wrap",
       "terminalLigaturesHint": "Terminal ligatures apply only to bundled coding fonts.",
       "preview": "Preview"
+    },
+    "welcomePanel": {
+      "sectionTitle": "Mode selection area",
+      "sectionDescription": "The Code Development / Office Work shortcut cards shown above the composer on the new conversation page.",
+      "showQuickActions": "Show on the new conversation page"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "Add to Chat",
       "addSelectionToChatDone": "Added {label} to the conversation",
       "addFileToChat": "Add File to Chat",
+      "toggleWordWrap": "Toggle Word Wrap",
       "addFileToChatDone": "Added {label} to the conversation",
       "viewDiff": "View Diff",
       "openFile": "Open File",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "Collapse tracked changes",
       "expandUntracked": "Expand untracked files",
       "collapseUntracked": "Collapse untracked files",
+      "showRemainingItems": "Show {count} more items",
       "actions": {
         "commitCode": "Commit code",
         "rollback": "Rollback",
@@ -2046,7 +2054,7 @@
         "quickMessages": "Quick messages",
         "quickMessagesEmpty": "No quick messages yet",
         "quickMessagesLoading": "Loading...",
-        "paste": "Paste",
+        "pasteAsPlainText": "Paste as plain text",
         "cut": "Cut",
         "copy": "Copy",
         "selectAll": "Select all",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "Hunk {index}",
       "loadingHunk": "Loading hunk...",
-      "noDiffData": "No diff data"
+      "noDiffData": "No diff data",
+      "showRemainingLines": "Show {count} more lines"
     },
     "conversationContextBar": {
       "folderTitle": "Working folder",

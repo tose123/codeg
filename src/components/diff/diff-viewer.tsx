@@ -38,7 +38,8 @@ export function DiffViewer({
 }: DiffViewerProps) {
   const editorTheme = useMonacoThemeSync()
   const { zoomLevel } = useZoomLevel()
-  const { editorFontStack, editorFontSize, editorLigatures } = useEditorFont()
+  const { editorFontStack, editorFontSize, editorLigatures, editorWordWrap } =
+    useEditorFont()
   const diffEditorRef = useRef<MonacoEditorNs.IStandaloneDiffEditor | null>(
     null
   )
@@ -193,6 +194,7 @@ export function DiffViewer({
             fontSize: (editorFontSize * zoomLevel) / 100,
             fontFamily: editorFontStack,
             fontLigatures: editorLigatures,
+            wordWrap: editorWordWrap ? "on" : "off",
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             renderOverviewRuler: false,

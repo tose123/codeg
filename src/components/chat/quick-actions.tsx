@@ -17,6 +17,7 @@ import { openSettingsWindow, type SettingsSection } from "@/lib/api"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useBuiltInExperts } from "@/hooks/use-built-in-experts"
 import { useEnabledSkillIds } from "@/hooks/use-enabled-skill-ids"
+import { useWelcomeQuickActions } from "@/hooks/use-appearance"
 import { getExpertIcon, pickLocalized } from "@/lib/expert-presentation"
 import {
   OFFICE_ACTIONS,
@@ -285,6 +286,7 @@ export function QuickActions({ onSelect, agentType }: QuickActionsProps) {
   const locale = useLocale()
   const experts = useBuiltInExperts()
   const { enabledIds, ready, supported } = useEnabledSkillIds(agentType)
+  const { showWelcomeQuickActions } = useWelcomeQuickActions()
   const lockHint = t("notEnabled.hint")
 
   // A skill card is locked when we know which agent will run (welcome mode
@@ -385,10 +387,12 @@ export function QuickActions({ onSelect, agentType }: QuickActionsProps) {
     return { codingFeatured: featured, codingRest: rest }
   }, [experts])
 
-  // A custom-dir pi can't have skills managed by codeg's default-dir store, so
-  // hide the shortcut cards rather than show ones that lock with a Settings
-  // path the Experts/Office matrices also hide for this agent.
-  if (!supported) return null
+  // Hidden when the user has turned off the welcome-page mode selection area
+  // (Settings › Appearance), or when a custom-dir pi can't have skills managed
+  // by codeg's default-dir store — in the latter case we hide the shortcut
+  // cards rather than show ones that lock with a Settings path the
+  // Experts/Office matrices also hide for this agent.
+  if (!supported || !showWelcomeQuickActions) return null
 
   return (
     <Tabs value={tab} onValueChange={handleTabChange}>

@@ -15,6 +15,10 @@ import {
   type SidebarConversationListHandle,
 } from "./sidebar-conversation-list"
 import type { DbConversationSummary, FolderDetail } from "@/lib/types"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 import enMessages from "@/i18n/messages/en.json"
 
 // ── Probes ────────────────────────────────────────────────────────────────
@@ -24,14 +28,11 @@ import enMessages from "@/i18n/messages/en.json"
 // bail out, so they measure exactly the production memo path.
 const probes = vi.hoisted(() => ({ card: 0, folder: 0 }))
 
-// Mutable backing store the mocked context hooks read from. Function refs are
-// stable across renders (as the real providers' useCallback values are); only
-// `conversations` and `tabs` churn — `tabs` is rebuilt fresh every render to
-// mirror tab-context re-deriving it on each `conversations` change.
+// Mutable backing store the mocked tab-context hook reads from (workspace data
+// now lives in the real zustand store, seeded per test below). `tabs` is
+// rebuilt fresh every render to mirror tab-context re-deriving it on each
+// `conversations` change.
 const store = vi.hoisted(() => ({
-  conversations: [] as unknown[],
-  folders: [] as unknown[],
-  allFolders: [] as unknown[],
   activeTabId: null as string | null,
   tabSpec: [] as Array<{
     id: string
@@ -43,13 +44,17 @@ const store = vi.hoisted(() => ({
   }>,
 }))
 
+// Action spies installed into the workspace store before each test. zustand
+// keeps these referentially stable across renders (as the real store's action
+// fields are), so the list's folder callbacks that close over them stay
+// memoized.
 const stableWorkspaceFns = vi.hoisted(() => ({
-  refreshConversations: () => {},
+  refreshConversations: async () => {},
   updateConversationLocal: () => {},
-  removeFolderFromWorkspace: () => {},
+  removeFolderFromWorkspace: async () => {},
   reorderFolders: vi.fn(() => Promise.resolve()),
-  openFolder: () => {},
-  refreshFolder: () => {},
+  openFolder: async () => ({}) as FolderDetail,
+  refreshFolder: async () => {},
 }))
 
 const stableTabFns = vi.hoisted(() => ({
@@ -193,25 +198,21 @@ vi.mock("@/contexts/active-folder-context", () => ({
   useActiveFolder: () => ({ activeFolder: null }),
 }))
 
-vi.mock("@/contexts/app-workspace-context", () => ({
-  useAppWorkspace: () => ({
-    folders: store.folders,
-    allFolders: store.allFolders,
-    conversations: store.conversations,
-    conversationsLoading: false,
-    conversationsError: null,
-    ...stableWorkspaceFns,
-  }),
-}))
-
 vi.mock("@/contexts/tab-context", () => ({
-  useTabContext: () => ({
-    ...stableTabFns,
-    activeTabId: store.activeTabId,
-    // Fresh array + fresh objects every render → worst-case churn, exactly what
-    // the list's reuseSelected/reuseSet must absorb to keep folders memoized.
-    tabs: store.tabSpec.map((t) => ({ ...t })),
-  }),
+  useTabActions: () => stableTabFns,
+  useTabStore: (
+    selector: (s: {
+      activeTabId: string | null
+      tabs: Array<Record<string, unknown>>
+    }) => unknown
+  ) =>
+    selector({
+      activeTabId: store.activeTabId,
+      // Fresh array + fresh objects every render → worst-case churn, exactly
+      // what the list's reuseSelected/reuseSet must absorb to keep folders
+      // memoized.
+      tabs: store.tabSpec.map((t) => ({ ...t })),
+    }),
 }))
 vi.mock("@/contexts/workbench-route-context", () => {
   // Stable singleton — the real provider memoizes these (useCallback([])), so a
@@ -304,10 +305,19 @@ function tree() {
   )
 }
 
-// Reset the virtua geometry before every test (runs before each describe's own
-// beforeEach) so a scrolled overlay test never bleeds into the memo-scope or
-// drag suites, which all assume scrollOffset 0 → overlay hidden.
+// Reset the virtua geometry and the workspace store before every test (runs
+// before each describe's own beforeEach) so a scrolled overlay test never
+// bleeds into the memo-scope or drag suites, which all assume scrollOffset 0 →
+// overlay hidden. The store reset restores pristine state; the setState then
+// flips the loading flags off and installs the stable action spies, and each
+// describe's own beforeEach seeds its folders/conversations fixture on top.
 beforeEach(() => {
+  resetAppWorkspaceStore()
+  useAppWorkspaceStore.setState({
+    conversationsLoading: false,
+    conversationsError: null,
+    ...stableWorkspaceFns,
+  })
   virtuaCtl.scrollOffset = 0
   virtuaCtl.onScroll = null
   virtuaCtl.scrollToIndex.mockClear()
@@ -318,15 +328,18 @@ describe("SidebarConversationList — single status event re-render scope", () =
     vi.useFakeTimers({ now: FIXED })
     probes.card = 0
     probes.folder = 0
-    store.folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
-    store.allFolders = store.folders
-    store.conversations = [
-      conv(11, 1),
-      conv(12, 1),
-      conv(21, 2),
-      conv(22, 2),
-      conv(23, 2),
-    ]
+    const folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [
+        conv(11, 1),
+        conv(12, 1),
+        conv(21, 2),
+        conv(22, 2),
+        conv(23, 2),
+      ],
+    })
     // One open tab in folder 1 → exercises the selectedConversation object and
     // openTabKeys Set reuse paths (these churn refs every render via the mock).
     store.activeTabId = "tab-11"
@@ -355,14 +368,16 @@ describe("SidebarConversationList — single status event re-render scope", () =
 
     // Mirror updateConversationLocal: replace exactly one summary (folder 2,
     // conv 22) with a new object; every other summary keeps its identity.
-    const prev = store.conversations as DbConversationSummary[]
+    const prev = useAppWorkspaceStore.getState().conversations
     const next = prev.slice()
     const idx = next.findIndex((c) => c.id === 22)
     next[idx] = { ...next[idx], status: "completed" }
-    store.conversations = next
 
     probes.card = 0
     probes.folder = 0
+    act(() => {
+      useAppWorkspaceStore.setState({ conversations: next })
+    })
     act(() => harness.rerender())
 
     // Card-level gate: only the changed card re-renders (R1 + R1b + shared now).
@@ -390,15 +405,18 @@ describe("SidebarConversationList — Pinned section (migration semantics)", () 
   beforeEach(() => {
     probes.card = 0
     probes.folder = 0
-    store.folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
-    store.allFolders = store.folders
+    const folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
     store.activeTabId = null
     store.tabSpec = []
-    store.conversations = [
-      conv(11, 1),
-      conv(12, 1, { pinned_at: new Date(FIXED).toISOString() }), // pinned
-      conv(21, 2),
-    ]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [
+        conv(11, 1),
+        conv(12, 1, { pinned_at: new Date(FIXED).toISOString() }), // pinned
+        conv(21, 2),
+      ],
+    })
   })
 
   it("moves a pinned conversation into the Pinned section above Folders, without duplicating it", () => {
@@ -422,7 +440,7 @@ describe("SidebarConversationList — Pinned section (migration semantics)", () 
   })
 
   it("omits the Pinned section entirely when nothing is pinned", () => {
-    store.conversations = [conv(11, 1), conv(21, 2)]
+    useAppWorkspaceStore.setState({ conversations: [conv(11, 1), conv(21, 2)] })
     render(tree())
     const text = document.body.textContent ?? ""
     expect(text).not.toContain("Pinned")
@@ -462,9 +480,12 @@ describe("SidebarConversationList — folder drag gesture", () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: FIXED })
     stableWorkspaceFns.reorderFolders.mockClear()
-    store.folders = [folder(1, "F1"), folder(2, "F2"), folder(3, "F3")]
-    store.allFolders = store.folders
-    store.conversations = [conv(11, 1), conv(21, 2), conv(31, 3)]
+    const folders = [folder(1, "F1"), folder(2, "F2"), folder(3, "F3")]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [conv(11, 1), conv(21, 2), conv(31, 3)],
+    })
     store.activeTabId = null
     store.tabSpec = []
     // Fixed geometry: viewport / drag surface anchored at top=0 and tall enough
@@ -574,16 +595,19 @@ describe("SidebarConversationList — folder drag gesture", () => {
 describe("SidebarConversationList — sticky folder header overlay", () => {
   beforeEach(() => {
     localStorage.clear() // folderExpanded persists across tests otherwise
-    store.folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
-    store.allFolders = store.folders
+    const folders = [folder(1, "Folder 1"), folder(2, "Folder 2")]
     // rows: F1(0) c11(1) c12(2) F2(3) c21(4) c22(5) c23(6)
-    store.conversations = [
-      conv(11, 1),
-      conv(12, 1),
-      conv(21, 2),
-      conv(22, 2),
-      conv(23, 2),
-    ]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [
+        conv(11, 1),
+        conv(12, 1),
+        conv(21, 2),
+        conv(22, 2),
+        conv(23, 2),
+      ],
+    })
     store.activeTabId = null
     store.tabSpec = []
   })
@@ -694,9 +718,12 @@ describe("SidebarConversationList — scrollToActive across a worktree merge", (
   beforeEach(() => {
     // Root folder 1 + worktree child folder 2 (parent_id = 1), one conversation
     // in each. Select the worktree conversation via the active tab.
-    store.folders = [folder(1, "Root"), folder(2, "Worktree", 1)]
-    store.allFolders = store.folders
-    store.conversations = [conv(11, 1), conv(21, 2)]
+    const folders = [folder(1, "Root"), folder(2, "Worktree", 1)]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [conv(11, 1), conv(21, 2)],
+    })
     store.activeTabId = "tab-21"
     store.tabSpec = [
       {
@@ -745,9 +772,12 @@ describe("SidebarConversationList — folder ⋯ opens the same menu as right-cl
   beforeEach(() => {
     probes.card = 0
     probes.folder = 0
-    store.folders = [folder(1, "Folder 1")]
-    store.allFolders = store.folders
-    store.conversations = [conv(11, 1)]
+    const folders = [folder(1, "Folder 1")]
+    useAppWorkspaceStore.setState({
+      folders,
+      allFolders: folders,
+      conversations: [conv(11, 1)],
+    })
     store.activeTabId = null
     store.tabSpec = []
   })

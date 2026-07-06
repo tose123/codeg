@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useTranslations } from "next-intl"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { cn } from "@/lib/utils"
@@ -520,6 +520,151 @@ function isNewFileOnly(file: ParsedDiffFile): boolean {
   return file.mode === "added" && file.deletions === 0
 }
 
+// Beyond this many rows a single file is rendered as a bounded preview: each
+// diff row is its own DOM node (line-number gutters + sign + text), so a
+// lockfile or bulk-refactor diff of 5k–20k lines would otherwise build tens of
+// thousands of nodes synchronously and freeze the UI for seconds — all just to
+// be clipped inside the 420px-tall scroll box. The remainder is one click away.
+const MAX_PREVIEW_ROWS = 500
+
+/**
+ * Take at most `limit` rows across the file's hunks in order, slicing the hunk
+ * that crosses the budget so the preview ends on a clean row. Callers only use
+ * this when the file's total row count exceeds `limit`.
+ */
+function capHunks(hunks: ParsedDiffHunk[], limit: number): ParsedDiffHunk[] {
+  const out: ParsedDiffHunk[] = []
+  let budget = limit
+  for (const hunk of hunks) {
+    if (budget <= 0) break
+    if (hunk.rows.length <= budget) {
+      out.push(hunk)
+      budget -= hunk.rows.length
+    } else {
+      out.push({ ...hunk, rows: hunk.rows.slice(0, budget) })
+      budget = 0
+    }
+  }
+  return out
+}
+
+function DiffFileSection({
+  file,
+  embedded,
+  clickableFilePath,
+  folderPath,
+}: {
+  file: ParsedDiffFile
+  embedded: boolean
+  clickableFilePath: boolean
+  folderPath: string | null
+}) {
+  const t = useTranslations("Folder.diffPreview")
+  const [expanded, setExpanded] = useState(false)
+
+  // Reset the reveal when a new diff reparses to a fresh `file` object at this
+  // position: sections are keyed positionally (`file-1`, …), so React reuses
+  // this instance across a `diffText` change. `file` is referentially stable
+  // while `diffText` is unchanged (it comes from a `useMemo`), so this only
+  // fires on a real content change. Resetting during render — not in an effect —
+  // guarantees the incoming file is never committed in the previous file's
+  // expanded (un-capped) state, which would resurface the exact multi-second
+  // freeze the cap exists to prevent (React discards this render without
+  // reconciling its children, then re-renders capped).
+  const [renderedFile, setRenderedFile] = useState(file)
+  if (file !== renderedFile) {
+    setRenderedFile(file)
+    setExpanded(false)
+  }
+
+  const newFile = isNewFileOnly(file)
+
+  const totalRows = useMemo(
+    () => file.hunks.reduce((sum, hunk) => sum + hunk.rows.length, 0),
+    [file.hunks]
+  )
+  // A large file is capped until the user opts to render the rest. Small files
+  // (the common case) keep rendering exactly as before.
+  const capped = !expanded && totalRows > MAX_PREVIEW_ROWS
+  const hunks = useMemo(
+    () => (capped ? capHunks(file.hunks, MAX_PREVIEW_ROWS) : file.hunks),
+    [capped, file.hunks]
+  )
+
+  return (
+    <section
+      className={cn(
+        "flex max-h-[420px] flex-col",
+        embedded
+          ? "bg-transparent"
+          : "rounded-lg border border-border bg-background"
+      )}
+    >
+      {!embedded && (
+        <header className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
+          <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            {newFile ? "WRITE" : t(modeKey(file.mode))}
+          </span>
+          {clickableFilePath ? (
+            <FilePathLink
+              filePath={file.path}
+              className="min-w-0 flex-1 font-mono text-foreground"
+              title={file.path}
+            >
+              {toDisplayPath(file.path, folderPath)}
+            </FilePathLink>
+          ) : (
+            <span
+              className="min-w-0 flex-1 truncate font-mono text-foreground"
+              title={file.path}
+            >
+              {toDisplayPath(file.path, folderPath)}
+            </span>
+          )}
+          {!newFile && (
+            <span className="ml-auto inline-flex shrink-0 items-center gap-2 font-mono">
+              <span className="text-green-700 dark:text-green-400">
+                +{file.additions}
+              </span>
+              <span className="text-red-700 dark:text-red-400">
+                -{file.deletions}
+              </span>
+            </span>
+          )}
+        </header>
+      )}
+
+      <ScrollArea x="scroll">
+        <div className="inline-block min-w-full">
+          {newFile
+            ? hunks.map((hunk) => (
+                <NewFileLines key={hunk.key} rows={hunk.rows} />
+              ))
+            : hunks.map((hunk, hunkIdx) => (
+                <div key={hunk.key}>
+                  {hunkIdx > 0 && <HunkSeparator hunk={hunk} />}
+                  <HunkLines rows={hunk.rows} />
+                </div>
+              ))}
+        </div>
+      </ScrollArea>
+
+      {capped && (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className={cn(
+            "shrink-0 select-none px-3 py-1 text-left font-mono text-[11px] text-muted-foreground hover:bg-muted/40 hover:text-foreground",
+            embedded ? "border-t border-border/50" : "border-t border-border"
+          )}
+        >
+          {t("showRemainingLines", { count: totalRows - MAX_PREVIEW_ROWS })}
+        </button>
+      )}
+    </section>
+  )
+}
+
 export function UnifiedDiffPreview({
   diffText,
   className,
@@ -570,69 +715,15 @@ export function UnifiedDiffPreview({
   return (
     <ScrollArea className={cn("h-full", className)} x="scroll">
       <div className={embedded ? "space-y-2" : "space-y-3"}>
-        {files.map((file) => {
-          const newFile = isNewFileOnly(file)
-          return (
-            <section
-              key={file.key}
-              className={cn(
-                "flex max-h-[420px] flex-col",
-                embedded
-                  ? "bg-transparent"
-                  : "rounded-lg border border-border bg-background"
-              )}
-            >
-              {!embedded && (
-                <header className="flex shrink-0 items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-[11px]">
-                  <span className="shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    {newFile ? "WRITE" : t(modeKey(file.mode))}
-                  </span>
-                  {clickableFilePath ? (
-                    <FilePathLink
-                      filePath={file.path}
-                      className="min-w-0 flex-1 font-mono text-foreground"
-                      title={file.path}
-                    >
-                      {toDisplayPath(file.path, folder?.path ?? null)}
-                    </FilePathLink>
-                  ) : (
-                    <span
-                      className="min-w-0 flex-1 truncate font-mono text-foreground"
-                      title={file.path}
-                    >
-                      {toDisplayPath(file.path, folder?.path ?? null)}
-                    </span>
-                  )}
-                  {!newFile && (
-                    <span className="ml-auto inline-flex shrink-0 items-center gap-2 font-mono">
-                      <span className="text-green-700 dark:text-green-400">
-                        +{file.additions}
-                      </span>
-                      <span className="text-red-700 dark:text-red-400">
-                        -{file.deletions}
-                      </span>
-                    </span>
-                  )}
-                </header>
-              )}
-
-              <ScrollArea x="scroll">
-                <div className="inline-block min-w-full">
-                  {newFile
-                    ? file.hunks.map((hunk) => (
-                        <NewFileLines key={hunk.key} rows={hunk.rows} />
-                      ))
-                    : file.hunks.map((hunk, hunkIdx) => (
-                        <div key={hunk.key}>
-                          {hunkIdx > 0 && <HunkSeparator hunk={hunk} />}
-                          <HunkLines rows={hunk.rows} />
-                        </div>
-                      ))}
-                </div>
-              </ScrollArea>
-            </section>
-          )
-        })}
+        {files.map((file) => (
+          <DiffFileSection
+            key={file.key}
+            file={file}
+            embedded={embedded}
+            clickableFilePath={clickableFilePath}
+            folderPath={folder?.path ?? null}
+          />
+        ))}
       </div>
     </ScrollArea>
   )

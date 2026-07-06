@@ -1972,6 +1972,21 @@ export function useConnectionStore(): ConnectionStoreApi {
 
 // ── Actions context (unchanged interface) ──
 
+/**
+ * Sink that mirrors a connection's `liveMessage` into the conversation-runtime
+ * store OUTSIDE React. Registered per `contextKey` by the conversation panel and
+ * invoked synchronously from `dispatch` whenever that connection's `liveMessage`
+ * reference changes (streaming deltas, tool updates, the prompt-start reset).
+ * Moving this write out of a React effect lets the keep-alive panel stop
+ * re-rendering on every streaming token — only the runtime-store subscriber (the
+ * message list) re-renders. `isLive` is `status === "prompting"`, which the
+ * runtime reducer uses to bypass its stale-reconnect-replay guard.
+ */
+export type LiveMessageSink = (
+  liveMessage: LiveMessage,
+  isLive: boolean
+) => void
+
 export interface AcpActionsValue {
   connect(
     contextKey: string,
@@ -2011,6 +2026,14 @@ export interface AcpActionsValue {
   setActiveKey(key: string | null): void
   touchActivity(contextKey: string): void
   registerOpenTabKeys(keys: Set<string>): void
+  /**
+   * Register a sink that mirrors this contextKey's `liveMessage` into the
+   * conversation-runtime store from `dispatch` (outside React), replacing the
+   * panel's per-token mirror effect. Returns an unregister fn (idempotent —
+   * only removes the entry if it still points at this sink). See
+   * `LiveMessageSink`.
+   */
+  registerLiveMessageSink(contextKey: string, sink: LiveMessageSink): () => void
   /**
    * Clear `loadError` set by a `session/load` failure so the next auto-connect
    * attempt isn't gated by stale failure state. Wired to the Reload button in
@@ -2260,6 +2283,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     [t]
   )
 
+  // Per-contextKey liveMessage sinks. Fired synchronously from `dispatch` when a
+  // connection's liveMessage reference changes, mirroring it into the runtime
+  // store outside React (see `LiveMessageSink`). A ref → no re-renders.
+  const liveMessageSinksRef = useRef(new Map<string, LiveMessageSink>())
+
   // Activity tracking (no re-renders)
   const lastActivityRef = useRef(new Map<string, number>())
   const streamingQueueRef = useRef<StreamingAction[]>([])
@@ -2302,24 +2330,52 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
 
       storeRef.current.connections = next
 
+      // Mirror a changed liveMessage into the runtime store OUTSIDE React, so
+      // the keep-alive conversation panel no longer has to re-render per
+      // streaming token just to run a mirror effect. Fires only when the
+      // reference actually changed and a sink is registered for the key; writes
+      // non-null values (turn-end clearing is owned by COMPLETE_TURN, unmount by
+      // removeConversation). `isLive = status === "prompting"`.
+      //
+      // Ordering: mirror BEFORE notifying the connection's key listeners, so the
+      // runtime store is updated before React observes the connection change —
+      // the panel and the runtime-store-driven message list then re-render off a
+      // consistent snapshot (not relying on React batching to reconcile the two).
+      const mirrorLiveMessage = (key: string) => {
+        const sink = liveMessageSinksRef.current.get(key)
+        if (!sink) return
+        const nextConn = next.get(key)
+        if (!nextConn || nextConn.liveMessage == null) return
+        if (nextConn.liveMessage === prev.get(key)?.liveMessage) return
+        sink(nextConn.liveMessage, nextConn.status === "prompting")
+      }
+
       if (action.type === "REMOVE_ALL") {
         notifyAllKeyListeners()
       } else if (action.type === "STREAM_BATCH") {
         const keys = new Set(action.actions.map((item) => item.contextKey))
         for (const key of keys) {
+          mirrorLiveMessage(key)
           notifyKeyListeners(key)
         }
       } else if (action.type === "BATCH_TOOL_CALL_UPDATES") {
         const keys = new Set(action.actions.map((item) => item.contextKey))
         for (const key of keys) {
+          mirrorLiveMessage(key)
           notifyKeyListeners(key)
         }
       } else if (action.type === "REKEY_CONNECTION") {
+        // The connection (with its in-flight liveMessage) moved to toKey; sync
+        // it BEFORE notifying so a close+reopen mid-turn doesn't drop the stream.
+        mirrorLiveMessage(action.toKey)
         notifyKeyListeners(action.fromKey)
         notifyKeyListeners(action.toKey)
       } else {
         const key = getAffectedKey(action)
-        if (key) notifyKeyListeners(key)
+        if (key) {
+          mirrorLiveMessage(key)
+          notifyKeyListeners(key)
+        }
       }
     },
     [notifyKeyListeners, notifyAllKeyListeners]
@@ -2375,6 +2431,31 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
   const registerOpenTabKeys = useCallback((keys: Set<string>) => {
     openTabKeysRef.current = keys
   }, [])
+
+  const registerLiveMessageSink = useCallback(
+    (contextKey: string, sink: LiveMessageSink) => {
+      liveMessageSinksRef.current.set(contextKey, sink)
+      // Replay the CURRENT liveMessage immediately, matching the removed mirror
+      // effect's setup write. A panel can mount/remount over a connection that
+      // already holds a non-null liveMessage — connection reuse, a viewer
+      // attaching mid-turn, or close+reopen mid-turn — and if the stream is
+      // paused (e.g. blocked on a permission/question) no further delta would
+      // arrive to trigger the sink. Without this replay the runtime store, and
+      // thus the message list, would stay blank/stale until the next change.
+      const conn = storeRef.current.connections.get(contextKey)
+      if (conn?.liveMessage != null) {
+        sink(conn.liveMessage, conn.status === "prompting")
+      }
+      return () => {
+        // Idempotent: only drop the entry if it still points at this sink (a
+        // remount may have already replaced it).
+        if (liveMessageSinksRef.current.get(contextKey) === sink) {
+          liveMessageSinksRef.current.delete(contextKey)
+        }
+      }
+    },
+    []
+  )
 
   const clearAcpLoadError = useCallback(
     (contextKey: string) => {
@@ -4105,6 +4186,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setActiveKey,
       touchActivity,
       registerOpenTabKeys,
+      registerLiveMessageSink,
       clearAcpLoadError,
       attachDelegationChild,
       detachDelegationChild,
@@ -4124,6 +4206,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       setActiveKey,
       touchActivity,
       registerOpenTabKeys,
+      registerLiveMessageSink,
       clearAcpLoadError,
       attachDelegationChild,
       detachDelegationChild,

@@ -1,10 +1,10 @@
 import { act, render, screen } from "@testing-library/react"
-import { useEffect } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { AppWorkspaceProvider } from "@/contexts/app-workspace-context"
 import {
-  AppWorkspaceProvider,
-  useAppWorkspace,
-} from "@/contexts/app-workspace-context"
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 import type {
   ConversationChange,
   DbConversationSummary,
@@ -124,16 +124,13 @@ function makeFolder(
   }
 }
 
-// Captured context so tests can drive imperative actions (upsertFolder) the
-// way real consumers do; reset on every mount via Probe's render.
-let ctx: ReturnType<typeof useAppWorkspace> | null = null
-
+// Subscribes via selectors the way real consumers do, so the assertions also
+// exercise the store's slice reactivity (a missed notify would fail here).
 function Probe() {
-  const workspace = useAppWorkspace()
-  useEffect(() => {
-    ctx = workspace
-  }, [workspace])
-  const { conversations, stats, folders, allFolders } = workspace
+  const conversations = useAppWorkspaceStore((s) => s.conversations)
+  const stats = useAppWorkspaceStore((s) => s.stats)
+  const folders = useAppWorkspaceStore((s) => s.folders)
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
   return (
     <div>
       <output data-testid="ids">
@@ -196,7 +193,9 @@ beforeEach(() => {
   h.listOpenFolders.mockResolvedValue([])
   h.listAllFolders.mockClear()
   h.listAllFolders.mockResolvedValue([])
-  ctx = null
+  // The store is a module-level singleton: restore pristine state (including
+  // the delete tombstones) so state can't leak between tests.
+  resetAppWorkspaceStore()
 })
 
 describe("AppWorkspaceProvider conversation://changed sync", () => {
@@ -306,7 +305,9 @@ describe("upsertFolder list routing", () => {
     // row in the sidebar until the next refetch/restart.
     await mountProvider()
     act(() => {
-      ctx?.upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat" }))
+      useAppWorkspaceStore
+        .getState()
+        .upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat" }))
     })
     expect(screen.getByTestId("folder-ids").textContent).toBe("")
     expect(screen.getByTestId("all-folder-ids")).toHaveTextContent("7")
@@ -315,7 +316,7 @@ describe("upsertFolder list routing", () => {
   it("seeds a regular folder into both lists", async () => {
     await mountProvider()
     act(() => {
-      ctx?.upsertFolder(makeFolder({ id: 8 }))
+      useAppWorkspaceStore.getState().upsertFolder(makeFolder({ id: 8 }))
     })
     expect(screen.getByTestId("folder-ids")).toHaveTextContent("8")
     expect(screen.getByTestId("all-folder-ids")).toHaveTextContent("8")
@@ -323,14 +324,15 @@ describe("upsertFolder list routing", () => {
 
   it("replaces an existing chat folder in allFolders in place", async () => {
     await mountProvider()
+    const { upsertFolder } = useAppWorkspaceStore.getState()
     act(() => {
-      ctx?.upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat" }))
+      upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat" }))
     })
     act(() => {
-      ctx?.upsertFolder(makeFolder({ id: 9, kind: "chat", name: "Chat" }))
+      upsertFolder(makeFolder({ id: 9, kind: "chat", name: "Chat" }))
     })
     act(() => {
-      ctx?.upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat 2" }))
+      upsertFolder(makeFolder({ id: 7, kind: "chat", name: "Chat 2" }))
     })
     expect(screen.getByTestId("all-folder-ids")).toHaveTextContent("7,9")
     expect(screen.getByTestId("folder-ids").textContent).toBe("")

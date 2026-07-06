@@ -108,8 +108,14 @@
       "fontSize": "字級",
       "ligatures": "啟用連字",
       "ligaturesUnavailable": "此字型不含連字",
+      "wordWrap": "啟用自動換行",
       "terminalLigaturesHint": "終端機連字僅對內建程式字型生效。",
       "preview": "預覽"
+    },
+    "welcomePanel": {
+      "sectionTitle": "模式選擇區域",
+      "sectionDescription": "新會話頁面輸入框上方顯示的「程式開發 / 日常辦公」快捷卡片區域。",
+      "showQuickActions": "在新會話頁面顯示"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "加入對話",
       "addSelectionToChatDone": "已將 {label} 加入對話",
       "addFileToChat": "新增檔案到對話",
+      "toggleWordWrap": "切換自動換行",
       "addFileToChatDone": "已將 {label} 加入對話",
       "viewDiff": "查看差異",
       "openFile": "打開檔案",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "折疊已追蹤變更",
       "expandUntracked": "展開未追蹤檔案",
       "collapseUntracked": "折疊未追蹤檔案",
+      "showRemainingItems": "顯示其餘 {count} 項",
       "actions": {
         "commitCode": "提交程式碼",
         "rollback": "回滾",
@@ -2044,7 +2052,7 @@
         "quickMessages": "快捷訊息",
         "quickMessagesEmpty": "尚無快捷訊息",
         "quickMessagesLoading": "載入中...",
-        "paste": "貼上",
+        "pasteAsPlainText": "貼上純文字",
         "cut": "剪下",
         "copy": "複製",
         "selectAll": "全選",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "區塊 {index}",
       "loadingHunk": "正在載入區塊...",
-      "noDiffData": "無差異資料"
+      "noDiffData": "無差異資料",
+      "showRemainingLines": "顯示剩餘 {count} 行"
     },
     "conversationContextBar": {
       "folderTitle": "工作資料夾",

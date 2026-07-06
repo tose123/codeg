@@ -41,10 +41,10 @@ Codeg (Code Generation) is a multi-agent coding workspace. It brings multiple ag
   </tr>
   <tr>
     <td align="center" width="220">
-      <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE" target="_blank"><img src="./docs/images/sui-xiang.jpg" alt="Sui-Xiang AI Gateway" width="200" /></a><br/>
-      <strong><a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">Sui-Xiang AI Gateway</a></strong>
+      <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE" target="_blank"><img src="./docs/images/sui-xiang.jpg" alt="随想AI中转站" width="200" /></a><br/>
+      <strong><a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">随想AI中转站</a></strong>
     </td>
-    <td>Thanks to Sui-Xiang AI Gateway for sponsoring this project! Sui-Xiang AI Gateway is a reliable and efficient API relay provider, offering relay services for Claude, Codex, Gemini, and more. New accounts earn ¥0.5 in test credit with each daily check-in after <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">signing up</a>; top-ups are credited 1:1 — no subscription, pay as you go. Multi-route redundancy, cross-region disaster recovery, and automatic failover keep long-lived SSE connections uninterrupted.</td>
+    <td>Thanks to 随想AI中转站 for sponsoring this project! 随想AI中转站 is a reliable and efficient API relay provider, offering relay services for Claude, Codex, Gemini, and more. New accounts earn ¥0.5 in test credit with each daily check-in after <a href="https://sui-xiang.com/register?aff=JPFCRHHBE8HE">signing up</a>; top-ups are credited 1:1 — no subscription, pay as you go. Multi-route redundancy, cross-region disaster recovery, and automatic failover keep long-lived SSE connections uninterrupted.</td>
   </tr>
 </table>
 

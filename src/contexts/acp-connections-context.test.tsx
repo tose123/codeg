@@ -550,3 +550,166 @@ describe("AcpConnectionsProvider permission request details", () => {
     expect(parsed.cwd).toBe("/tmp/x")
   })
 })
+
+describe("AcpConnectionsProvider liveMessage sink (mirror out of React)", () => {
+  async function connectOwner(): Promise<AttachHandlers> {
+    await mountProvider()
+    await act(async () => {
+      // No conversationId → skip discovery → owner spawn (acpConnect).
+      await h.actions!.connect(TAB, "claude_code", "/tmp/x", "sess-1")
+    })
+    return latestAttachHandlers()
+  }
+
+  it("fires with isLive=true and a fresh non-null liveMessage when a turn starts", async () => {
+    const handlers = await connectOwner()
+    const calls: Array<{ content: unknown; isLive: boolean }> = []
+    h.actions!.registerLiveMessageSink(TAB, (lm, isLive) =>
+      calls.push({ content: lm.content, isLive })
+    )
+
+    // status → prompting resets liveMessage to a fresh empty assistant message.
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.isLive).toBe(true)
+    expect(calls[0]!.content).toEqual([])
+  })
+
+  it("relays a subsequent liveMessage change (tool call appended) to the sink", async () => {
+    const handlers = await connectOwner()
+    const calls: Array<{ len: number; isLive: boolean }> = []
+    h.actions!.registerLiveMessageSink(TAB, (lm, isLive) =>
+      calls.push({ len: lm.content.length, isLive })
+    )
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "tool_call",
+      tool_call_id: "call_1",
+      title: "Bash",
+      kind: "execute",
+      status: "pending",
+      content: null,
+      raw_input: "{}",
+      raw_output: null,
+    })
+
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    const last = calls[calls.length - 1]!
+    expect(last.isLive).toBe(true)
+    expect(last.len).toBe(1) // the appended tool_call block
+  })
+
+  it("stops firing after the returned unregister runs", async () => {
+    const handlers = await connectOwner()
+    let count = 0
+    const unregister = h.actions!.registerLiveMessageSink(TAB, () => {
+      count += 1
+    })
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    expect(count).toBe(1)
+
+    unregister()
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    expect(count).toBe(1) // no further fire
+  })
+
+  it("does not fire when a transition leaves liveMessage unchanged", async () => {
+    const handlers = await connectOwner()
+    let count = 0
+    h.actions!.registerLiveMessageSink(TAB, () => {
+      count += 1
+    })
+
+    // connecting → connected never touches liveMessage (stays null).
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "connected",
+    })
+    expect(count).toBe(0)
+  })
+
+  it("replays the current liveMessage immediately when registering over a live connection", async () => {
+    const handlers = await connectOwner()
+    // Drive a live message with NO sink registered (e.g. before the panel's
+    // registration effect, or a connection reused across a remount).
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    emitAcpEvent(handlers, {
+      seq: 2,
+      connection_id: "spawned-conn",
+      type: "tool_call",
+      tool_call_id: "call_1",
+      title: "Bash",
+      kind: "execute",
+      status: "pending",
+      content: null,
+      raw_input: "{}",
+      raw_output: null,
+    })
+
+    // Registering now must replay the existing liveMessage once, immediately —
+    // otherwise a paused stream (no further delta) would leave the message list
+    // blank until the next change.
+    const calls: Array<{ len: number; isLive: boolean }> = []
+    h.actions!.registerLiveMessageSink(TAB, (lm, isLive) =>
+      calls.push({ len: lm.content.length, isLive })
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.isLive).toBe(true) // still prompting
+    expect(calls[0]!.len).toBe(1) // the tool_call block already present
+  })
+
+  it("mirrors to the sink BEFORE notifying connection key subscribers", async () => {
+    const handlers = await connectOwner()
+    const order: string[] = []
+    h.actions!.registerLiveMessageSink(TAB, () => order.push("sink"))
+    const unsub = h.store!.subscribeKey(TAB, () => order.push("notify"))
+
+    emitAcpEvent(handlers, {
+      seq: 1,
+      connection_id: "spawned-conn",
+      type: "status_changed",
+      status: "prompting",
+    })
+    unsub()
+
+    // The runtime sink runs before the connection's key subscribers are notified
+    // for the liveMessage-changing dispatch. (A benign follow-up dispatch that
+    // leaves liveMessage unchanged may append another "notify" without re-firing
+    // the sink — assert the ordering + single sink, not the total notify count.)
+    expect(order[0]).toBe("sink")
+    expect(order.filter((x) => x === "sink")).toHaveLength(1)
+    expect(order.indexOf("sink")).toBeLessThan(order.indexOf("notify"))
+  })
+})

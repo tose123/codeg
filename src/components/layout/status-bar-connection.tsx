@@ -1,11 +1,11 @@
 "use client"
 
-import { useCallback, useMemo, useSyncExternalStore } from "react"
+import { useCallback, useSyncExternalStore } from "react"
 import { Unplug } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { useConnectionStore } from "@/contexts/acp-connections-context"
-import { useTabContext } from "@/contexts/tab-context"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useTabStore } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { AgentIcon } from "@/components/agent-icon"
 import {
   Tooltip,
@@ -41,8 +41,8 @@ const STATUS_STYLE: Record<
 export function StatusBarConnection() {
   const t = useTranslations("Folder.statusBar.connection")
   const store = useConnectionStore()
-  const { tabs, activeTabId } = useTabContext()
-  const { conversations } = useAppWorkspace()
+  const tabs = useTabStore((s) => s.tabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
 
   // Subscribe to activeKey changes
   const subscribeActiveKey = useCallback(
@@ -77,14 +77,16 @@ export function StatusBarConnection() {
   const status = activeConn?.status ?? null
   const agentType = activeConn?.agentType ?? null
 
-  const model = useMemo(() => {
+  // Selecting the primitive model string keeps this component inert to every
+  // unrelated conversation update.
+  const model = useAppWorkspaceStore((s) => {
     const tab = tabs.find((t) => t.id === activeTabId)
     if (!tab || tab.kind !== "conversation") return null
-    const conv = conversations.find(
+    const conv = s.conversations.find(
       (c) => c.id === tab.conversationId && c.agent_type === tab.agentType
     )
     return conv?.model ?? null
-  }, [tabs, activeTabId, conversations])
+  })
 
   if (!agentType || !status || status === "disconnected") {
     return (

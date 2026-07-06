@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef } from "react"
 import { toast } from "sonner"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabStore, useTabActions } from "@/contexts/tab-context"
 import type { AgentType } from "@/lib/types"
 
 /**
@@ -11,9 +11,9 @@ import type { AgentType } from "@/lib/types"
  * Runs once after both folders and tabs have hydrated.
  */
 export function DeepLinkBootstrap() {
-  const { foldersHydrated, folders, addFolderToWorkspaceById, conversations } =
-    useAppWorkspace()
-  const { tabsHydrated, openTab } = useTabContext()
+  const foldersHydrated = useAppWorkspaceStore((s) => s.foldersHydrated)
+  const tabsHydrated = useTabStore((s) => s.tabsHydrated)
+  const { openTab } = useTabActions()
   const ranRef = useRef(false)
 
   useEffect(() => {
@@ -49,6 +49,11 @@ export function DeepLinkBootstrap() {
         if (conversationId == null || !Number.isFinite(conversationId)) return
         if (!rawAgent) return
 
+        // Read at run time: this effect fires once when hydration completes,
+        // and getState() sees exactly the lists as of that moment.
+        const { folders, addFolderToWorkspaceById, conversations } =
+          useAppWorkspaceStore.getState()
+
         let folder = folders.find((f) => f.id === folderId)
         if (!folder) {
           try {
@@ -76,14 +81,7 @@ export function DeepLinkBootstrap() {
         clearUrl()
       }
     })()
-  }, [
-    foldersHydrated,
-    tabsHydrated,
-    folders,
-    conversations,
-    addFolderToWorkspaceById,
-    openTab,
-  ])
+  }, [foldersHydrated, tabsHydrated, openTab])
 
   return null
 }
@@ -105,32 +103,16 @@ type FocusRequest = {
  * arrives before folders/tabs hydrate is queued and replayed.
  */
 export function PetFocusBridge() {
-  const { foldersHydrated, folders, addFolderToWorkspaceById } =
-    useAppWorkspace()
-  const { tabsHydrated, openTab } = useTabContext()
+  const foldersHydrated = useAppWorkspaceStore((s) => s.foldersHydrated)
+  const tabsHydrated = useTabStore((s) => s.tabsHydrated)
+  const { openTab } = useTabActions()
 
-  const stateRef = useRef({
-    foldersHydrated,
-    folders,
-    addFolderToWorkspaceById,
-    tabsHydrated,
-    openTab,
-  })
+  // Workspace state is read via getState() at attempt time; only the tab
+  // half still needs a ref mirror (it lives in a context, not a store).
+  const stateRef = useRef({ tabsHydrated, openTab })
   useEffect(() => {
-    stateRef.current = {
-      foldersHydrated,
-      folders,
-      addFolderToWorkspaceById,
-      tabsHydrated,
-      openTab,
-    }
-  }, [
-    foldersHydrated,
-    folders,
-    addFolderToWorkspaceById,
-    tabsHydrated,
-    openTab,
-  ])
+    stateRef.current = { tabsHydrated, openTab }
+  }, [tabsHydrated, openTab])
 
   // Holds the latest focus request until the workspace has hydrated. The event
   // is one-shot, so a pet-panel click during startup/reload (before folders &
@@ -140,16 +122,16 @@ export function PetFocusBridge() {
   const attempt = useCallback(() => {
     const req = pendingRef.current
     if (!req) return
-    const s = stateRef.current
-    if (!s.foldersHydrated || !s.tabsHydrated) return // wait for hydration
+    const workspace = useAppWorkspaceStore.getState()
+    if (!workspace.foldersHydrated || !stateRef.current.tabsHydrated) return // wait for hydration
     // One-shot after hydration (mirrors DeepLinkBootstrap): clear before the
     // async work so a later state change can't double-open.
     pendingRef.current = null
     void (async () => {
       // Ensure the folder is in the workspace so the tab has a home.
-      if (!s.folders.some((f) => f.id === req.folderId)) {
+      if (!workspace.folders.some((f) => f.id === req.folderId)) {
         try {
-          await s.addFolderToWorkspaceById(req.folderId)
+          await workspace.addFolderToWorkspaceById(req.folderId)
         } catch (err) {
           console.error("[PetFocusBridge] open folder failed:", err)
           return

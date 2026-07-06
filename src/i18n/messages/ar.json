@@ -108,8 +108,14 @@
       "fontSize": "حجم الخط",
       "ligatures": "تفعيل الحروف المتصلة",
       "ligaturesUnavailable": "هذا الخط لا يحتوي على حروف متصلة",
+      "wordWrap": "تفعيل التفاف النص",
       "terminalLigaturesHint": "تنطبق الحروف المتصلة في الطرفية على خطوط البرمجة المضمّنة فقط.",
       "preview": "معاينة"
+    },
+    "welcomePanel": {
+      "sectionTitle": "منطقة اختيار الوضع",
+      "sectionDescription": "بطاقات الاختصار «تطوير الكود / الأعمال المكتبية» التي تظهر أعلى مربع الإدخال في صفحة المحادثة الجديدة.",
+      "showQuickActions": "العرض في صفحة المحادثة الجديدة"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "إضافة إلى المحادثة",
       "addSelectionToChatDone": "تمت إضافة {label} إلى المحادثة",
       "addFileToChat": "إضافة الملف إلى المحادثة",
+      "toggleWordWrap": "تبديل التفاف النص",
       "addFileToChatDone": "تمت إضافة {label} إلى المحادثة",
       "viewDiff": "عرض Diff",
       "openFile": "فتح الملف",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "طي التغييرات المتعقبة",
       "expandUntracked": "توسيع الملفات غير المتعقبة",
       "collapseUntracked": "طي الملفات غير المتعقبة",
+      "showRemainingItems": "عرض {count} عنصر إضافي",
       "actions": {
         "commitCode": "التزام الكود",
         "rollback": "تراجع",
@@ -2044,7 +2052,7 @@
         "quickMessages": "الرسائل السريعة",
         "quickMessagesEmpty": "لا توجد رسائل سريعة بعد",
         "quickMessagesLoading": "جارٍ التحميل...",
-        "paste": "لصق",
+        "pasteAsPlainText": "لصق كنص عادي",
         "cut": "قص",
         "copy": "نسخ",
         "selectAll": "تحديد الكل",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "مقطع {index}",
       "loadingHunk": "جارٍ تحميل hunk...",
-      "noDiffData": "لا توجد بيانات diff"
+      "noDiffData": "لا توجد بيانات diff",
+      "showRemainingLines": "عرض {count} سطر إضافي"
     },
     "conversationContextBar": {
       "folderTitle": "مجلد العمل",

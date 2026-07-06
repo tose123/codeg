@@ -13,7 +13,7 @@ import {
 import { useTranslations } from "next-intl"
 import { openSettingsWindow } from "@/lib/api"
 import { getPetSettings, openPetWindow } from "@/lib/pet/api"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useIsActiveChatMode } from "@/hooks/use-is-active-chat-mode"
 import { isDesktop, openFileDialog } from "@/lib/platform"
@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button"
 import { useSidebarContext } from "@/contexts/sidebar-context"
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useTabActions } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useSearchDialog } from "@/contexts/search-dialog-context"
 import { useIsMac } from "@/hooks/use-is-mac"
@@ -49,13 +49,13 @@ import {
 export function FolderTitleBar() {
   const tTitleBar = useTranslations("Folder.folderTitleBar")
   const tPet = useTranslations("Pet")
-  const { openFolder } = useAppWorkspace()
+  const openFolder = useAppWorkspaceStore((s) => s.openFolder)
   const { activeFolder } = useActiveFolder()
   const isChatMode = useIsActiveChatMode()
   const { isOpen, toggle } = useSidebarContext()
   const { isOpen: auxPanelOpen, toggle: toggleAuxPanel } = useAuxPanelContext()
   const { isOpen: terminalOpen, toggle: toggleTerminal } = useTerminalContext()
-  const { openNewConversationTab } = useTabContext()
+  const { openNewConversationTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
   const isMac = useIsMac()
   const { shortcuts } = useShortcutSettings()

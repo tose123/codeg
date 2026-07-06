@@ -8,6 +8,7 @@ pub mod kimi_code;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;
+mod summary_cache;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

@@ -108,8 +108,14 @@
       "fontSize": "Tamaño de fuente",
       "ligatures": "Activar ligaduras",
       "ligaturesUnavailable": "Esta fuente no tiene ligaduras",
+      "wordWrap": "Activar ajuste de línea",
       "terminalLigaturesHint": "Las ligaduras del terminal solo se aplican a las fuentes de programación incluidas.",
       "preview": "Vista previa"
+    },
+    "welcomePanel": {
+      "sectionTitle": "Área de selección de modo",
+      "sectionDescription": "Las tarjetas de acceso rápido «Desarrollo de código / Ofimática» que se muestran sobre el editor en la página de nueva conversación.",
+      "showQuickActions": "Mostrar en la página de nueva conversación"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "Añadir al chat",
       "addSelectionToChatDone": "Se añadió {label} a la conversación",
       "addFileToChat": "Añadir archivo al chat",
+      "toggleWordWrap": "Alternar ajuste de línea",
       "addFileToChatDone": "Se añadió {label} a la conversación",
       "viewDiff": "Ver Diff",
       "openFile": "Abrir archivo",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "Colapsar cambios rastreados",
       "expandUntracked": "Expandir archivos no rastreados",
       "collapseUntracked": "Colapsar archivos no rastreados",
+      "showRemainingItems": "Mostrar {count} elementos más",
       "actions": {
         "commitCode": "Hacer commit del código",
         "rollback": "Revertir",
@@ -2044,7 +2052,7 @@
         "quickMessages": "Mensajes rápidos",
         "quickMessagesEmpty": "Aún no hay mensajes rápidos",
         "quickMessagesLoading": "Cargando...",
-        "paste": "Pegar",
+        "pasteAsPlainText": "Pegar como texto sin formato",
         "cut": "Cortar",
         "copy": "Copiar",
         "selectAll": "Seleccionar todo",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "Bloque {index}",
       "loadingHunk": "Cargando hunk...",
-      "noDiffData": "Sin datos de diff"
+      "noDiffData": "Sin datos de diff",
+      "showRemainingLines": "Mostrar {count} líneas más"
     },
     "conversationContextBar": {
       "folderTitle": "Carpeta de trabajo",

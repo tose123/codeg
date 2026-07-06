@@ -747,6 +747,12 @@ impl AgentParser for GeminiParser {
         let mut conversations = Vec::new();
 
         for chat_file in self.list_chat_files() {
+            // NOTE: not routed through `summary_cache` — unlike the other
+            // single-file parsers, a Gemini summary is not a pure function of the
+            // chat file's bytes: `parse_summary_from_value` resolves `folder_path`
+            // from external `.project_root` / `projects.json` files that can change
+            // while the chat file does not, so an (mtime, size) key on the chat
+            // file alone would serve a stale folder. See summary_cache.rs.
             let raw = match fs::read_to_string(&chat_file) {
                 Ok(raw) => raw,
                 Err(_) => continue,

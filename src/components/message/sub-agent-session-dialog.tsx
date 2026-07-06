@@ -38,7 +38,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
-import { useConversationRuntime } from "@/contexts/conversation-runtime-context"
+import { useConversationRuntimeActions } from "@/stores/conversation-runtime-store"
 import {
   useAcpActions,
   useConnectionStore,
@@ -119,7 +119,7 @@ function useChildLiveBridge(
   childConnState: ConnectionState | undefined
 ) {
   const { setLiveMessage, completeTurn, syncTurnMetadata, removeConversation } =
-    useConversationRuntime()
+    useConversationRuntimeActions()
 
   const connStatus = childConnState?.status ?? null
   const liveMessage = childConnState?.liveMessage ?? null
@@ -279,7 +279,8 @@ function SubAgentSessionBody({
   const connStatus = childConn?.status ?? null
   const isChildStreaming = connStatus === "prompting"
 
-  const { refetchDetail, setLiveOwnsActiveTurn } = useConversationRuntime()
+  const { refetchDetail, setLiveOwnsActiveTurn } =
+    useConversationRuntimeActions()
 
   // Enter delegation-child viewer mode: mark the session live-owned and record
   // the known kickoff task. `getTimelineTurns` then (a) synthesizes the kickoff

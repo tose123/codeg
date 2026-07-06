@@ -2062,11 +2062,15 @@ export function MessageInput({
     [loadQuickMessages]
   )
 
-  // The composer's custom right-click "Paste". The native context menu only
-  // appears over the contenteditable text, so the blank chrome had no paste
-  // affordance — this reproduces Ctrl+V everywhere in the box. Reading the
-  // clipboard happens inside the menu-click user gesture, so the async
-  // Clipboard API has the activation it needs.
+  // Plain-text ("paste without formatting") paste, shared by the custom
+  // right-click menu item and the Ctrl/⌘+Shift+V shortcut. Reads only the
+  // clipboard's `text/plain` and inserts it verbatim via `pasteText` (no
+  // Markdown/HTML re-parsing), so it strips any formatting a keyboard Ctrl+V
+  // would preserve. The native context menu only appears over the
+  // contenteditable text, so the blank chrome had no paste affordance — this
+  // reproduces the shortcut everywhere in the box. Reading the clipboard happens
+  // inside the menu-click / keydown user gesture, so the async Clipboard API has
+  // the activation it needs.
   const handleContextPaste = useCallback(async () => {
     if (disabled) return
     const editor = editorRef.current?.getEditor()
@@ -2110,6 +2114,20 @@ export function MessageInput({
       toast.error(t("pasteUnavailable"))
     }
   }, [disabled, appendFilesFromInput, t])
+
+  // Bridges the composer's Ctrl/⌘+Shift+V key to the plain-text paste above.
+  // Returns whether the shortcut was consumed: when disabled or when the async
+  // clipboard read is available we take over (return true) so the composer
+  // suppresses the browser's native rich paste; in a non-secure context (no
+  // `readText`) we return false so the browser's own "paste and match style"
+  // still works. The read runs inside this keydown gesture, so its activation
+  // is preserved.
+  const handlePlainPasteShortcut = useCallback((): boolean => {
+    if (disabled) return true
+    if (!clipboardReadSupported) return false
+    void handleContextPaste()
+    return true
+  }, [disabled, clipboardReadSupported, handleContextPaste])
 
   useEffect(() => {
     if (!attachmentTabId) return
@@ -2928,6 +2946,7 @@ export function MessageInput({
                 onSubmit={handleSend}
                 onFocus={onFocus}
                 onPasteFiles={handlePasteFiles}
+                onPlainPaste={handlePlainPasteShortcut}
                 submitShortcut={shortcuts.send_message}
                 newlineShortcut={shortcuts.newline_in_message}
                 isExternalMenuOpen={slashMenuOpen && slashAutocompleteCount > 0}
@@ -3316,7 +3335,7 @@ export function MessageInput({
               }}
             >
               <ClipboardPaste className="size-4" />
-              {t("paste")}
+              {t("pasteAsPlainText")}
             </ContextMenuItem>
             <ContextMenuItem
               disabled={disabled}

@@ -13,10 +13,6 @@ import {
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { useTranslations } from "next-intl"
-import { cjk } from "@streamdown/cjk"
-import { code } from "@streamdown/code"
-import { createMathPlugin } from "@streamdown/math"
-import { mermaid } from "@streamdown/mermaid"
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
 import {
   createContext,
@@ -37,6 +33,7 @@ import { markdownLinkComponents } from "./markdown-link"
 import { rehypeCommandBadges } from "./rehype-command-badges"
 import { rehypePluginsAllowingCodeg } from "./rehype-allow-codeg"
 import { remarkRewriteFileUriLinks } from "./remark-file-uri-links"
+import { useStreamdownPlugins } from "./streamdown-plugins"
 
 export type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"]
@@ -342,24 +339,6 @@ export type MessageResponseProps = ComponentProps<typeof Streamdown> & {
   softBreaks?: boolean
 }
 
-const math = createMathPlugin({ singleDollarTextMath: true })
-
-// Wrap the code plugin to guard against unsupported language identifiers
-// (e.g. "##", "function") that appear in fenced code blocks from tool output.
-// Without this, Shiki's createHighlighter tries to load unknown grammars and
-// produces noisy console errors.
-const safeCode: typeof code = {
-  ...code,
-  highlight(options, callback) {
-    const lang = code.supportsLanguage(options.language)
-      ? options.language
-      : ("text" as typeof options.language)
-    return code.highlight({ ...options, language: lang }, callback)
-  },
-}
-
-const streamdownPlugins = { cjk, code: safeCode, math, mermaid }
-
 // remark-math only supports `$` delimiters. Convert LaTeX-style
 // `\[...\]` / `\(...\)` to `$$...$$` / `$...$` so they are recognized.
 // Code blocks and inline code are preserved to avoid false positives.
@@ -414,6 +393,9 @@ function MessageResponseImpl({
         : children,
     [children]
   )
+  const plugins = useStreamdownPlugins(
+    typeof normalized === "string" ? normalized : undefined
+  )
 
   return (
     <Streamdown
@@ -421,7 +403,7 @@ function MessageResponseImpl({
         "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_ul]:list-disc [&_ol]:list-decimal [&_ul]:pl-3 [&_ol]:pl-3",
         className
       )}
-      plugins={streamdownPlugins}
+      plugins={plugins}
       remarkPlugins={softBreaks ? remarkPluginsWithBreaks : remarkPlugins}
       rehypePlugins={softBreaks ? rehypePluginsForUser : rehypePlugins}
       {...props}

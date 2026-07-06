@@ -73,7 +73,7 @@ export function useConnectionLifecycle({
   const conn = useConnection(contextKey)
 
   // Destructure stable callbacks (depend only on actions + contextKey)
-  // vs. volatile derived state (status, liveMessage, etc.)
+  // vs. volatile derived state (status, modes, etc.)
   const {
     status,
     selectorsReady,

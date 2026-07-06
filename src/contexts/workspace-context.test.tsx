@@ -10,6 +10,10 @@ import {
 } from "@/contexts/workspace-context"
 import * as api from "@/lib/api"
 import { resetHomeDirCacheForTests } from "@/lib/file-open-target"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
 
 vi.mock("next-intl", () => {
   // Return a STABLE function instance across renders, mirroring next-intl's
@@ -21,26 +25,25 @@ vi.mock("next-intl", () => {
   return { useTranslations: () => t }
 })
 
-// Dynamic folder store shared by the active-folder and app-workspace mocks.
-// Tests mutate it (switch active folder, remove folders, toggle hydration)
-// inside act() and consumers re-render via useSyncExternalStore.
+// Active-folder store backing the active-folder mock below. Tests switch the
+// active folder inside act() and consumers re-render via
+// useSyncExternalStore. Workspace folder lists (allFolders / foldersHydrated)
+// live in the REAL app-workspace zustand store — seeded in beforeEach and
+// mutated with useAppWorkspaceStore.setState inside act().
 const foldersMock = vi.hoisted(() => {
   type FolderLike = { id: number; path: string; name: string; color: string }
-  const defaultFolders = (): FolderLike[] => [
+  const allFolders: FolderLike[] = [
     { id: 1, path: "/repo", name: "repo", color: "inherit" },
     { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
   ]
-  let allFolders = defaultFolders()
-  let foldersHydrated = true
   let activeFolderId: number | null = 1
   let snapshot: {
     allFolders: FolderLike[]
-    foldersHydrated: boolean
     activeFolderId: number | null
-  } = { allFolders, foldersHydrated, activeFolderId }
+  } = { allFolders, activeFolderId }
   const listeners = new Set<() => void>()
   const commit = () => {
-    snapshot = { allFolders, foldersHydrated, activeFolderId }
+    snapshot = { allFolders, activeFolderId }
     for (const listener of [...listeners]) listener()
   }
   return {
@@ -51,21 +54,11 @@ const foldersMock = vi.hoisted(() => {
       }
     },
     getSnapshot: () => snapshot,
-    setAllFolders(next: FolderLike[]) {
-      allFolders = next
-      commit()
-    },
-    setHydrated(value: boolean) {
-      foldersHydrated = value
-      commit()
-    },
     setActiveFolderId(id: number | null) {
       activeFolderId = id
       commit()
     },
     reset() {
-      allFolders = defaultFolders()
-      foldersHydrated = true
       activeFolderId = 1
       commit()
     },
@@ -88,26 +81,19 @@ vi.mock("@/contexts/active-folder-context", async () => {
   }
 })
 
-vi.mock("@/contexts/app-workspace-context", async () => {
-  const { useSyncExternalStore } = await import("react")
-  return {
-    useAppWorkspace: () => {
-      const snap = useSyncExternalStore(
-        foldersMock.subscribe,
-        foldersMock.getSnapshot,
-        foldersMock.getSnapshot
-      )
-      return {
-        allFolders: snap.allFolders,
-        foldersHydrated: snap.foldersHydrated,
-        getFolder: (id: number) => snap.allFolders.find((f) => f.id === id),
-      }
-    },
-  }
-})
-
 beforeEach(() => {
   foldersMock.reset()
+  // The provider reads workspace folders from the real zustand store: restore
+  // pristine state, then seed the same default folders the active-folder mock
+  // serves (partial FolderDetail shapes — the provider only reads id/path).
+  resetAppWorkspaceStore()
+  useAppWorkspaceStore.setState({
+    allFolders: [
+      { id: 1, path: "/repo", name: "repo", color: "inherit" },
+      { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+    ] as never,
+    foldersHydrated: true,
+  })
 })
 
 vi.mock("@/lib/api", () => ({
@@ -2374,9 +2360,11 @@ describe("file tabs decoupled from the active folder", () => {
     expect(workspaceStoreMock.acquiredCount("/repo2")).toBe(1)
 
     await act(async () => {
-      foldersMock.setAllFolders([
-        { id: 1, path: "/repo", name: "repo", color: "inherit" },
-      ])
+      useAppWorkspaceStore.setState({
+        allFolders: [
+          { id: 1, path: "/repo", name: "repo", color: "inherit" },
+        ] as never,
+      })
     })
 
     // Tab identity is the absolute path — removing the workspace folder
@@ -2397,17 +2385,18 @@ describe("file tabs decoupled from the active folder", () => {
     expect(snap().tabs).toHaveLength(1)
 
     await act(async () => {
-      foldersMock.setHydrated(false)
-      foldersMock.setAllFolders([])
+      useAppWorkspaceStore.setState({ foldersHydrated: false, allFolders: [] })
     })
     expect(snap().tabs).toHaveLength(1)
 
     await act(async () => {
-      foldersMock.setAllFolders([
-        { id: 1, path: "/repo", name: "repo", color: "inherit" },
-        { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
-      ])
-      foldersMock.setHydrated(true)
+      useAppWorkspaceStore.setState({
+        allFolders: [
+          { id: 1, path: "/repo", name: "repo", color: "inherit" },
+          { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+        ] as never,
+        foldersHydrated: true,
+      })
     })
     expect(snap().tabs).toHaveLength(1)
     expect(snap().tabs[0].id).toBe(fileTabId("/repo/a.ts"))
@@ -2435,9 +2424,11 @@ describe("file tabs decoupled from the active folder", () => {
     })
 
     await act(async () => {
-      foldersMock.setAllFolders([
-        { id: 1, path: "/repo", name: "repo", color: "inherit" },
-      ])
+      useAppWorkspaceStore.setState({
+        allFolders: [
+          { id: 1, path: "/repo", name: "repo", color: "inherit" },
+        ] as never,
+      })
     })
 
     // Unsaved edits survive untouched — no orphan wipe, no stale flag.
@@ -2992,9 +2983,11 @@ describe("unified absolute-path file tabs (outside-workspace opens)", () => {
   })
 
   it("canonicalizes root casing through the owning folder (Windows aliases)", async () => {
-    foldersMock.setAllFolders([
-      { id: 9, path: "C:/Repo", name: "win", color: "inherit" },
-    ])
+    useAppWorkspaceStore.setState({
+      allFolders: [
+        { id: 9, path: "C:/Repo", name: "win", color: "inherit" },
+      ] as never,
+    })
     const snap = renderAbsolute()
 
     await act(async () => {
@@ -3009,11 +3002,13 @@ describe("unified absolute-path file tabs (outside-workspace opens)", () => {
   })
 
   it("dedupes the same physical file opened through a nested folder and an absolute path", async () => {
-    foldersMock.setAllFolders([
-      { id: 1, path: "/repo", name: "repo", color: "inherit" },
-      { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
-      { id: 3, path: "/repo/packages/core", name: "core", color: "inherit" },
-    ])
+    useAppWorkspaceStore.setState({
+      allFolders: [
+        { id: 1, path: "/repo", name: "repo", color: "inherit" },
+        { id: 2, path: "/repo2", name: "repo2", color: "inherit" },
+        { id: 3, path: "/repo/packages/core", name: "core", color: "inherit" },
+      ] as never,
+    })
     const snap = renderAbsolute()
 
     await act(async () => {

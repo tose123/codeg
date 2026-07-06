@@ -108,8 +108,14 @@
       "fontSize": "Tamanho da fonte",
       "ligatures": "Ativar ligaduras",
       "ligaturesUnavailable": "Esta fonte não tem ligaduras",
+      "wordWrap": "Ativar quebra de linha",
       "terminalLigaturesHint": "As ligaduras do terminal aplicam-se apenas às fontes de programação incluídas.",
       "preview": "Pré-visualização"
+    },
+    "welcomePanel": {
+      "sectionTitle": "Área de seleção de modo",
+      "sectionDescription": "Os cartões de atalho «Desenvolvimento / Escritório» exibidos acima do campo de entrada na página de nova conversa.",
+      "showQuickActions": "Mostrar na página de nova conversa"
     }
   },
   "SystemSettings": {
@@ -1406,6 +1412,7 @@
       "addToChat": "Adicionar ao chat",
       "addSelectionToChatDone": "{label} adicionado à conversa",
       "addFileToChat": "Adicionar arquivo ao chat",
+      "toggleWordWrap": "Alternar quebra de linha",
       "addFileToChatDone": "{label} adicionado à conversa",
       "viewDiff": "Ver Diff",
       "openFile": "Abrir arquivo",
@@ -1722,6 +1729,7 @@
       "collapseTracked": "Recolher alterações rastreadas",
       "expandUntracked": "Expandir arquivos não rastreados",
       "collapseUntracked": "Recolher arquivos não rastreados",
+      "showRemainingItems": "Mostrar mais {count} itens",
       "actions": {
         "commitCode": "Commit do código",
         "rollback": "Reverter",
@@ -2044,7 +2052,7 @@
         "quickMessages": "Mensagens rápidas",
         "quickMessagesEmpty": "Ainda não há mensagens rápidas",
         "quickMessagesLoading": "Carregando...",
-        "paste": "Colar",
+        "pasteAsPlainText": "Colar como texto simples",
         "cut": "Cortar",
         "copy": "Copiar",
         "selectAll": "Selecionar tudo",
@@ -2549,7 +2557,8 @@
       },
       "hunkLabel": "Bloco {index}",
       "loadingHunk": "Carregando hunk...",
-      "noDiffData": "Sem dados de diff"
+      "noDiffData": "Sem dados de diff",
+      "showRemainingLines": "Mostrar mais {count} linhas"
     },
     "conversationContextBar": {
       "folderTitle": "Pasta de trabalho",

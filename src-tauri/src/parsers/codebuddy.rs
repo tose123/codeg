@@ -407,7 +407,11 @@ impl AgentParser for CodeBuddyParser {
             if is_subagent_transcript(&self.base_dir, path) {
                 continue;
             }
-            if let Some(summary) = self.parse_summary(path) {
+            if let Ok(Some(summary)) = super::summary_cache::get_or_parse(
+                AgentType::CodeBuddy,
+                path,
+                || Ok(self.parse_summary(path)),
+            ) {
                 conversations.push(summary);
             }
         }

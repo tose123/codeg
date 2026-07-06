@@ -1,7 +1,10 @@
 "use client"
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useConversationRuntime } from "@/contexts/conversation-runtime-context"
+import {
+  selectTimelineTurns,
+  useConversationRuntimeStore,
+} from "@/stores/conversation-runtime-store"
 import { ContentPartsRenderer } from "./content-parts-renderer"
 import {
   createMessageTurnAdapter,
@@ -144,6 +147,22 @@ const EMPTY_DELEGATIONS: DelegationCardSource[] = []
 // Stable empty reference so the navigator memo / equality checks don't churn
 // when a conversation has no user messages.
 const EMPTY_NAV_ENTRIES: MessageNavEntry[] = []
+
+// A single turn's `sourceTurns` is just `[turn]`. Cache the wrapper per turn
+// object so an unchanged historical turn keeps a stable `sourceTurns` reference
+// across streaming-token re-renders — that's the last prop preventing
+// `HistoricalMessageGroup`'s memo from bailing out (its `group` and the
+// phase-derived flags are already reference-/value-stable). The streaming turn
+// is rebuilt every token, so it gets a fresh wrapper and still re-renders.
+const sourceTurnsSingletonCache = new WeakMap<MessageTurn, MessageTurn[]>()
+export function singletonSourceTurns(turn: MessageTurn): MessageTurn[] {
+  let cached = sourceTurnsSingletonCache.get(turn)
+  if (!cached) {
+    cached = [turn]
+    sourceTurnsSingletonCache.set(turn, cached)
+  }
+  return cached
+}
 
 // Collect the `delegate_to_agent` tool calls within a turn's adapted parts,
 // recursing through tool-groups and goal-runs (a delegate call is normally a
@@ -530,10 +549,17 @@ export function MessageListView({
 }: MessageListViewProps) {
   const t = useTranslations("Folder.chat.messageList")
   const sharedT = useTranslations("Folder.chat.shared")
-  const { getSession, getTimelineTurns } = useConversationRuntime()
-  const session = getSession(conversationId)
+  // Subscribe to only this conversation's session + derived timeline. Another
+  // conversation's streaming token no longer re-renders this view; the timeline
+  // selector returns a reference-stable array (memoized per session object) so
+  // unrelated dispatches are inert here.
+  const session = useConversationRuntimeStore(
+    (s) => s.byConversationId.get(conversationId) ?? null
+  )
   const liveMessage = session?.liveMessage ?? null
-  const timelineTurns = getTimelineTurns(conversationId)
+  const timelineTurns = useConversationRuntimeStore((s) =>
+    selectTimelineTurns(s, conversationId)
+  )
 
   const { setSessionStats } = useSessionStats()
 
@@ -630,7 +656,7 @@ export function MessageListView({
         showStats: false,
         isRoleTransition: false,
         previousUserIndex: null,
-        sourceTurns: [allTurns[i]],
+        sourceTurns: singletonSourceTurns(allTurns[i]),
       }
     })
 

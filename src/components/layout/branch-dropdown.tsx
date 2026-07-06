@@ -103,8 +103,8 @@ import { cn } from "@/lib/utils"
 import type { GitBranchList, GitConflictInfo } from "@/lib/types"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useIsActiveChatMode } from "@/hooks/use-is-active-chat-mode"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
-import { useTabContext } from "@/contexts/tab-context"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTaskContext } from "@/contexts/task-context"
 import { useAlertContext } from "@/contexts/alert-context"
@@ -140,9 +140,10 @@ export function BranchDropdown() {
   const tCommon = useTranslations("Folder.common")
   const { activeFolder } = useActiveFolder()
   const isChatMode = useIsActiveChatMode()
-  const { allFolders, branches, gitHeads, refreshFolder, openWorktreeFolder } =
-    useAppWorkspace()
-  const { openNewConversationTab } = useTabContext()
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
+  const refreshFolder = useAppWorkspaceStore((s) => s.refreshFolder)
+  const openWorktreeFolder = useAppWorkspaceStore((s) => s.openWorktreeFolder)
+  const { openNewConversationTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
   const { addTask, updateTask, removeTask } = useTaskContext()
   const { pushAlert } = useAlertContext()
@@ -151,10 +152,16 @@ export function BranchDropdown() {
 
   const folderPath = activeFolder?.path ?? ""
   const folderId = activeFolder?.id ?? 0
-  const branch = activeFolder
-    ? (branches.get(activeFolder.id) ?? activeFolder.git_branch ?? null)
-    : null
-  const head = activeFolder ? (gitHeads.get(activeFolder.id) ?? null) : null
+  // Per-folder selections (primitive / equality-guarded object): unrelated
+  // folders' branch updates never re-render this dropdown.
+  const branch = useAppWorkspaceStore((s) =>
+    activeFolder
+      ? (s.branches.get(activeFolder.id) ?? activeFolder.git_branch ?? null)
+      : null
+  )
+  const head = useAppWorkspaceStore((s) =>
+    activeFolder ? (s.gitHeads.get(activeFolder.id) ?? null) : null
+  )
   // The gate is "is this a git repo?" — not "is there a branch?". A detached
   // HEAD has no branch name yet is still a repo whose git operations must
   // remain available (issue #279). Until the first poll resolves `head`, fall

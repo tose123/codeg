@@ -2,7 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useLocale, useTranslations } from "next-intl"
-import type { LiveMessage } from "@/contexts/acp-connections-context"
+import type {
+  LiveContentBlock,
+  LiveMessage,
+} from "@/contexts/acp-connections-context"
 import { inferLiveToolName } from "@/lib/tool-call-normalization"
 import { formatElapsedLabel } from "@/lib/format-elapsed"
 import {
@@ -219,45 +222,85 @@ function extractWriteStats(parsed: Record<string, unknown>): LineChangeStats {
   return { additions, deletions: 0 }
 }
 
-function extractLiveEditStats(message: LiveMessage): LiveEditStats {
+interface BlockEditContribution {
+  files: string[]
+  additions: number
+  deletions: number
+}
+
+// Parsing a tool call's `raw_input` (JSON.parse + diff line counting) is the
+// expensive part of the live edit stats, and it re-runs on every streaming
+// token because the `message` reference changes each token. A completed
+// tool_call block keeps a stable reference across tokens (the reducer rebuilds
+// only the block that changed — see acp-connections-context), so cache each
+// block's contribution keyed on the block object. Only the block currently
+// being updated re-parses; the rest are O(1) lookups. Keying on the block ref
+// is sound because a block's ref changes iff its content changes, and the
+// WeakMap lets dropped blocks be collected.
+const blockEditContributionCache = new WeakMap<
+  LiveContentBlock,
+  BlockEditContribution | null
+>()
+
+function computeBlockEditContribution(
+  block: LiveContentBlock
+): BlockEditContribution | null {
+  if (block.type !== "tool_call") return null
+  const toolName = inferLiveToolName({
+    title: block.info.title,
+    kind: block.info.kind,
+    rawInput: block.info.raw_input,
+    meta: block.info.meta,
+  })
+  if (toolName !== "edit" && toolName !== "write" && toolName !== "apply_patch")
+    return null
+
+  const files = new Set<string>()
+  let additions = 0
+  let deletions = 0
+
+  const parsed = parseInputObject(block.info.raw_input)
+  for (const path of collectParsedPaths(parsed)) files.add(path)
+
+  if (toolName === "apply_patch") {
+    const patch = extractPatchText(block.info.raw_input, parsed)
+    if (patch) {
+      const stats = parseApplyPatchStats(patch)
+      for (const path of stats.files) files.add(path)
+      additions += stats.additions
+      deletions += stats.deletions
+    }
+  } else if (parsed) {
+    const stats =
+      toolName === "edit" ? extractEditStats(parsed) : extractWriteStats(parsed)
+    additions += stats.additions
+    deletions += stats.deletions
+  }
+
+  return { files: [...files], additions, deletions }
+}
+
+function blockEditContribution(
+  block: LiveContentBlock
+): BlockEditContribution | null {
+  const cached = blockEditContributionCache.get(block)
+  if (cached !== undefined) return cached
+  const contribution = computeBlockEditContribution(block)
+  blockEditContributionCache.set(block, contribution)
+  return contribution
+}
+
+export function extractLiveEditStats(message: LiveMessage): LiveEditStats {
   const files = new Set<string>()
   let additions = 0
   let deletions = 0
 
   for (const block of message.content) {
-    if (block.type !== "tool_call") continue
-    const toolName = inferLiveToolName({
-      title: block.info.title,
-      kind: block.info.kind,
-      rawInput: block.info.raw_input,
-      meta: block.info.meta,
-    })
-    if (
-      toolName !== "edit" &&
-      toolName !== "write" &&
-      toolName !== "apply_patch"
-    )
-      continue
-
-    const parsed = parseInputObject(block.info.raw_input)
-    for (const path of collectParsedPaths(parsed)) files.add(path)
-
-    if (toolName === "apply_patch") {
-      const patch = extractPatchText(block.info.raw_input, parsed)
-      if (!patch) continue
-      const stats = parseApplyPatchStats(patch)
-      for (const path of stats.files) files.add(path)
-      additions += stats.additions
-      deletions += stats.deletions
-      continue
-    }
-
-    if (!parsed) continue
-
-    const stats =
-      toolName === "edit" ? extractEditStats(parsed) : extractWriteStats(parsed)
-    additions += stats.additions
-    deletions += stats.deletions
+    const contribution = blockEditContribution(block)
+    if (!contribution) continue
+    for (const path of contribution.files) files.add(path)
+    additions += contribution.additions
+    deletions += contribution.deletions
   }
 
   return { files: files.size, additions, deletions }

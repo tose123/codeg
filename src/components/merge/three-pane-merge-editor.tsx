@@ -57,7 +57,8 @@ export function ThreePaneMergeEditor({
   const t = useTranslations("MergePage")
   const editorTheme = useMonacoThemeSync()
   const { zoomLevel } = useZoomLevel()
-  const { editorFontStack, editorFontSize, editorLigatures } = useEditorFont()
+  const { editorFontStack, editorFontSize, editorLigatures, editorWordWrap } =
+    useEditorFont()
   const { registerEditor } = useSyncScroll()
 
   const leftEditorRef = useRef<MonacoEditorNs.IStandaloneCodeEditor | null>(
@@ -512,10 +513,16 @@ export function ThreePaneMergeEditor({
         lineNumbers: "on",
         glyphMargin: true,
         folding: false,
-        wordWrap: "off",
+        wordWrap: editorWordWrap ? "on" : "off",
         overviewRulerLanes: 0,
       }),
-      [zoomLevel, editorFontStack, editorFontSize, editorLigatures]
+      [
+        zoomLevel,
+        editorFontStack,
+        editorFontSize,
+        editorLigatures,
+        editorWordWrap,
+      ]
     )
 
   const readonlyOptions = useMemo(

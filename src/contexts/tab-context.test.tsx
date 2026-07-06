@@ -12,6 +12,11 @@ import type {
   SaveTabsOutcome,
   TabsChanged,
 } from "@/lib/types"
+import {
+  resetAppWorkspaceStore,
+  useAppWorkspaceStore,
+} from "@/stores/app-workspace-store"
+import { resetTabStore } from "@/stores/tab-store"
 
 const listOpenedTabsMock = vi.fn()
 const saveOpenedTabsMock = vi.fn()
@@ -52,17 +57,6 @@ vi.mock("@/lib/platform", () => ({
   subscribe: (...args: unknown[]) => subscribeMock(...args),
   onTransportReconnect: (...args: unknown[]) =>
     onTransportReconnectMock(...args),
-}))
-
-vi.mock("@/contexts/app-workspace-context", () => ({
-  useAppWorkspace: () => ({
-    conversations: conversationsMock,
-    conversationsLoading: conversationsLoadingMock,
-    folders: foldersMock,
-    allFolders: allFoldersMock,
-    foldersHydrated: true,
-    setActiveFolderId: setActiveFolderIdMock,
-  }),
 }))
 
 vi.mock("@/contexts/workspace-context", () => ({
@@ -118,14 +112,6 @@ const defaultFoldersMock: FolderDetail[] = [
   },
 ]
 
-let foldersMock: FolderDetail[] = defaultFoldersMock
-// `allFolders` includes hidden chat folders that the user-facing `folders` list
-// excludes; defaults to the same set (no chat folders) for most tests.
-let allFoldersMock: FolderDetail[] = defaultFoldersMock
-// Whether the root conversation list is still loading; gates the sub-session
-// seed effect. Defaults to loaded (false) so most tests seed immediately.
-let conversationsLoadingMock = false
-
 const defaultConversationsMock: DbConversationSummary[] = [
   {
     id: 1,
@@ -180,8 +166,28 @@ const defaultConversationsMock: DbConversationSummary[] = [
   },
 ]
 
-// Mutable so a test can swap in an empty root list (the loaded-but-empty case).
-let conversationsMock: DbConversationSummary[] = defaultConversationsMock
+// Reset the real workspace store and seed it with the default fixtures.
+// `allFolders` includes hidden chat folders that the user-facing `folders`
+// list excludes; both default to the same set (no chat folders) for most
+// tests. `conversationsLoading` gates the sub-session seed effect; it defaults
+// to loaded (false) so most tests seed immediately. Individual tests override
+// slices via `useAppWorkspaceStore.setState` (e.g. an empty root list for the
+// loaded-but-empty case).
+function seedWorkspaceStore() {
+  resetAppWorkspaceStore()
+  useAppWorkspaceStore.setState({
+    conversations: defaultConversationsMock,
+    conversationsLoading: false,
+    folders: defaultFoldersMock,
+    allFolders: defaultFoldersMock,
+    foldersHydrated: true,
+    setActiveFolderId: setActiveFolderIdMock,
+  })
+  // The tab store is a module-level singleton: reset it (state + coordination
+  // vars + injected runtime + one-shot correction/recovery flags) after seeding
+  // the workspace store so `lastConversations` aligns with the seeded list.
+  resetTabStore()
+}
 
 let latestContext: ReturnType<typeof useTabContext> | null = null
 
@@ -233,10 +239,7 @@ function openConversationTab(
 describe("TabProvider tab state transitions", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    foldersMock = defaultFoldersMock
-    allFoldersMock = defaultFoldersMock
-    conversationsMock = defaultConversationsMock
-    conversationsLoadingMock = false
+    seedWorkspaceStore()
     listOpenedTabsMock.mockReturnValue(new Promise(() => {}))
     saveOpenedTabsMock.mockResolvedValue({
       accepted: true,
@@ -322,7 +325,9 @@ describe("TabProvider tab state transitions", () => {
   })
 
   it("clears the active tab when closing the last tab with no folders available", () => {
-    foldersMock = []
+    act(() => {
+      useAppWorkspaceStore.setState({ folders: [] })
+    })
     renderTabs()
 
     expect(latestContext).not.toBeNull()
@@ -416,8 +421,12 @@ describe("TabProvider tab state transitions", () => {
       parent_id: null,
       kind: "chat",
     }
-    foldersMock = defaultFoldersMock
-    allFoldersMock = [...defaultFoldersMock, chatFolder]
+    act(() => {
+      useAppWorkspaceStore.setState({
+        folders: defaultFoldersMock,
+        allFolders: [...defaultFoldersMock, chatFolder],
+      })
+    })
     renderTabs()
     expect(latestContext).not.toBeNull()
 
@@ -445,8 +454,12 @@ describe("TabProvider tab state transitions", () => {
       parent_id: null,
       kind: "chat",
     }
-    foldersMock = defaultFoldersMock // open list excludes the chat folder
-    allFoldersMock = [...defaultFoldersMock, chatFolder]
+    act(() => {
+      useAppWorkspaceStore.setState({
+        folders: defaultFoldersMock, // open list excludes the chat folder
+        allFolders: [...defaultFoldersMock, chatFolder],
+      })
+    })
     renderTabs()
     expect(latestContext).not.toBeNull()
 
@@ -603,10 +616,7 @@ function tabItem(
 describe("TabProvider cross-client sync", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    foldersMock = defaultFoldersMock
-    allFoldersMock = defaultFoldersMock
-    conversationsMock = defaultConversationsMock
-    conversationsLoadingMock = false
+    seedWorkspaceStore()
     listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
     saveOpenedTabsMock.mockResolvedValue({
       accepted: true,
@@ -1097,6 +1107,51 @@ describe("TabProvider cross-client sync", () => {
     )
   })
 
+  it("adopts the server snapshot when a save is rejected with no newer remote already applied", async () => {
+    // Regression: the reject path must reconcile even at the SAME version it
+    // just advanced to. A save based on v1 is rejected with the server's
+    // authoritative v2 set, and NO intervening remote has landed — so the local
+    // set must be replaced by the server's, not left stale (which would let the
+    // next local edit overwrite server truth).
+    listOpenedTabsMock.mockResolvedValue({
+      items: [tabItem(1, 1, true)],
+      version: 1,
+    })
+    let resolveSave: (r: SaveTabsOutcome) => void = () => {}
+    saveOpenedTabsMock.mockImplementation(
+      () =>
+        new Promise<SaveTabsOutcome>((res) => {
+          resolveSave = res
+        })
+    )
+    await renderHydrated()
+
+    // Arm + fire a save (in flight, based on v1).
+    act(() => {
+      latestContext?.openTab(1, 2, "codex", true, "Second")
+    })
+    await waitFor(() => expect(saveOpenedTabsMock).toHaveBeenCalledTimes(1), {
+      timeout: 2000,
+    })
+
+    // Server rejects it (another client committed first), returning the
+    // authoritative v2 set = just conversation 9. No remote snapshot was applied
+    // in between, so `version` only advances via this rejection.
+    await act(async () => {
+      resolveSave({
+        accepted: false,
+        version: 2,
+        tabs: [tabItem(1, 9, true)],
+      })
+      await Promise.resolve()
+    })
+
+    // The server truth is adopted: c9 present, the locally-added c2 gone.
+    const tabsText = screen.getByTestId("tabs").textContent ?? ""
+    expect(tabsText).toContain("conv-1-codex-9")
+    expect(tabsText).not.toContain("conv-1-codex-2")
+  })
+
   it("preserves a bound draft's local id and runtime session across a remote apply", async () => {
     await renderHydrated()
 
@@ -1198,10 +1253,7 @@ describe("TabProvider web tab isolation", () => {
 describe("TabProvider post-hydration recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    foldersMock = defaultFoldersMock
-    allFoldersMock = defaultFoldersMock
-    conversationsMock = defaultConversationsMock
-    conversationsLoadingMock = false
+    seedWorkspaceStore()
     // Draft-only sessions persist nothing, so a fresh launch hydrates empty.
     listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
     saveOpenedTabsMock.mockResolvedValue({
@@ -1279,8 +1331,9 @@ describe("TabProvider post-hydration recovery", () => {
   })
 
   it("synthesizes a chat draft when there are no folders (never blank)", async () => {
-    foldersMock = []
-    allFoldersMock = []
+    act(() => {
+      useAppWorkspaceStore.setState({ folders: [], allFolders: [] })
+    })
     await renderHydrated()
     await waitFor(() =>
       expect(screen.getByTestId("active")).not.toHaveTextContent("none")
@@ -1348,10 +1401,7 @@ describe("TabProvider post-hydration recovery", () => {
 describe("TabProvider sub-session tabs", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    foldersMock = defaultFoldersMock
-    allFoldersMock = defaultFoldersMock
-    conversationsMock = defaultConversationsMock
-    conversationsLoadingMock = false
+    seedWorkspaceStore()
     // No hydration noise — open the sub-session tab imperatively instead.
     listOpenedTabsMock.mockReturnValue(new Promise(() => {}))
     saveOpenedTabsMock.mockResolvedValue({
@@ -1564,8 +1614,12 @@ describe("TabProvider sub-session tabs", () => {
   it("seeds an open child tab even when the (loaded) root list is empty", async () => {
     // Loaded-but-empty root list: the seed must still fire (gated on loading, not
     // on conversationMap.size, which an old `size === 0` guard would skip).
-    conversationsMock = []
-    conversationsLoadingMock = false
+    act(() => {
+      useAppWorkspaceStore.setState({
+        conversations: [],
+        conversationsLoading: false,
+      })
+    })
     getFolderConversationMock.mockResolvedValue({
       summary: subSummary(),
       turns: [],
@@ -1584,7 +1638,9 @@ describe("TabProvider sub-session tabs", () => {
   })
 
   it("does not seed while the root list is still loading", async () => {
-    conversationsLoadingMock = true
+    act(() => {
+      useAppWorkspaceStore.setState({ conversationsLoading: true })
+    })
     renderTabs()
     await act(async () => {})
     act(() => {

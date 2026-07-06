@@ -1,18 +1,9 @@
 "use client"
 
-import {
-  createContext,
-  useContext,
-  useState,
-  useCallback,
-  useEffect,
-  useRef,
-  useMemo,
-  type ReactNode,
-  type SetStateAction,
-} from "react"
+import { useEffect, type ReactNode } from "react"
 import { useTranslations } from "next-intl"
-import { useAppWorkspace } from "@/contexts/app-workspace-context"
+import { useShallow } from "zustand/react/shallow"
+import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useAcpActions } from "@/contexts/acp-connections-context"
 import { useWorkspaceActions } from "@/contexts/workspace-context"
 import { useSortedAvailableAgents } from "@/hooks/use-sorted-available-agents"
@@ -33,57 +24,182 @@ import { readRecentConversationAgent } from "@/lib/selector-prefs-storage"
 import {
   CONVERSATION_CHANGED_EVENT,
   TABS_CHANGED_EVENT,
-  type AgentType,
   type ConversationChange,
-  type ConversationStatus,
-  type DbConversationSummary,
-  type OpenedTab,
   type TabsChanged,
 } from "@/lib/types"
 
-interface TabItemInternal {
-  id: string
-  kind: "conversation"
-  folderId: number
-  conversationId: number | null
-  /** The runtime session key used by ConversationRuntimeContext.
-   *  For new conversations this is a virtual (negative) ID that differs
-   *  from the persisted `conversationId`. */
-  runtimeConversationId?: number
-  agentType: AgentType
-  title: string
-  isPinned: boolean
-  workingDir?: string
-  status?: ConversationStatus
-  /**
-   * Marks `agentType` as a system best-guess that should be replaced once
-   * the agent list becomes fresh. True for draft tabs whose default came
-   * from a stale localStorage seed or the AGENT_DISPLAY_ORDER fallback;
-   * cleared by `confirmDraftAgent` (user click), `bindConversationTab`
-   * (draft → real conversation), or the correction effect (fresh agent
-   * list arrives). **Not persisted** to opened_tabs — hydrated drafts
-   * default to false and are re-evaluated only when their agent_type is
-   * no longer in the fresh sorted list (the `!sortedAvailableAgents.
-   * includes(...)` branch of correction). Internal-only: no UI component
-   * reads it, so a stale `true` value is harmless if correction never
-   * runs (e.g. `acpListAgents()` keeps failing).
-   */
-  agentTypeProvisional?: boolean
-  /**
-   * Marks a draft tab as "chat mode" (folderless). Set by `openChatModeTab`,
-   * cleared implicitly once the draft binds to a real conversation (whose hidden
-   * hidden chat folder then drives chat-mode chrome via `useIsActiveChatMode`).
-   * **Internal-only and never persisted** — drafts (`conversationId == null`) are
-   * not written to opened_tabs, so this flag only ever lives in memory for the
-   * pre-send draft. While set, the draft has no resolvable folder, so the
-   * composer hides the branch picker and shows the "no-folder" chip.
-   */
-  isChat?: boolean
+export type { TabItem }
+export { useTabStore, useTabActions } from "@/stores/tab-store"
+
+interface TabProviderProps {
+  children: ReactNode
 }
 
-export type TabItem = TabItemInternal
+/**
+ * Thin lifecycle glue for `useTabStore`: injects the React-land dependencies
+ * (i18n labels, `activateConversationPane`, `acpDisconnect`, agent availability)
+ * and drives the effects that need a React lifecycle — the persisted-tab
+ * hydration, the debounced CAS save, the cross-client `tabs://changed` and
+ * sub-session `conversation://changed` subscriptions, the provisional-agent
+ * correction gate, and post-hydration recovery. All state and logic live in the
+ * store; this component renders nothing but `children`.
+ */
+export function TabProvider({ children }: TabProviderProps) {
+  const t = useTranslations("Folder.tabContext")
+  const { activateConversationPane } = useWorkspaceActions()
+  const { disconnect: acpDisconnect } = useAcpActions()
+  const { sortedTypes: sortedAvailableAgents, fresh: agentsFresh } =
+    useSortedAvailableAgents()
 
-interface TabContextValue {
+  // App-workspace gates for the correction / recovery / child-reconcile effects.
+  const foldersHydrated = useAppWorkspaceStore((s) => s.foldersHydrated)
+  const conversations = useAppWorkspaceStore((s) => s.conversations)
+  const conversationsLoading = useAppWorkspaceStore(
+    (s) => s.conversationsLoading
+  )
+
+  // Tab-store slices used only as effect dependencies (this component renders
+  // nothing, so subscribing here doesn't cascade to any consumer).
+  const rawTabs = useTabStore((s) => s.rawTabs)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const previewReplacedTabIds = useTabStore((s) => s.previewReplacedTabIds)
+  const draftRetargetRequests = useTabStore((s) => s.draftRetargetRequests)
+  const tabsHydrated = useTabStore((s) => s.tabsHydrated)
+  const saveReconcileTick = useTabStore((s) => s.saveReconcileTick)
+  const reseedTick = useTabStore((s) => s.reseedTick)
+
+  // ── Runtime dependency injection ─────────────────────────────────────────────
+  // Labels first (declared before hydrate) so seed titles are translated before
+  // the hydration effect runs.
+  useEffect(() => {
+    useTabStore.getState().setLabels({
+      loadingConversation: t("loadingConversation"),
+      newConversation: t("newConversation"),
+      untitledConversation: t("untitledConversation"),
+    })
+  }, [t])
+
+  useEffect(() => {
+    useTabStore
+      .getState()
+      .setSideEffects({ activateConversationPane, acpDisconnect })
+  }, [activateConversationPane, acpDisconnect])
+
+  useEffect(() => {
+    useTabStore
+      .getState()
+      .setAgentAvailability(sortedAvailableAgents, agentsFresh)
+  }, [sortedAvailableAgents, agentsFresh])
+
+  // Sync the active tab's folderId up to the app-workspace store so derived
+  // consumers (useActiveFolder, branch polling) reflect the focused folder.
+  useEffect(() => {
+    useTabStore.getState().syncActiveFolderId()
+  }, [rawTabs, activeTabId])
+
+  // Fire the preview-replacement callbacks and trim the consumed queue.
+  useEffect(() => {
+    useTabStore.getState().consumePreviewReplaced()
+  }, [previewReplacedTabIds])
+
+  // Disconnect + retarget each queued draft-retarget request.
+  useEffect(() => {
+    useTabStore.getState().consumeDraftRetargets()
+  }, [draftRetargetRequests])
+
+  // Hydrate from persisted opened_tabs on mount.
+  useEffect(() => useTabStore.getState().hydrate(), [])
+
+  // Debounced compare-and-set save + broadcast.
+  useEffect(() => {
+    useTabStore.getState().runSaveEffect()
+  }, [rawTabs, activeTabId, tabsHydrated, saveReconcileTick])
+
+  // Clear a pending save only on unmount — NOT on every effect re-run.
+  useEffect(() => () => useTabStore.getState().clearSaveTimer(), [])
+
+  // Reconcile the sub-session summary cache to the open child tabs.
+  useEffect(() => {
+    useTabStore.getState().reconcileChildSummaries()
+  }, [rawTabs, conversations, conversationsLoading, reseedTick])
+
+  // Keep seeded sub-session summaries live off the global conversation channel.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void (async () => {
+      const dispose = await subscribe<ConversationChange>(
+        CONVERSATION_CHANGED_EVENT,
+        (change) => useTabStore.getState().handleChildConversationChange(change)
+      )
+      if (disposed) dispose()
+      else unlisten = dispose
+    })()
+    const offReconnect = onTransportReconnect(() =>
+      useTabStore.getState().handleChildReconnect()
+    )
+    return () => {
+      disposed = true
+      unlisten?.()
+      offReconnect?.()
+    }
+  }, [])
+
+  // Subscribe to the global `tabs://changed` side-channel.
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void (async () => {
+      const dispose = await subscribe<TabsChanged>(
+        TABS_CHANGED_EVENT,
+        (change) => useTabStore.getState().handleTabsChanged(change)
+      )
+      if (disposed) {
+        dispose()
+        return
+      }
+      unlisten = dispose
+      // Close the initial-connect window (a change committed between the hydrate
+      // snapshot read and the subscription going live is dropped by the
+      // broadcaster). One reconcile after subscribe is ready catches it.
+      void useTabStore.getState().refetchTabs()
+    })()
+    const offReconnect = onTransportReconnect(() =>
+      useTabStore.getState().refetchTabs()
+    )
+    return () => {
+      disposed = true
+      unlisten?.()
+      offReconnect?.()
+    }
+  }, [])
+
+  // Correction must wait for the fresh agent list, hydrated tabs, and hydrated
+  // folders (so folder defaults resolve). One-shot per session via the store.
+  useEffect(() => {
+    if (!agentsFresh) return
+    if (!tabsHydrated) return
+    if (!foldersHydrated) return
+    runCorrectionOnce()
+  }, [agentsFresh, tabsHydrated, foldersHydrated])
+
+  // Post-hydration recovery: a draft-only session hydrates to zero tabs; never
+  // leave the workspace blank.
+  useEffect(() => {
+    if (!tabsHydrated || !foldersHydrated) return
+    if (rawTabs.length > 0) return
+    runRecoveryOnce()
+  }, [tabsHydrated, foldersHydrated, rawTabs])
+
+  // Persist the active draft's context for the next cold start.
+  useEffect(() => {
+    useTabStore.getState().persistLastActiveContext()
+  }, [rawTabs, activeTabId, tabsHydrated])
+
+  return <>{children}</>
+}
+
+export interface TabContextValue {
   tabs: TabItem[]
   activeTabId: string | null
   tabsHydrated: boolean
@@ -91,7 +207,7 @@ interface TabContextValue {
   openTab: (
     folderId: number,
     conversationId: number,
-    agentType: AgentType,
+    agentType: TabItem["agentType"],
     pin?: boolean,
     title?: string
   ) => void
@@ -99,7 +215,7 @@ interface TabContextValue {
   closeConversationTab: (
     folderId: number,
     conversationId: number,
-    agentType: AgentType
+    agentType: TabItem["agentType"]
   ) => void
   closeOtherTabs: (tabId: string) => void
   closeAllTabs: () => void
@@ -107,92 +223,28 @@ interface TabContextValue {
   switchTab: (tabId: string) => void
   pinTab: (tabId: string) => void
   toggleTileMode: () => void
-  /**
-   * Read-and-clear the "the last active-tab change came from a remote snapshot"
-   * flag. The workbench route-sync chokepoint calls this on every active-tab
-   * change so a remotely-mirrored focus (another client switching tabs) does
-   * not yank this window into the conversations route. Returns true exactly
-   * once per remote-driven focus change.
-   */
   consumeRemoteActivation: () => boolean
-  /**
-   * Open (or re-target the singleton) draft conversation tab.
-   *
-   * - `inheritFromActive: false` (default) — resolve the agent purely from
-   *   the target folder's saved default (with sortedTypes[0] fallback).
-   *   Use this for sidebar/toolbar entry points where the new tab's
-   *   folder is unrelated to the currently focused tab.
-   * - `inheritFromActive: true` — when no folder default is set, fall
-   *   back to the active tab's agent before the global default. "Active
-   *   tab" means either a real conversation tab OR a draft whose agent
-   *   the user has already confirmed (provisional flag cleared); a
-   *   draft whose agent is still a system best-guess is NOT inherited
-   *   because doing so would propagate uncertainty across folders. Use
-   *   this from inside a conversation (right-click "new conversation",
-   *   failed-session retry, folder picker on a draft) where the user
-   *   expects to keep their current agent.
-   *
-   * Both modes still honor `folderDefault` first — explicit pinning
-   * always wins.
-   */
   openNewConversationTab: (
     folderId: number,
     workingDir: string,
     options?: {
       inheritFromActive?: boolean
-      folderDefaultAgent?: AgentType | null
+      folderDefaultAgent?: TabItem["agentType"] | null
     }
   ) => void
-  /**
-   * Re-target the singleton draft tab into folderless "chat mode" — no DB write
-   * and no working dir yet (the backend creates the dated scratch dir + hidden
-   * hidden chat folder lazily on first send, in `createChatConversation`). Sets
-   * the draft's `isChat` flag, drops its `workingDir`, and disconnects any live
-   * ACP session bound to the draft (its cwd is about to change). Wired from the
-   * composer folder picker's "no-folder mode" item.
-   */
   openChatModeTab: () => void
-  /**
-   * Attach an eagerly-created scratch dir to a chat-mode draft so its ACP
-   * connection can spawn at a real cwd *before* the first send. Patches the
-   * draft's `workingDir` only while it is still an unbound chat draft
-   * (`isChat && conversationId == null`); `folderId` stays 0 (no DB row yet, so
-   * `activeFolder` resolves null until the lazy create binds the hidden folder).
-   * A stale call (the draft already bound, retargeted, or left chat mode) is a
-   * no-op. Wired from conversation-detail-panel's eager-prepare effect.
-   */
   setChatDraftWorkingDir: (tabId: string, workingDir: string) => void
-  /**
-   * Mark a draft tab's agent as user-confirmed. Patches `agentType` on
-   * the tab and clears the `agentTypeProvisional` flag so the correction
-   * effect won't overwrite the user's choice. No-op for tabs already
-   * bound to a real conversation (`conversationId != null`). Wired up
-   * from conversation-detail-panel's `handleAgentSelect`.
-   */
-  confirmDraftAgent: (tabId: string, agentType: AgentType) => void
-  /**
-   * Mirror AgentSelector's automatic fallback (the requested default
-   * wasn't available, so it picked a substitute) into the draft tab
-   * without promoting it to a confirmed choice. Keeps
-   * `agentTypeProvisional = true` so the correction effect can still
-   * re-resolve against the folder's saved default when its hydration
-   * gate opens. No-op for tabs bound to a real conversation. Wired up
-   * from conversation-detail-panel's `handleAgentFallback`.
-   */
-  setDraftAgentFromFallback: (tabId: string, agentType: AgentType) => void
+  confirmDraftAgent: (tabId: string, agentType: TabItem["agentType"]) => void
+  setDraftAgentFromFallback: (
+    tabId: string,
+    agentType: TabItem["agentType"]
+  ) => void
   bindConversationTab: (
     tabId: string,
     conversationId: number,
-    agentType: AgentType,
+    agentType: TabItem["agentType"],
     title: string,
     runtimeConversationId?: number,
-    /**
-     * When a chat-mode draft binds, the backend has just created its hidden
-     * hidden chat folder; pass the new `folderId`/`workingDir` so the tab points at
-     * the real per-conversation scratch dir (cwd) and `activeFolderId` syncs to
-     * the hidden folder (which drives chat-mode chrome). Omit for normal binds —
-     * the tab keeps its existing folder.
-     */
     folderId?: number,
     workingDir?: string
   ) => void

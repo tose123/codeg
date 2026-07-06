@@ -10,10 +10,6 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
-import { cjk } from "@streamdown/cjk"
-import { code } from "@streamdown/code"
-import { createMathPlugin } from "@streamdown/math"
-import { mermaid } from "@streamdown/mermaid"
 import { BrainIcon, ChevronDownIcon } from "lucide-react"
 import {
   createContext,
@@ -31,6 +27,7 @@ import { Shimmer } from "./shimmer"
 import { markdownLinkComponents } from "./markdown-link"
 import { normalizeMathDelimiters } from "./message"
 import { remarkRewriteFileUriLinks } from "./remark-file-uri-links"
+import { useStreamdownPlugins } from "./streamdown-plugins"
 
 interface ReasoningContextValue {
   isStreaming: boolean
@@ -229,8 +226,6 @@ export type ReasoningContentProps = ComponentProps<
   children: string
 }
 
-const math = createMathPlugin({ singleDollarTextMath: true })
-const streamdownPlugins = { cjk, code, math, mermaid }
 const remarkPlugins = [
   ...Object.values(defaultRemarkPlugins),
   remarkRewriteFileUriLinks,
@@ -242,6 +237,7 @@ export const ReasoningContent = memo(
       () => normalizeMathDelimiters(children),
       [children]
     )
+    const plugins = useStreamdownPlugins(normalized)
 
     return (
       <CollapsibleContent
@@ -253,7 +249,7 @@ export const ReasoningContent = memo(
         {...props}
       >
         <Streamdown
-          plugins={streamdownPlugins}
+          plugins={plugins}
           remarkPlugins={remarkPlugins}
           {...props}
           // Enforce the link icon + safety override after spreading props.
