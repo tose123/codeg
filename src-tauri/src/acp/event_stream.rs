@@ -419,12 +419,122 @@ fn estimate_envelope_size(envelope: &EventEnvelope) -> usize {
                 + blocks.len().saturating_sub(1)
                 + blocks.iter().map(user_block_size).sum::<usize>()
         }
+        // Carries whole parsed transcript turns (tool outputs, rebuilt diffs —
+        // potentially large), so it is sized structurally like the other large
+        // variants: letting it hit the serialize-fallback would re-introduce
+        // exactly the locked-hot-path serialization this estimator replaced.
+        AcpEvent::BackgroundActivity {
+            session_id,
+            turns,
+            outstanding: _,
+            settled,
+            watermark: _,
+        } => {
+            json_str_len(session_id)
+                + turns.len().saturating_sub(1)
+                + turns.iter().map(message_turn_size).sum::<usize>()
+                + settled
+                    .iter()
+                    .map(|s| {
+                        // `{"task_id":…,"status":…,"summary":…}` + comma
+                        64 + json_str_len(&s.task_id)
+                            + json_str_len(&s.status)
+                            + opt_str_size(&s.summary)
+                    })
+                    .sum::<usize>()
+        }
         // Small, infrequent variants: an exact serialized length is cheap here
         // and preserves the prior threshold behavior; the 256 fallback only
         // guards the (practically impossible) serialization failure.
         other => serde_json::to_vec(other).map_or(256, |v| v.len()),
     };
     base + payload
+}
+
+/// Structural size for one parsed-transcript turn carried on
+/// [`AcpEvent::BackgroundActivity`]. Mirrors `user_block_size`'s approach:
+/// escape-aware strings plus deliberately generous fixed overheads per
+/// object, so `estimate >= serialized` holds for every field combination
+/// (asserted by `estimate_never_undercounts_serialized_for_background_activity`).
+fn message_turn_size(turn: &crate::models::message::MessageTurn) -> usize {
+    // Keys + role tag + two RFC3339 timestamps (~46 B each with keys) + the
+    // full `usage` object (4 u64 fields, ≤ ~130 B) + `duration_ms`.
+    384 + json_str_len(&turn.id)
+        + opt_str_size(&turn.model)
+        + turn.blocks.len().saturating_sub(1)
+        + turn.blocks.iter().map(content_block_size).sum::<usize>()
+}
+
+/// Structural size for one `ContentBlock` inside a transcript turn.
+fn content_block_size(block: &crate::models::message::ContentBlock) -> usize {
+    use crate::models::message::ContentBlock as CB;
+    match block {
+        // `{"type":"text","text":…}` / `{"type":"thinking","text":…}`
+        CB::Text { text } | CB::Thinking { text } => 32 + json_str_len(text),
+        CB::Image {
+            data,
+            mime_type,
+            uri,
+        } => 64 + json_str_len(data) + json_str_len(mime_type) + opt_str_size(uri),
+        CB::ImageGeneration {
+            revised_prompt,
+            image,
+        } => {
+            64 + opt_str_size(revised_prompt)
+                + image.as_ref().map_or(0, |img| {
+                    64 + json_str_len(&img.data)
+                        + json_str_len(&img.mime_type)
+                        + opt_str_size(&img.uri)
+                })
+        }
+        CB::ToolUse {
+            tool_use_id,
+            tool_name,
+            input_preview,
+            meta,
+        } => {
+            96 + opt_str_size(tool_use_id)
+                + json_str_len(tool_name)
+                + opt_str_size(input_preview)
+                + opt_json_size(meta)
+        }
+        CB::ToolResult {
+            tool_use_id,
+            output_preview,
+            is_error: _,
+            agent_stats,
+            images,
+        } => {
+            128 + opt_str_size(tool_use_id)
+                + opt_str_size(output_preview)
+                + agent_stats.as_ref().map_or(0, agent_stats_size)
+                + images
+                    .iter()
+                    .map(|img| {
+                        64 + json_str_len(&img.data)
+                            + json_str_len(&img.mime_type)
+                            + opt_str_size(&img.uri)
+                    })
+                    .sum::<usize>()
+        }
+    }
+}
+
+/// Structural size for a `ToolResult`'s `agent_stats` object: a dozen optional
+/// numeric scalars (each ≤ ~40 B serialized with its key) plus the nested
+/// `tool_calls` array — 640 generously covers skeleton + every scalar.
+fn agent_stats_size(stats: &crate::models::message::AgentExecutionStats) -> usize {
+    640 + opt_str_size(&stats.agent_type)
+        + opt_str_size(&stats.status)
+        + stats
+            .tool_calls
+            .iter()
+            .map(|c| {
+                96 + json_str_len(&c.tool_name)
+                    + opt_str_size(&c.input_preview)
+                    + opt_str_size(&c.output_preview)
+            })
+            .sum::<usize>()
 }
 
 #[cfg(test)]
@@ -793,6 +903,125 @@ mod tests {
         for env in &cases {
             assert_ge_serialized(env);
         }
+    }
+
+    #[test]
+    fn estimate_never_undercounts_serialized_for_background_activity() {
+        // BackgroundActivity carries whole parsed transcript turns, so it is
+        // sized structurally. Build the densest shape — every optional field
+        // present, every block variant, escape-heavy strings, agent stats with
+        // nested tool calls, result images, plus settled entries — and assert
+        // the structural estimate still covers the exact serialized length.
+        use crate::models::message::{
+            AgentExecutionStats, AgentToolCall, ContentBlock, ImageData, MessageTurn, TurnRole,
+            TurnUsage,
+        };
+
+        let image = ImageData {
+            data: "QUJD".repeat(64),
+            mime_type: "image/png".into(),
+            uri: Some("file:///tmp/图 \"quoted\".png".into()),
+        };
+        let turn = MessageTurn {
+            id: "bg-123456-0".into(),
+            role: TurnRole::Assistant,
+            blocks: vec![
+                ContentBlock::Text {
+                    text: "\"\\\n\t".repeat(300),
+                },
+                ContentBlock::Thinking {
+                    text: "思考\n".repeat(100),
+                },
+                ContentBlock::Image {
+                    data: "AAAA".repeat(32),
+                    mime_type: "image/jpeg".into(),
+                    uri: None,
+                },
+                ContentBlock::ImageGeneration {
+                    revised_prompt: Some("prompt \"revised\"".into()),
+                    image: Some(image.clone()),
+                },
+                ContentBlock::ToolUse {
+                    tool_use_id: Some("toolu_01ABC".into()),
+                    tool_name: "Bash".into(),
+                    input_preview: Some("{\"command\":\"pnpm build\"}".into()),
+                    meta: Some(serde_json::json!({"codeg.delegation": {"status": "running"}})),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: Some("toolu_01ABC".into()),
+                    output_preview: Some("output\nwith\tescapes\"".repeat(50)),
+                    is_error: true,
+                    agent_stats: Some(AgentExecutionStats {
+                        agent_type: Some("Explore".into()),
+                        status: Some("completed".into()),
+                        total_duration_ms: Some(u64::MAX),
+                        total_tokens: Some(u64::MAX),
+                        total_tool_use_count: Some(u32::MAX),
+                        read_count: Some(u32::MAX),
+                        search_count: Some(u32::MAX),
+                        bash_count: Some(u32::MAX),
+                        edit_file_count: Some(u32::MAX),
+                        lines_added: Some(u32::MAX),
+                        lines_removed: Some(u32::MAX),
+                        other_tool_count: Some(u32::MAX),
+                        tool_calls: vec![AgentToolCall {
+                            tool_name: "Read".into(),
+                            input_preview: Some("{\"file_path\":\"/a/b\"}".into()),
+                            output_preview: Some("line\n".repeat(40)),
+                            is_error: false,
+                        }],
+                    }),
+                    images: vec![image],
+                },
+            ],
+            timestamp: chrono::Utc::now(),
+            usage: Some(TurnUsage {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                cache_creation_input_tokens: u64::MAX,
+                cache_read_input_tokens: u64::MAX,
+            }),
+            duration_ms: Some(u64::MAX),
+            model: Some("claude-sonnet-5[1m]".into()),
+            completed_at: Some(chrono::Utc::now()),
+        };
+        let env = Arc::new(EventEnvelope {
+            seq: u64::MAX,
+            connection_id: "conn-背景-\"escaped\"".into(),
+            payload: AcpEvent::BackgroundActivity {
+                session_id: "1f8b332f-128a-4603-a5f4-f44d5a0bf932".into(),
+                turns: vec![turn.clone(), turn],
+                outstanding: u32::MAX,
+                settled: vec![
+                    crate::acp::types::BackgroundSettledInfo {
+                        task_id: "ae6bd822f7a0e23a8".into(),
+                        status: "completed".into(),
+                        summary: Some("Agent \"Run pnpm build\" finished".into()),
+                    },
+                    crate::acp::types::BackgroundSettledInfo {
+                        task_id: "bipkee1pw".into(),
+                        status: "failed".into(),
+                        summary: None,
+                    },
+                ],
+                watermark: u64::MAX,
+            },
+        });
+        assert_ge_serialized(&env);
+
+        // Empty-payload shape (accounting-only event) must hold too.
+        let env = Arc::new(EventEnvelope {
+            seq: 1,
+            connection_id: "c".into(),
+            payload: AcpEvent::BackgroundActivity {
+                session_id: "s".into(),
+                turns: vec![],
+                outstanding: 0,
+                settled: vec![],
+                watermark: 0,
+            },
+        });
+        assert_ge_serialized(&env);
     }
 
     #[test]

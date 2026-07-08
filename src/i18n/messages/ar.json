@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value}س",
         "elapsedMinutes": "{value}د",
         "elapsedSeconds": "{value}ث",
-        "toolUseCount": "{count} أداة {count, plural, one {use} other {uses}}"
+        "toolUseCount": "{count} استخدام للأداة"
       },
       "tool": {
         "parameters": "المعلمات",
@@ -2546,6 +2546,16 @@
         "opWait": "جلب نتيجة الوكيل الفرعي",
         "opClose": "إغلاق الوكيل الفرعي",
         "opResume": "استئناف الوكيل الفرعي"
+      },
+      "backgroundTasks": {
+        "running": "{count, plural, one {مهمة خلفية واحدة قيد التشغيل} two {مهمتا خلفية قيد التشغيل} few {# مهام خلفية قيد التشغيل} other {# مهمة خلفية قيد التشغيل}}",
+        "settling": "جارٍ مزامنة نتائج الخلفية…",
+        "settledFallback": "انتهت مهمة الخلفية ({status})",
+        "cardRunning": "قيد التشغيل في الخلفية",
+        "cardLaunchedPending": "بدأت مهمة الخلفية",
+        "cardCompleted": "اكتملت مهمة الخلفية",
+        "cardFinishedWithStatus": "انتهت مهمة الخلفية ({status})",
+        "cardResultPending": "لم تصل النتيجة بعد"
       }
     },
     "diffPreview": {

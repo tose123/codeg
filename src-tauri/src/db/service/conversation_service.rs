@@ -236,19 +236,34 @@ pub async fn update_pin(
     Ok(())
 }
 
+/// Persist the agent session id (`external_id`) for a conversation as a single
+/// conditional UPDATE guarded on `deleted_at IS NULL`. A soft-deleted (or
+/// missing) row matches nothing and the call is a silent no-op — it returns Ok
+/// either way, since every caller treats "no live row" as nothing to do.
+///
+/// The `deleted_at IS NULL` guard matters because `SessionStarted` writes are
+/// not serialized against deletes: a conversation can be soft-deleted while its
+/// ACP connection stays live and bound (delete only soft-marks the row; it does
+/// not disconnect the agent). A fork in particular emits `SessionStarted{S2}`
+/// whose lifecycle handler calls this with the still-bound `conversation_id`;
+/// without the guard that late write would re-point a deleted row's session id
+/// from S1 to S2 and bump `updated_at`, half-resurrecting an invisible row.
+/// Writing `WHERE id = ? AND deleted_at IS NULL` makes such a stale event a
+/// no-op. (Fork's own current-row re-point in `persist_fork_outcome` is guarded
+/// the same way.)
 pub async fn update_external_id(
     conn: &DatabaseConnection,
     conversation_id: i32,
     external_id: String,
 ) -> Result<(), DbError> {
-    let conv = conversation::Entity::find_by_id(conversation_id)
-        .one(conn)
-        .await?
-        .ok_or_else(|| DbError::Migration(format!("Conversation not found: {conversation_id}")))?;
-    let mut active: conversation::ActiveModel = conv.into();
-    active.external_id = Set(Some(external_id));
-    active.updated_at = Set(Utc::now());
-    active.update(conn).await?;
+    use sea_orm::sea_query::Expr;
+    conversation::Entity::update_many()
+        .col_expr(conversation::Column::ExternalId, Expr::value(external_id))
+        .col_expr(conversation::Column::UpdatedAt, Expr::value(Utc::now()))
+        .filter(conversation::Column::Id.eq(conversation_id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .exec(conn)
+        .await?;
     Ok(())
 }
 
@@ -510,10 +525,13 @@ pub async fn list_all(
     Ok(summaries)
 }
 
-/// List delegation children of a single parent conversation, oldest first.
-/// Returns rows where `parent_id == parent_conversation_id`. Soft-deleted
-/// children are filtered out so a removed sub-session stays hidden in the
-/// parent's tool-call view too.
+/// List delegation children of a single parent conversation, newest first
+/// (`created_at` DESC), matching the sidebar's newest-on-top ordering so a
+/// freshly-spawned sub-agent surfaces right under its parent. The only other
+/// consumer (`inject_delegation_meta`) keys these by `parent_tool_use_id` and
+/// is order-agnostic. Returns rows where `parent_id == parent_conversation_id`.
+/// Soft-deleted children are filtered out so a removed sub-session stays hidden
+/// in the parent's tool-call view too.
 pub async fn list_children(
     conn: &DatabaseConnection,
     parent_conversation_id: i32,
@@ -521,7 +539,11 @@ pub async fn list_children(
     let rows = conversation::Entity::find()
         .filter(conversation::Column::ParentId.eq(parent_conversation_id))
         .filter(conversation::Column::DeletedAt.is_null())
-        .order_by_asc(conversation::Column::CreatedAt)
+        .order_by_desc(conversation::Column::CreatedAt)
+        // Explicit id tie-break so same-timestamp siblings are deterministic and
+        // match the frontend re-sort (which tie-breaks id DESC): the raw fetch
+        // snapshot and a live-inserted child then land in the same order.
+        .order_by_desc(conversation::Column::Id)
         .all(conn)
         .await?;
     let mut summaries: Vec<DbConversationSummary> = rows.into_iter().map(conv_to_summary).collect();
@@ -615,6 +637,54 @@ mod tests {
         );
         assert_eq!(rows[0].id, child_a);
         assert_eq!(rows[0].parent_id, Some(parent_a));
+    }
+
+    #[tokio::test]
+    async fn list_children_orders_newest_first() {
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-list-children-order").await;
+        let parent = create(&db.conn, folder, AgentType::ClaudeCode, Some("P".into()), None)
+            .await
+            .expect("parent");
+        // Two children created oldest → newest under the same parent.
+        let first = create_with_delegation(
+            &db.conn,
+            folder,
+            AgentType::Codex,
+            Some("first".into()),
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent.id,
+                parent_tool_use_id: "tu-1".into(),
+                delegation_call_id: "call-1".into(),
+            }),
+        )
+        .await
+        .expect("first child");
+        let second = create_with_delegation(
+            &db.conn,
+            folder,
+            AgentType::Codex,
+            Some("second".into()),
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent.id,
+                parent_tool_use_id: "tu-2".into(),
+                delegation_call_id: "call-2".into(),
+            }),
+        )
+        .await
+        .expect("second child");
+
+        // The sidebar shows sub-sessions newest-first so a freshly-spawned
+        // sub-agent surfaces right under its parent.
+        let rows = list_children(&db.conn, parent.id).await.expect("list");
+        let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(
+            ids,
+            vec![second.id, first.id],
+            "newest child must come first"
+        );
     }
 
     #[tokio::test]
@@ -767,6 +837,72 @@ mod tests {
         let summary = get_by_id(&db.conn, row.id).await.expect("get");
         assert_eq!(summary.title.as_deref(), Some("My name"));
         assert!(summary.title_locked, "manual rename must lock the title");
+    }
+
+    #[tokio::test]
+    async fn update_external_id_skips_soft_deleted_row() {
+        // A late/stale `SessionStarted` write — e.g. a fork's SessionStarted{S2}
+        // landing after the user deleted the conversation — must NOT mutate a
+        // soft-deleted row. `update_external_id` is guarded on `deleted_at IS
+        // NULL`, so it is a silent no-op: the deleted row keeps its old
+        // external_id and is never half-resurrected.
+        let db = fresh_in_memory_db().await;
+        let folder = seed_folder(&db, "/tmp/codeg-extid-deleted").await;
+        let row = create(
+            &db.conn,
+            folder,
+            AgentType::ClaudeCode,
+            Some("Doomed".into()),
+            None,
+        )
+        .await
+        .expect("create");
+        update_external_id(&db.conn, row.id, "session-S1".into())
+            .await
+            .expect("seed external_id");
+        soft_delete(&db.conn, row.id).await.expect("soft delete");
+
+        // The guarded write must no-op (Ok) without touching the deleted row.
+        update_external_id(&db.conn, row.id, "session-S2".into())
+            .await
+            .expect("a stale SessionStarted write must be a no-op, not an error");
+
+        // Inspect the raw row directly — `get_by_id` filters deleted rows out.
+        let raw = conversation::Entity::find_by_id(row.id)
+            .one(&db.conn)
+            .await
+            .expect("query")
+            .expect("row still exists (soft-deleted)");
+        assert!(raw.deleted_at.is_some(), "row must remain soft-deleted");
+        assert_eq!(
+            raw.external_id.as_deref(),
+            Some("session-S1"),
+            "a stale external_id write must not re-point a soft-deleted row"
+        );
+
+        // Sanity: the guard is not over-broad — a LIVE row still updates.
+        let live = create(
+            &db.conn,
+            folder,
+            AgentType::ClaudeCode,
+            Some("Live".into()),
+            None,
+        )
+        .await
+        .expect("create live");
+        update_external_id(&db.conn, live.id, "session-S9".into())
+            .await
+            .expect("live update");
+        let live_raw = conversation::Entity::find_by_id(live.id)
+            .one(&db.conn)
+            .await
+            .expect("query live")
+            .expect("live row");
+        assert_eq!(
+            live_raw.external_id.as_deref(),
+            Some("session-S9"),
+            "a live row must still receive its external_id"
+        );
     }
 
     #[tokio::test]

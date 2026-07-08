@@ -2546,6 +2546,16 @@
         "opWait": "Fetching sub-agent result",
         "opClose": "Closing sub-agent",
         "opResume": "Resuming sub-agent"
+      },
+      "backgroundTasks": {
+        "running": "{count, plural, one {# background task running} other {# background tasks running}}",
+        "settling": "Syncing background results…",
+        "settledFallback": "Background task finished ({status})",
+        "cardRunning": "Running in background",
+        "cardLaunchedPending": "Launched in background",
+        "cardCompleted": "Background task completed",
+        "cardFinishedWithStatus": "Background task finished ({status})",
+        "cardResultPending": "Result not returned yet"
       }
     },
     "diffPreview": {

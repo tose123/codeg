@@ -750,15 +750,16 @@ describe("mergeChildrenById", () => {
     const eventA = conv(100, 1, { status: "completed" }) // newer status, same id
     const eventC = conv(101, 1) // new child absent from the snapshot
     const merged = mergeChildrenById([snapA, snapB], [eventA, eventC])
-    // created_at ascending (the factory derives created_at from id)
-    expect(merged.map((c) => c.id)).toEqual([100, 101, 102])
+    // created_at descending / newest-first (the factory derives created_at from
+    // id, so higher id == newer)
+    expect(merged.map((c) => c.id)).toEqual([102, 101, 100])
     // the live event wins over the snapshot for the shared id
     expect(merged.find((c) => c.id === 100)!.status).toBe("completed")
   })
 
-  it("returns the snapshot order when nothing is buffered", () => {
+  it("sorts the snapshot newest-first when nothing is buffered", () => {
     const snap = [conv(100, 1), conv(101, 1)]
-    expect(mergeChildrenById(snap, []).map((c) => c.id)).toEqual([100, 101])
+    expect(mergeChildrenById(snap, []).map((c) => c.id)).toEqual([101, 100])
   })
 })
 

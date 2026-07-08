@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value} Std",
         "elapsedMinutes": "{value} Min",
         "elapsedSeconds": "{value} Sek",
-        "toolUseCount": "{count} Tool {count, plural, one {use} other {uses}}"
+        "toolUseCount": "{count, plural, one {# Tool-Aufruf} other {# Tool-Aufrufe}}"
       },
       "tool": {
         "parameters": "Parameter",
@@ -2546,6 +2546,16 @@
         "opWait": "Sub-Agent-Ergebnis wird abgerufen",
         "opClose": "Sub-Agent wird geschlossen",
         "opResume": "Sub-Agent wird fortgesetzt"
+      },
+      "backgroundTasks": {
+        "running": "{count, plural, one {# Hintergrundaufgabe läuft} other {# Hintergrundaufgaben laufen}}",
+        "settling": "Hintergrundergebnisse werden synchronisiert…",
+        "settledFallback": "Hintergrundaufgabe beendet ({status})",
+        "cardRunning": "Läuft im Hintergrund",
+        "cardLaunchedPending": "Hintergrundaufgabe gestartet",
+        "cardCompleted": "Hintergrundaufgabe abgeschlossen",
+        "cardFinishedWithStatus": "Hintergrundaufgabe beendet ({status})",
+        "cardResultPending": "Ergebnis steht noch aus"
       }
     },
     "diffPreview": {

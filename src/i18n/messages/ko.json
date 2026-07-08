@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value}시간",
         "elapsedMinutes": "{value}분",
         "elapsedSeconds": "{value}초",
-        "toolUseCount": "{count}개 도구 {count, plural, one {use} other {uses}}"
+        "toolUseCount": "도구 {count}회 사용"
       },
       "tool": {
         "parameters": "매개변수",
@@ -2546,6 +2546,16 @@
         "opWait": "서브 에이전트 결과 가져오는 중",
         "opClose": "서브 에이전트 종료 중",
         "opResume": "서브 에이전트 재개 중"
+      },
+      "backgroundTasks": {
+        "running": "백그라운드 작업 {count}개 실행 중",
+        "settling": "백그라운드 결과 동기화 중…",
+        "settledFallback": "백그라운드 작업이 종료되었습니다 ({status})",
+        "cardRunning": "백그라운드에서 실행 중",
+        "cardLaunchedPending": "백그라운드 작업 시작됨",
+        "cardCompleted": "백그라운드 작업 완료",
+        "cardFinishedWithStatus": "백그라운드 작업 종료 ({status})",
+        "cardResultPending": "결과가 아직 반환되지 않았습니다"
       }
     },
     "diffPreview": {

@@ -99,12 +99,12 @@ describe("useSubsessionSync", () => {
     expect(result.current.get(1)).not.toBe(a) // touched parent rebuilt
   })
 
-  it("inserts a new child upsert in created_at order", async () => {
+  it("inserts a new child upsert in created_at DESC (newest-first) order", async () => {
     const { result } = await setup(
-      new Map([[1, [child(100, 1), child(102, 1)]]])
+      new Map([[1, [child(102, 1), child(100, 1)]]])
     )
     act(() => capturedHandler!({ kind: "upsert", summary: child(101, 1) }))
-    expect(result.current.get(1)!.map((c) => c.id)).toEqual([100, 101, 102])
+    expect(result.current.get(1)!.map((c) => c.id)).toEqual([102, 101, 100])
   })
 
   it("replaces an existing child on upsert without duplicating", async () => {

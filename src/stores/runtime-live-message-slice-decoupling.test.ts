@@ -19,11 +19,13 @@ function seedSession(sessionStats: SessionStats) {
         {
           conversationId: CID,
           externalId: "sid-1",
+          dbConversationId: null,
           detail: null,
           detailLoading: false,
           detailError: null,
           acpLoadError: null,
           localTurns: [],
+          backgroundTurns: [],
           optimisticTurns: [],
           liveMessage: null,
           syncState: "awaiting_persist",

@@ -216,6 +216,7 @@ impl KimiCodeParser {
             summary,
             turns,
             session_stats,
+            transcript_watermark: None,
         }
     }
 

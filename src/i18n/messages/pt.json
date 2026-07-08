@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value} h",
         "elapsedMinutes": "{value} min",
         "elapsedSeconds": "{value} s",
-        "toolUseCount": "{count} ferramenta {count, plural, one {use} other {uses}}"
+        "toolUseCount": "{count, plural, one {# uso de ferramenta} other {# usos de ferramenta}}"
       },
       "tool": {
         "parameters": "Parâmetros",
@@ -2546,6 +2546,16 @@
         "opWait": "Obtendo resultado do subagente",
         "opClose": "Encerrando subagente",
         "opResume": "Retomando subagente"
+      },
+      "backgroundTasks": {
+        "running": "{count, plural, one {# tarefa em segundo plano em execução} other {# tarefas em segundo plano em execução}}",
+        "settling": "Sincronizando resultados em segundo plano…",
+        "settledFallback": "Tarefa em segundo plano concluída ({status})",
+        "cardRunning": "Executando em segundo plano",
+        "cardLaunchedPending": "Tarefa iniciada em segundo plano",
+        "cardCompleted": "Tarefa em segundo plano concluída",
+        "cardFinishedWithStatus": "Tarefa em segundo plano encerrada ({status})",
+        "cardResultPending": "Resultado ainda não retornou"
       }
     },
     "diffPreview": {

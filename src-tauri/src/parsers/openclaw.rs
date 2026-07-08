@@ -700,6 +700,7 @@ impl OpenClawParser {
             summary,
             turns,
             session_stats,
+            transcript_watermark: None,
         })
     }
 

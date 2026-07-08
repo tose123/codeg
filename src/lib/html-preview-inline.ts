@@ -723,7 +723,10 @@ export async function inlineHtmlResources(
 // Default (untrusted) policy. Paired with a sandbox that omits `allow-scripts`,
 // so script execution is blocked outright; `default-src 'none'` with no
 // `connect-src` additionally blocks any network fetch, and `frame-src` /
-// `form-action` / `base-uri` are locked down.
+// `form-action` are locked down. `base-uri about:` permits only the injected
+// `about:srcdoc` base (so in-page "#fragment" links resolve same-document
+// instead of navigating the frame to the host app) while still refusing any
+// external-origin base.
 const CSP_STRICT = [
   "default-src 'none'",
   "img-src data: blob:",
@@ -732,7 +735,7 @@ const CSP_STRICT = [
   "font-src data:",
   "script-src 'none'",
   "form-action 'none'",
-  "base-uri 'none'",
+  "base-uri about:",
   "frame-src 'none'",
 ].join("; ")
 
@@ -748,30 +751,46 @@ const CSP_TRUSTED = [
   "script-src 'unsafe-inline' 'unsafe-eval' data: blob: https: http:",
   "connect-src https: http:",
   "form-action https: http:",
-  "base-uri 'none'",
+  "base-uri about:",
   "frame-src 'none'",
 ].join("; ")
 
+// Pins the sandboxed document's base URL to its own `about:srcdoc` URL, so
+// in-page "#fragment" links (and same-document SVG `<use href="#id">` refs)
+// resolve against the document itself and scroll, rather than navigating the
+// frame. An iframe `srcdoc` document with no `<base>` element falls back to the
+// PARENT document's base URL, so a bare "#foo" would resolve to "{app-url}#foo"
+// and load the host app INSIDE the opaque-origin sandbox — which cannot boot
+// (no `allow-same-origin`, no scripts) and surfaces as a frame stuck on the
+// app's loading screen. The inliner has already stripped every author `<base>`,
+// and this one is injected first, so it is the single authoritative base (the
+// first base element wins). Honored only because the CSP allows `base-uri
+// about:`; that scheme can never point at an external origin.
+const SANDBOX_BASE = `<base href="about:srcdoc">`
+
 /**
- * Inject the sandbox Content-Security-Policy as the first element of `<head>`
- * (so it applies before any script runs). Cheap string operation — safe to
- * re-run when toggling trust. The real `<head>` is located with the quote/
- * comment/raw-text-aware scanner, so a "<head" inside an attribute value or
- * comment cannot misplace the policy.
+ * Inject the sandbox Content-Security-Policy plus a base-URL pin as the first
+ * elements of `<head>` (so the CSP applies before any script runs, and the
+ * `<base>` — see {@link SANDBOX_BASE} — governs every in-page link). Cheap
+ * string operation — safe to re-run when toggling trust. The real `<head>` is
+ * located with the quote/comment/raw-text-aware scanner, so a "<head" inside an
+ * attribute value or comment cannot misplace the injection.
  */
 export function withSandboxCsp(
   html: string,
   options?: { trusted?: boolean }
 ): string {
   const csp = options?.trusted ? CSP_TRUSTED : CSP_STRICT
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`
+  // CSP meta FIRST so the policy is active when the browser parses the <base>
+  // and enforces its `base-uri` check against it.
+  const head = `<meta http-equiv="Content-Security-Policy" content="${csp}">${SANDBOX_BASE}`
   const headEnd = realStartTagEnd(html, "head")
   if (headEnd != null) {
-    return html.slice(0, headEnd) + meta + html.slice(headEnd)
+    return html.slice(0, headEnd) + head + html.slice(headEnd)
   }
   const htmlEnd = realStartTagEnd(html, "html")
   if (htmlEnd != null) {
-    return html.slice(0, htmlEnd) + `<head>${meta}</head>` + html.slice(htmlEnd)
+    return html.slice(0, htmlEnd) + `<head>${head}</head>` + html.slice(htmlEnd)
   }
-  return `<head>${meta}</head>${html}`
+  return `<head>${head}</head>${html}`
 }

@@ -69,6 +69,16 @@ export interface UseConnectionReturn {
   /** True for a delegation-spawned child connection (broker-owned). The stale
    *  banner hides for these — the user can't restart a broker-owned process. */
   isDelegationChild: boolean
+  /** Launched-but-unresolved background tasks on this connection (async
+   *  sub-agents / background shells, accounted from the transcript by the
+   *  backend watcher). Drives the "background tasks running" chip; non-zero
+   *  also exempts the connection from the idle sweeps. */
+  backgroundOutstanding: number
+  /** Epoch ms while a settled background task's follow-up reply is still being
+   *  generated/surfaced (cleared when overlay turns arrive). Drives the chip's
+   *  transient "syncing results" state so the gap after the running count
+   *  disappears isn't a blank void. */
+  backgroundSettleSyncingSince: number | null
   connect: (
     agentType: AgentType,
     workingDir?: string,
@@ -113,6 +123,10 @@ function derive(conn: ConnectionState | undefined) {
 const CONN_NON_RENDER_KEYS = new Set<keyof ConnectionState>([
   "liveMessage",
   "lastAppliedSeq",
+  // Out-of-turn tool-call registry: read only inside the reducer (permission
+  // enrichment); no useConnection consumer renders it, and it can churn per
+  // background tool event.
+  "outOfTurnToolCalls",
 ])
 
 // Shallow-equal two connection snapshots for RENDER purposes: equal iff every
@@ -204,6 +218,9 @@ export function useConnection(contextKey: string): UseConnectionReturn {
   const configStaleKind = connection?.configStaleKind ?? null
   const configStaleDismissed = connection?.configStaleDismissed ?? false
   const isDelegationChild = connection?.isDelegationChild ?? false
+  const backgroundOutstanding = connection?.backgroundOutstanding ?? 0
+  const backgroundSettleSyncingSince =
+    connection?.backgroundSettleSyncingSince ?? null
 
   const connect = useCallback(
     (
@@ -302,6 +319,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       configStaleKind,
       configStaleDismissed,
       isDelegationChild,
+      backgroundOutstanding,
+      backgroundSettleSyncingSince,
       connect,
       disconnect,
       reapplyConfig,
@@ -337,6 +356,8 @@ export function useConnection(contextKey: string): UseConnectionReturn {
       configStaleKind,
       configStaleDismissed,
       isDelegationChild,
+      backgroundOutstanding,
+      backgroundSettleSyncingSince,
       connect,
       disconnect,
       reapplyConfig,

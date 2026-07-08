@@ -216,6 +216,13 @@ export interface ConversationDetail {
   summary: ConversationSummary
   turns: MessageTurn[]
   session_stats?: SessionStats | null
+  /**
+   * Byte length of the source transcript this parse consumed (Claude only;
+   * absent elsewhere). Retires background-overlay turns whose
+   * `background_activity` watermark it has caught up to — see
+   * `BackgroundOverlayEntry` in the conversation runtime store.
+   */
+  transcript_watermark?: number | null
 }
 
 export interface FolderInfo {
@@ -400,6 +407,9 @@ export interface DbConversationDetail {
   summary: DbConversationSummary
   turns: MessageTurn[]
   session_stats?: SessionStats | null
+  /** See `ConversationDetail.transcript_watermark` (threaded through the DB
+   *  fetch path from the same parser detail). */
+  transcript_watermark?: number | null
   /**
    * Id of the persisted user turn the backend identified as the in-flight prompt
    * (present only while a turn is running on this conversation's connection). The
@@ -1043,6 +1053,20 @@ export interface ToolCallImageWire {
 }
 
 // ACP events pushed from Rust backend (discriminated by "type" field)
+/**
+ * One background task settled by a `<task-notification>` transcript record
+ * (mirror of Rust `BackgroundSettledInfo`). `task_id` is the launch ack's
+ * `agentId` (async sub-agent) or `backgroundTaskId` (background shell);
+ * `status` is the notification's `<status>` verbatim (`"completed"` on
+ * success). The same id may settle more than once (a resumed sub-agent
+ * notifies again).
+ */
+export interface BackgroundSettledInfo {
+  task_id: string
+  status: string
+  summary?: string | null
+}
+
 export type AcpEvent =
   | { type: "content_delta"; text: string }
   | { type: "thinking"; text: string }
@@ -1171,6 +1195,24 @@ export type AcpEvent =
       type: "usage_update"
       used: number
       size: number
+    }
+  /**
+   * Out-of-turn activity surfaced from the agent's own session transcript by
+   * the backend watcher (Claude only): async sub-agent / background-shell
+   * `<task-notification>` completions, the agent's continued work after them,
+   * and cron//loop autonomous turns (which produce no wire events at all).
+   * `turns` are UPSERTs keyed by `MessageTurn.id` into the conversation
+   * runtime store's background overlay; `settled` entries each raise one OS
+   * notification; `outstanding` mirrors into the connection for the idle-sweep
+   * exemption and the "background tasks running" chip.
+   */
+  | {
+      type: "background_activity"
+      session_id: string
+      turns?: MessageTurn[]
+      outstanding: number
+      settled?: BackgroundSettledInfo[]
+      watermark: number
     }
   /**
    * A `delegate_to_agent` MCP tool call from the parent agent has spawned a
@@ -1433,6 +1475,11 @@ export interface LiveSessionSnapshot {
   /** Live-feedback notes for the current turn. Absent on older payloads /
    *  when empty (then treated as `[]`). */
   feedback?: FeedbackItem[]
+  /** Launched-but-unresolved background tasks (async sub-agents / background
+   *  shells) accounted from the transcript. Lets a client attaching
+   *  mid-episode recover the pending count the one-shot `background_activity`
+   *  events won't replay. Absent / omitted when zero. */
+  background_outstanding?: number
   /** Whether this agent has the `check_user_feedback` tool (fixed at launch).
    *  The frontend gates the feedback bar on this — the agent's real capability —
    *  not the (possibly later-toggled) global setting. Absent → `false`. */

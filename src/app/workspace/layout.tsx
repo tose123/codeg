@@ -64,6 +64,7 @@ import {
   PetFocusBridge,
 } from "@/components/workspace/deep-link-bootstrap"
 import { WorkspaceOpenFolderListener } from "@/components/workspace/workspace-open-folder-listener"
+import { HeavyPluginsWarmup } from "@/components/ai-elements/heavy-plugins-warmup"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -98,6 +99,12 @@ const DEFAULT_FUSION_LAYOUT: [number, number] = [56, 44]
 const MIN_CENTER_WIDTH_PX = 420
 const MIN_WORKSPACE_HEIGHT_PX = 220
 const LAYOUT_EPSILON = 0.25
+// Slide duration for panel show/hide; must match the CSS transition on
+// `.panel-slide-animating > [data-panel]` in globals.css. The transition class
+// is held a touch past this so the animation finishes before it's removed
+// (removing it mid-transition would snap the final pixels).
+const PANEL_SLIDE_MS = 240
+const PANEL_SLIDE_CLEANUP_MS = PANEL_SLIDE_MS + 60
 
 function TabKeysSync() {
   const tabs = useTabStore((s) => s.tabs)
@@ -149,6 +156,45 @@ function resolvePanelSizeRange(
   const minSize = clamp(toPercent(minPixels, safeTotal), 0, 100)
   const maxSize = clamp(toPercent(maxPixels, safeTotal), minSize, 100)
   return { minSize, maxSize }
+}
+
+/**
+ * Returns `true` for a brief window after `open` flips, so the caller can add
+ * the `.panel-slide-animating` class that animates the panel resize (a "push"
+ * slide) on explicit show/hide toggles only — never on the initial mount, on
+ * localStorage hydration, or during resize-handle drags. The first settled
+ * `open` value (once `ready`) establishes a baseline without animating.
+ *
+ * The toggle is detected during render (React's sanctioned "adjust state when a
+ * prop changes" pattern) rather than in an effect: turning the class on in the
+ * render that observes the flip lands it in the same commit as the panel
+ * resize, so the browser has the transition in place before `flex-grow`
+ * changes. Turn-off is deferred to a timer keyed on a per-toggle sequence, so a
+ * fresh toggle mid-slide re-arms the timer instead of inheriting the old one.
+ */
+function usePanelSlideOnToggle(open: boolean, ready: boolean): boolean {
+  const [animating, setAnimating] = useState(false)
+  const [slideSeq, setSlideSeq] = useState(0)
+  const [prevOpen, setPrevOpen] = useState<boolean | null>(null)
+
+  if (ready) {
+    if (prevOpen === null) {
+      // Adopt the hydrated value as the baseline without animating.
+      setPrevOpen(open)
+    } else if (prevOpen !== open) {
+      setPrevOpen(open)
+      setAnimating(true)
+      setSlideSeq((seq) => seq + 1)
+    }
+  }
+
+  useEffect(() => {
+    if (slideSeq === 0) return
+    const timer = setTimeout(() => setAnimating(false), PANEL_SLIDE_CLEANUP_MS)
+    return () => clearTimeout(timer)
+  }, [slideSeq])
+
+  return animating
 }
 
 function WorkspaceContent({ children }: { children: React.ReactNode }) {
@@ -404,6 +450,7 @@ function MobileFolderWorkspaceShell({
 function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
   const {
     isOpen: sidebarOpen,
+    restored: sidebarRestored,
     width: sidebarWidth,
     minWidth: sidebarMinWidth,
     maxWidth: sidebarMaxWidth,
@@ -411,6 +458,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
   } = useSidebarContext()
   const {
     isOpen: auxOpen,
+    restored: auxRestored,
     width: auxWidth,
     minWidth: auxMinWidth,
     maxWidth: auxMaxWidth,
@@ -423,6 +471,16 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
     maxHeight: terminalMaxHeight,
     setHeight: setTerminalHeight,
   } = useTerminalContext()
+
+  // Animate the shell (horizontal) group while the sidebar/aux toggle and the
+  // main (vertical) group while the terminal toggles, so the panes slide open
+  // and closed instead of snapping. Gated on `restored` so hydrating the
+  // persisted open/closed state on load doesn't animate. The terminal has no
+  // persisted state (always starts closed), so it's always "ready".
+  const sidebarAnimating = usePanelSlideOnToggle(sidebarOpen, sidebarRestored)
+  const auxAnimating = usePanelSlideOnToggle(auxOpen, auxRestored)
+  const terminalAnimating = usePanelSlideOnToggle(terminalOpen, true)
+  const shellSlideAnimating = sidebarAnimating || auxAnimating
 
   const shellGroupRef = useRef<ImperativePanelGroupHandle | null>(null)
   const mainGroupRef = useRef<ImperativePanelGroupHandle | null>(null)
@@ -722,6 +780,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         ref={shellGroupRef}
         direction="horizontal"
         onLayout={handleShellLayout}
+        className={shellSlideAnimating ? "panel-slide-animating" : undefined}
       >
         <ResizablePanel
           id={FOLDER_SHELL_LEFT_PANEL_ID}
@@ -758,6 +817,9 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
               ref={mainGroupRef}
               direction="vertical"
               onLayout={handleMainLayout}
+              className={
+                terminalAnimating ? "panel-slide-animating" : undefined
+              }
             >
               <ResizablePanel
                 id={FOLDER_MAIN_WORKSPACE_PANEL_ID}
@@ -879,6 +941,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
                     <TabProvider>
                       <WorkspaceDocumentTitle />
                       <TabKeysSync />
+                      <HeavyPluginsWarmup />
                       <DeepLinkBootstrap />
                       <PetFocusBridge />
                       {/* Always mounted: external-change conflicts must be

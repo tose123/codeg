@@ -18,11 +18,13 @@ function seedSession(detail: DbConversationDetail | null) {
         {
           conversationId: CID,
           externalId: null,
+          dbConversationId: null,
           detail,
           detailLoading: false,
           detailError: null,
           acpLoadError: null,
           localTurns: [],
+          backgroundTurns: [],
           optimisticTurns: [],
           liveMessage: null,
           syncState: "idle",

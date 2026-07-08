@@ -215,6 +215,36 @@ pub enum AcpEvent {
     AvailableCommands { commands: Vec<AvailableCommandInfo> },
     /// Session usage/context window updated during conversation
     UsageUpdate { used: u64, size: u64 },
+    /// Out-of-turn activity surfaced from the agent's own session transcript
+    /// by the background watcher (`acp::background_watch`; Claude-only today).
+    /// Covers everything that happens OUTSIDE a codeg-driven prompt turn:
+    /// async sub-agent / background-shell `<task-notification>` completions,
+    /// the agent's continued work after them, and cron//loop autonomous turns
+    /// (which never produce ACP wire events at all — see issue #270). The
+    /// transcript is the single render source for out-of-turn content; wire
+    /// updates arriving out-of-turn are dropped by the frontend.
+    BackgroundActivity {
+        session_id: String,
+        /// Out-of-turn turns parsed from the transcript tail. UPSERT semantics
+        /// keyed by `MessageTurn.id` (`bg-<episode-offset>-<idx>`) — a still-
+        /// growing turn is re-emitted whole on each poll tick that changed it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        turns: Vec<crate::models::message::MessageTurn>,
+        /// Launched-but-unresolved background tasks (async sub-agents +
+        /// background shell tasks) accounted from transcript acks. Mirrored
+        /// into `SessionState` to exempt the connection from both idle sweeps
+        /// while work is pending.
+        outstanding: u32,
+        /// Tasks settled by `<task-notification>` records in this batch — the
+        /// frontend raises one OS notification per entry.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        settled: Vec<BackgroundSettledInfo>,
+        /// Byte offset of the transcript parsed through at emission. The
+        /// frontend retires overlay turns once a detail fetch's
+        /// `transcript_watermark` catches up (`>=`), closing the emit/refetch
+        /// race without cross-namespace id dedup.
+        watermark: u64,
+    },
     /// A `delegate_to_agent` MCP tool call from the parent agent has spawned a
     /// child sub-session and the child's prompt is in flight. Emitted as soon
     /// as the broker registers the pending call. The frontend uses this to
@@ -306,6 +336,20 @@ pub enum AcpEvent {
         stale: bool,
         kind: ConfigStaleKind,
     },
+}
+
+/// One background task settled by a `<task-notification>` transcript record,
+/// carried on [`AcpEvent::BackgroundActivity`]. `task_id` is the launch ack's
+/// `agentId` (async sub-agent) or `backgroundTaskId` (background shell);
+/// `status` is the notification's `<status>` passed through verbatim
+/// (`"completed"` on success). The same task id may settle more than once —
+/// a completed sub-agent can be resumed via `SendMessage` and re-notify.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundSettledInfo {
+    pub task_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Which settings surface drifted, so the frontend can word the

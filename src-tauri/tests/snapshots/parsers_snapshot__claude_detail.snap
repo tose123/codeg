@@ -60,5 +60,6 @@ expression: detail
     "context_window_used_tokens": 1700,
     "context_window_max_tokens": 1000000,
     "context_window_usage_percent": 0.16999999999999998
-  }
+  },
+  "transcript_watermark": 480
 }

@@ -10,7 +10,7 @@ type PluginConfig = NonNullable<ComponentProps<typeof Streamdown>["plugins"]>
 type CodePlugin = NonNullable<PluginConfig["code"]>
 type MathPlugin = NonNullable<PluginConfig["math"]>
 type MermaidPlugin = NonNullable<PluginConfig["mermaid"]>
-type HeavyKind = "code" | "math" | "mermaid"
+export type HeavyKind = "code" | "math" | "mermaid"
 
 // --- Why this module exists --------------------------------------------------
 //
@@ -122,6 +122,18 @@ function ensure(kind: HeavyKind): void {
       .catch(() => {})
       .finally(settle)
   }
+}
+
+/**
+ * Warm one or more heavy engines ahead of first use — the same at-most-once,
+ * process-wide load path as on-demand `ensure`, exposed so the workspace can
+ * prefetch during idle time after first paint. This moves the multi-MB module
+ * parse (shiki etc.) OFF the streaming hot path, where the first code fence in a
+ * response would otherwise trigger the cold import + parse mid-stream. Idempotent:
+ * re-calling for an already-loaded/in-flight engine is a no-op.
+ */
+export function prefetchHeavyPlugins(kinds: HeavyKind[]): void {
+  for (const kind of kinds) ensure(kind)
 }
 
 export type HeavyPluginNeeds = Record<HeavyKind, boolean>

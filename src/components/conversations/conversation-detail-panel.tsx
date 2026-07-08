@@ -34,6 +34,7 @@ import { useMessageQueue, type QueuedMessage } from "@/hooks/use-message-queue"
 import { MessageListView } from "@/components/message/message-list-view"
 import { ConversationShell } from "@/components/chat/conversation-shell"
 import { SessionConfigStaleBanner } from "@/components/chat/session-config-stale-banner"
+import { BackgroundTasksChip } from "@/components/chat/background-tasks-chip"
 import { FeedbackNotesDisplay } from "@/components/chat/feedback-notes-display"
 import { FeedbackDialog } from "@/components/chat/feedback-dialog"
 import { useFeedbackEnabled } from "@/hooks/use-feedback-enabled"
@@ -243,6 +244,7 @@ const ConversationTabView = memo(function ConversationTabView({
     syncTurnMetadata,
     removeConversation,
     setAcpLoadError,
+    setDbConversationId,
     setExternalId,
     setLiveMessage,
     setPendingCleanup,
@@ -331,7 +333,19 @@ const ConversationTabView = memo(function ConversationTabView({
 
   useEffect(() => {
     dbConvIdRef.current = dbConversationId
-  }, [dbConversationId])
+    // Bind the DB row id onto the runtime session when the two ids diverge
+    // (draft-started tab: virtual runtime key, row created on first send).
+    // `refetchDetail` on the runtime key fetches with this binding — without
+    // it, a settle-driven refetch (background task finished) asks the backend
+    // for the virtual id and silently fails, leaving stale live turns on
+    // screen forever.
+    if (
+      dbConversationId != null &&
+      dbConversationId !== effectiveConversationId
+    ) {
+      setDbConversationId(effectiveConversationId, dbConversationId)
+    }
+  }, [dbConversationId, effectiveConversationId, setDbConversationId])
 
   useEffect(() => {
     selectedAgentRef.current = selectedAgent
@@ -928,6 +942,10 @@ const ConversationTabView = memo(function ConversationTabView({
             saveRecentConversationAgent(selectedAgent)
             dbConvIdRef.current = newConversationId
             setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
+            // Bind the DB id BEFORE the prompt goes out. The mirror effect
+            // below also binds, but only after a re-render — this closes that
+            // window and covers the unmounted-early return just under it.
+            setDbConversationId(effectiveConversationId, newConversationId)
             if (!mountedRef.current) {
               setPendingCleanup(effectiveConversationId, true)
               refreshConversations()
@@ -961,6 +979,8 @@ const ConversationTabView = memo(function ConversationTabView({
             // DB persistence of external_id is now backend-driven from
             // send_prompt_linked once the row is linked, so no explicit DB write here.
             setExternalId(effectiveConversationId, sessionIdRef.current ?? null)
+            // Bind the DB id BEFORE the prompt goes out (see the chat branch).
+            setDbConversationId(effectiveConversationId, newConversationId)
             if (!mountedRef.current) {
               // Component unmounted while creating — mark for deferred cleanup
               // so the background turn_complete handler can clean up later.
@@ -1034,6 +1054,7 @@ const ConversationTabView = memo(function ConversationTabView({
       pinTab,
       refreshConversations,
       selectedAgent,
+      setDbConversationId,
       setExternalId,
       setPendingCleanup,
       setSyncState,
@@ -1074,11 +1095,29 @@ const ConversationTabView = memo(function ConversationTabView({
         // Backend performs all DB writes in one transaction-shaped call:
         // - current row: external_id=S2, title="[Fork] ..."
         // - sibling row: created with external_id=S1, status=pending_review
-        const { forkedSessionId } = await acpFork(connectionId)
+        // Pass (conversationId, folderId) so a conversation opened from history
+        // — whose connection resumed via session_id but isn't row-linked until
+        // its first prompt — is adopted by the backend before forking (a
+        // fork-send forks BEFORE that prompt). No-op once already linked. Use
+        // the real persisted DB id (`dbConvIdRef`, same as the send path below),
+        // NOT the runtime key `effectiveConversationId` which can be virtual.
+        const { forkedSessionId } = await acpFork(
+          connectionId,
+          dbConvIdRef.current,
+          folderId
+        )
         // Update runtime session id to S2 (frontend in-memory state only)
         sessionIdRef.current = forkedSessionId
         setExternalId(effectiveConversationId, forkedSessionId)
 
+        // NOTE: a fork is a transcript discontinuity — the row's session flips
+        // S1→S2, and S2 is a COPY of S1's transcript plus the turns to come.
+        // The pre-fork history is NOT re-surfaced here: the backend background
+        // watcher correctly excludes the fork-copied prefix from the out-of-turn
+        // overlay (see `baseline_offset_since`), so `detail.turns` (S1 parse) +
+        // the new local turns render each exchange exactly once. No detail
+        // refetch is needed or wanted — an early one races the forked turn and
+        // can drop the just-sent message.
         refreshConversations()
         // Send the message on the forked session (S2)
         handleSend(draft, selectedModeIdArg)
@@ -1112,6 +1151,7 @@ const ConversationTabView = memo(function ConversationTabView({
       mqGetQueueLength,
       mqEnqueue,
       effectiveConversationId,
+      folderId,
       handleSend,
       refreshConversations,
       setExternalId,
@@ -1362,7 +1402,12 @@ const ConversationTabView = memo(function ConversationTabView({
 
   return (
     <ConversationShell
-      topBanner={<SessionConfigStaleBanner contextKey={tabId} />}
+      topBanner={
+        <>
+          <SessionConfigStaleBanner contextKey={tabId} />
+          <BackgroundTasksChip contextKey={tabId} />
+        </>
+      }
       status={connStatus}
       promptCapabilities={conn.promptCapabilities}
       defaultPath={workingDirForConnection}

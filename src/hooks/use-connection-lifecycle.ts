@@ -49,6 +49,28 @@ export interface UseConnectionLifecycleReturn {
   handleRespondPermission: (requestId: string, optionId: string) => void
 }
 
+/**
+ * Unmount-cleanup decision: disconnect unless this client OWNS a connection
+ * that still has work in flight — a prompting turn, or launched-but-unresolved
+ * background tasks (async sub-agents / background shells). Disconnecting an
+ * owner kills the agent CLI, and the background work with it; busy owners are
+ * left to the idle sweeps, which exempt them until the work settles (or the
+ * backend max-age valve expires it). Viewers always tear down: their
+ * disconnect only detaches (never kills the owner's agent), and the sweep
+ * skips viewers so leaving one attached would leak its subscription.
+ * Exported for tests.
+ */
+export function shouldDisconnectOnUnmount(args: {
+  status: string | null
+  isViewer: boolean
+  backgroundOutstanding: number
+}): boolean {
+  if (args.isViewer) return true
+  const ownerBusy =
+    args.status === "prompting" || args.backgroundOutstanding > 0
+  return !ownerBusy
+}
+
 function normalizeErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   return String(error)
@@ -125,6 +147,10 @@ export function useConnectionLifecycle({
   useEffect(() => {
     isViewerRef.current = conn.isViewer
   }, [conn.isViewer])
+  const backgroundOutstandingRef = useRef(conn.backgroundOutstanding)
+  useEffect(() => {
+    backgroundOutstandingRef.current = conn.backgroundOutstanding
+  }, [conn.backgroundOutstanding])
   const contextKeyRef = useRef(contextKey)
   useEffect(() => {
     contextKeyRef.current = contextKey
@@ -285,13 +311,24 @@ export function useConnectionLifecycle({
   useEffect(() => {
     return () => {
       // Owners keep a prompting agent alive in the background to finish the
-      // turn (the idle sweep reclaims it once it returns to "connected").
+      // turn (the idle sweep reclaims it once it returns to "connected"), and
+      // likewise while background work is still outstanding (async sub-agents
+      // / background shells) — disconnecting kills the agent CLI and the
+      // background work with it. Both sweeps already exempt such connections;
+      // once the work settles (or the max-age valve expires it) outstanding
+      // drops to 0 and the normal idle sweep reclaims the connection.
       // Viewers are different: disconnect() only DETACHES them (it never
       // acpDisconnects — that belongs to the owner), so tearing a viewer down
       // mid-turn is safe and leaves the owner's agent untouched. And it's
       // necessary: the idle sweep skips viewers, so a viewer left attached
       // here would leak its WS subscription until the whole provider unmounts.
-      if (statusRef.current !== "prompting" || isViewerRef.current) {
+      if (
+        shouldDisconnectOnUnmount({
+          status: statusRef.current,
+          isViewer: isViewerRef.current,
+          backgroundOutstanding: backgroundOutstandingRef.current,
+        })
+      ) {
         connDisconnectRef.current().catch(() => {})
       }
       if (taskIdRef.current) {

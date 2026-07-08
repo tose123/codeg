@@ -5551,10 +5551,14 @@ pub async fn acp_cancel(
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_fork(
     connection_id: String,
+    conversation_id: Option<i32>,
+    folder_id: Option<i32>,
     db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<ForkResultInfo, AcpError> {
-    manager.fork_session(&db, &connection_id).await
+    manager
+        .fork_session(&db, &connection_id, conversation_id, folder_id)
+        .await
 }
 
 #[cfg(feature = "tauri-runtime")]

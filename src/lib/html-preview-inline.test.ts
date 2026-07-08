@@ -459,4 +459,36 @@ describe("withSandboxCsp", () => {
     )
     expect(metas.length).toBe(1)
   })
+
+  it("pins the base URL so in-page fragment links stay in the document", () => {
+    // Without this, a srcdoc iframe inherits the parent's base URL, so clicking
+    // "#foo" navigates the frame to the host app instead of scrolling.
+    const out = withSandboxCsp(base)
+    expect(out).toContain('<base href="about:srcdoc">')
+    // base-uri permits the injected about: base but not an external origin.
+    expect(out).toContain("base-uri about:")
+    expect(out).not.toContain("base-uri 'none'")
+  })
+
+  it("pins the base URL in trusted mode too", () => {
+    const out = withSandboxCsp(base, { trusted: true })
+    expect(out).toContain('<base href="about:srcdoc">')
+    expect(out).toContain("base-uri about:")
+  })
+
+  it("emits the CSP meta before the <base> so base-uri applies to it", () => {
+    const out = withSandboxCsp(base)
+    const metaIdx = out.indexOf('http-equiv="Content-Security-Policy"')
+    const baseIdx = out.indexOf('<base href="about:srcdoc">')
+    expect(metaIdx).toBeGreaterThanOrEqual(0)
+    expect(baseIdx).toBeGreaterThan(metaIdx)
+  })
+
+  it("makes the injected <base> the document's single authoritative base", () => {
+    const out = withSandboxCsp(base)
+    const doc = new DOMParser().parseFromString(out, "text/html")
+    const bases = doc.querySelectorAll("base")
+    expect(bases.length).toBe(1)
+    expect(bases[0].getAttribute("href")).toBe("about:srcdoc")
+  })
 })

@@ -84,6 +84,15 @@ pub struct ConversationDetail {
     pub turns: Vec<MessageTurn>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_stats: Option<SessionStats>,
+    /// Byte length of the source transcript this parse consumed (exact — the
+    /// parser measures the buffer it read, never a racy stat). Present only
+    /// for parsers reading a single session file (Claude today; `None`
+    /// elsewhere). The frontend retires background-overlay turns
+    /// (`AcpEvent::BackgroundActivity`) whose `watermark <=` this value once
+    /// a detail (re)fetch catches up — the race-free hand-off between the
+    /// live overlay and persisted turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_watermark: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +101,10 @@ pub struct DbConversationDetail {
     pub turns: Vec<MessageTurn>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_stats: Option<SessionStats>,
+    /// See [`ConversationDetail::transcript_watermark`] — threaded through from
+    /// the parser detail on the DB-backed fetch path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_watermark: Option<u64>,
     /// Id of the persisted user turn the live-correlation pass identified as the
     /// in-flight prompt (only present while a turn is running on this
     /// conversation's connection; `None` otherwise). The frontend uses it to

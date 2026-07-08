@@ -33,6 +33,10 @@ import {
 } from "@/lib/api"
 import { denormalizeSnapshot } from "@/lib/snapshot-denormalize"
 import { buildDelegationSeedEnvelopes } from "@/lib/delegation-seed"
+import {
+  getConversationIdByExternalIdFromStore,
+  useConversationRuntimeStore,
+} from "@/stores/conversation-runtime-store"
 import type {
   AgentType,
   AcpAgentStatus,
@@ -246,6 +250,37 @@ export interface ConnectionState {
   /** Which settings surface drifted, for the banner's wording. `null` when not stale. */
   configStaleKind: ConfigStaleKind | null
   /**
+   * Launched-but-unresolved background tasks (async sub-agents / background
+   * shells) on this connection, mirrored from `background_activity` events
+   * (authoritative accounting lives in the backend transcript watcher).
+   * Non-zero exempts the connection from the frontend idle sweep — killing
+   * the connection kills the agent CLI and the background work with it —
+   * and drives the "background tasks running" chip.
+   */
+  backgroundOutstanding: number
+  /**
+   * Epoch ms of the most recent `background_activity` event that settled a
+   * task, cleared when the follow-up overlay turns start arriving. Bridges
+   * the otherwise-blank gap between "N tasks running" disappearing and the
+   * agent's reaction to the results surfacing (model time-to-first-block +
+   * the transcript's record granularity — typically 3–15s): the chip shows a
+   * "syncing results" state while this is set. Client-local UI state (not in
+   * the snapshot); the chip additionally expires it from display after a
+   * fixed window so a killed CLI can't strand the indicator.
+   */
+  backgroundSettleSyncingSince: number | null
+  /**
+   * Tool-call context observed OUT-OF-TURN (status !== "prompting"), kept
+   * ONLY so a background permission request can still render its command/
+   * diff details. Out-of-turn wire tool events are barred from `liveMessage`
+   * (the transcript overlay renders that content), but the permission dialog
+   * enriches from the live tool registry — this small bounded map
+   * (`OUT_OF_TURN_TOOL_CALL_CAP` newest entries) is that registry's
+   * out-of-turn stand-in. Cleared when the next prompting turn starts.
+   * `null` when empty (the common case allocates nothing).
+   */
+  outOfTurnToolCalls: ReadonlyMap<string, ToolCallInfo> | null
+  /**
    * Client-local: the user dismissed (X) the stale banner for the CURRENT
    * drift. Hides the banner without touching the underlying `configStale`
    * state. Reset to `false` whenever a fresh `session_config_stale` arrives (a
@@ -299,6 +334,19 @@ type Action =
       type: "STATUS_CHANGED"
       contextKey: string
       status: ConnectionStatus
+    }
+  | {
+      // Mirror of a `background_activity` event onto the connection: the
+      // `outstanding` count (the backend transcript watcher's authoritative
+      // accounting) plus whether this event settled tasks / carried overlay
+      // turns, which drive the settle-syncing bridge state. No-op when
+      // nothing it mirrors changed, so repeat events don't re-render
+      // connection consumers.
+      type: "SET_BACKGROUND_OUTSTANDING"
+      contextKey: string
+      outstanding: number
+      settledCount: number
+      turnsCount: number
     }
   | StreamingAction
   | { type: "STREAM_BATCH"; actions: StreamingAction[] }
@@ -939,10 +987,36 @@ function ensureLiveMessage(prev: LiveMessage | null): LiveMessage {
   }
 }
 
+/** Last time an out-of-turn drop was logged — module-level sampling clock. */
+let lastOutOfTurnDropLogAt = 0
+
 function applyStreamingAction(
   conn: ConnectionState,
   action: StreamingAction
 ): ConnectionState | null {
+  // OUT-OF-TURN guard: the backend's idle loop forwards session/updates that
+  // arrive BETWEEN turns (background sub-agent completions, the agent's
+  // continued autonomous work). Appending those here would graft them onto
+  // the previous turn's completed liveMessage — the historical "background
+  // results render garbled/incomplete" bug. The transcript watcher's
+  // `background_activity` overlay is the single render path for out-of-turn
+  // content, so wire deltas outside a prompting turn are dropped. Ordering is
+  // safe: the backend emits StatusChanged(prompting) before any turn content,
+  // and turn_complete flushes queued deltas before flipping status back.
+  if (conn.status !== "prompting") {
+    // Sampled: an autonomous (cron//loop) turn streams the ENTIRE wire
+    // out-of-turn — logging every dropped delta would spam the console and
+    // allocate per token for minutes at a time.
+    const now = Date.now()
+    if (now - lastOutOfTurnDropLogAt > 5_000) {
+      lastOutOfTurnDropLogAt = now
+      console.debug(
+        "[acp] dropping out-of-turn streaming deltas (transcript overlay renders them)",
+        { contextKey: conn.contextKey, type: action.type }
+      )
+    }
+    return null
+  }
   // CONTENT_DELTA with empty text is a true no-op. THINKING with empty text
   // is allowed to create the initial placeholder block so the UI can show
   // a "Thinking..." indicator immediately (and for newer Claude models that
@@ -988,6 +1062,46 @@ function applyStreamingAction(
   }
 }
 
+/** Newest out-of-turn tool-call contexts kept per connection (see
+ *  `ConnectionState.outOfTurnToolCalls`). Permission enrichment only ever
+ *  needs the last few. */
+const OUT_OF_TURN_TOOL_CALL_CAP = 8
+
+/**
+ * Overlay-fold refetch: once a conversation's background overlay exceeds this
+ * many turns, fold them into persisted turns via a detail refetch (the
+ * watermark rule retires covered entries). Keeps a day-long cron//loop
+ * session's overlay — which never settles, so nothing else refetches —
+ * bounded. Sized so the fold runs every few dozen autonomous turns, not per
+ * turn.
+ */
+const OVERLAY_FOLD_THRESHOLD = 60
+/** Floor between overlay-fold refetches per conversation, so a failing
+ *  backend (refetch errors, overlay keeps growing) can't escalate into a
+ *  refetch per background event. */
+const OVERLAY_FOLD_MIN_INTERVAL_MS = 30_000
+/** conversationId → epoch ms of the last overlay-fold refetch. Module-level:
+ *  survives provider re-renders; a few entries only (conversations with
+ *  active background overlay). */
+const overlayFoldRefetchAt = new Map<number, number>()
+
+/** Upsert one out-of-turn tool-call info into the bounded registry,
+ *  evicting the oldest entry past the cap. Returns a fresh map. */
+function recordOutOfTurnToolCall(
+  existing: ReadonlyMap<string, ToolCallInfo> | null,
+  info: ToolCallInfo
+): ReadonlyMap<string, ToolCallInfo> {
+  const next = new Map(existing ?? [])
+  next.delete(info.tool_call_id)
+  next.set(info.tool_call_id, info)
+  while (next.size > OUT_OF_TURN_TOOL_CALL_CAP) {
+    const oldest = next.keys().next().value
+    if (oldest === undefined) break
+    next.delete(oldest)
+  }
+  return next
+}
+
 function connectionsReducer(
   state: ConnectionsMap,
   action: Action
@@ -1029,6 +1143,9 @@ function connectionsReducer(
         configStale: false,
         configStaleKind: null,
         configStaleDismissed: false,
+        backgroundOutstanding: 0,
+        backgroundSettleSyncingSince: null,
+        outOfTurnToolCalls: null,
       })
       return next
     }
@@ -1082,6 +1199,9 @@ function connectionsReducer(
         configStale: false,
         configStaleKind: null,
         configStaleDismissed: false,
+        backgroundOutstanding: 0,
+        backgroundSettleSyncingSince: null,
+        outOfTurnToolCalls: null,
       })
       return next
     }
@@ -1183,6 +1303,10 @@ function connectionsReducer(
         // preserved via `...current`.
         configStale: action.patch.configStale,
         configStaleKind: action.patch.configStaleKind,
+        // Current-state field like `status`: a client attaching mid-episode
+        // recovers the pending-background count the one-shot events won't
+        // replay for it (sweep exemption + chip).
+        backgroundOutstanding: action.patch.backgroundOutstanding,
         lastAppliedSeq: action.patch.eventSeq,
       })
       return next
@@ -1236,6 +1360,9 @@ function connectionsReducer(
         updated.pendingQuestion = null
         updated.claudeApiRetry = null
         updated.error = null
+        // The out-of-turn window ended: its tool-call contexts (kept only for
+        // background permission enrichment) are stale for the new turn.
+        updated.outOfTurnToolCalls = null
       } else if (conn.status === "prompting") {
         // Prompt cycle ended: clear in-flight Claude API retry banner.
         updated.claudeApiRetry = null
@@ -1245,6 +1372,35 @@ function connectionsReducer(
         updated.pendingAskQuestion = null
       }
       next.set(action.contextKey, updated)
+      return next
+    }
+
+    case "SET_BACKGROUND_OUTSTANDING": {
+      const conn = state.get(action.contextKey)
+      if (!conn) return state
+      // Settle-syncing bridge: a settlement means the agent's reaction turn
+      // is being generated (the task-notification always triggers one) — arm
+      // the indicator. The first turns-only event is that reaction arriving —
+      // disarm. An event carrying BOTH (reaction to task A + settlement of
+      // task B) re-arms: another reaction is still pending.
+      const syncingSince =
+        action.settledCount > 0
+          ? Date.now()
+          : action.turnsCount > 0
+            ? null
+            : conn.backgroundSettleSyncingSince
+      if (
+        conn.backgroundOutstanding === action.outstanding &&
+        conn.backgroundSettleSyncingSince === syncingSince
+      ) {
+        return state
+      }
+      const next = new Map(state)
+      next.set(action.contextKey, {
+        ...conn,
+        backgroundOutstanding: action.outstanding,
+        backgroundSettleSyncingSince: syncingSince,
+      })
       return next
     }
 
@@ -1300,6 +1456,31 @@ function connectionsReducer(
     case "TOOL_CALL": {
       const conn = state.get(action.contextKey)
       if (!conn) return state
+      // Out-of-turn wire tool activity stays OUT of `liveMessage` (the
+      // transcript overlay renders that content — grafting it here recreated
+      // the garbled-timeline bug), but its context is still recorded so a
+      // background permission request can render command/diff details.
+      if (conn.status !== "prompting") {
+        const next = new Map(state)
+        next.set(action.contextKey, {
+          ...conn,
+          outOfTurnToolCalls: recordOutOfTurnToolCall(conn.outOfTurnToolCalls, {
+            tool_call_id: action.tool_call_id,
+            title: action.title,
+            kind: action.kind,
+            status: action.status,
+            content: action.content,
+            raw_input: action.raw_input,
+            raw_output_chunks:
+              action.raw_output !== null ? [action.raw_output] : [],
+            raw_output_total_bytes: action.raw_output?.length ?? 0,
+            locations: action.locations,
+            meta: action.meta,
+            images: action.images ?? [],
+          }),
+        })
+        return next
+      }
       const prev = ensureLiveMessage(conn.liveMessage)
       const existingIndex = prev.content.findIndex(
         (b) =>
@@ -1377,6 +1558,51 @@ function connectionsReducer(
     case "TOOL_CALL_UPDATE": {
       const conn = state.get(action.contextKey)
       if (!conn) return state
+      // Out-of-turn: stay out of `liveMessage` (see TOOL_CALL), but merge the
+      // registry entry and backfill an open permission dialog waiting for
+      // this tool's input — a background permission must still show its
+      // command/diff details. In-turn ordering is safe: the panel flushes
+      // pending tool-call updates at turn_complete BEFORE status flips back.
+      if (conn.status !== "prompting") {
+        const existing = conn.outOfTurnToolCalls?.get(action.tool_call_id)
+        const merged: ToolCallInfo = existing
+          ? {
+              ...existing,
+              title: action.title ?? existing.title,
+              status: action.status ?? existing.status,
+              content: action.content ?? existing.content,
+              raw_input: action.raw_input ?? existing.raw_input,
+              locations: action.locations ?? existing.locations,
+              meta: action.meta ?? existing.meta,
+              images: action.images !== null ? action.images : existing.images,
+            }
+          : {
+              tool_call_id: action.tool_call_id,
+              title: action.title ?? action.fallback_title,
+              kind: action.fallback_kind,
+              status: action.status ?? "pending",
+              content: action.content,
+              raw_input: action.raw_input,
+              raw_output_chunks: [],
+              raw_output_total_bytes: 0,
+              locations: action.locations,
+              meta: action.meta,
+              images: action.images ?? [],
+            }
+        const next = new Map(state)
+        next.set(action.contextKey, {
+          ...conn,
+          outOfTurnToolCalls: recordOutOfTurnToolCall(
+            conn.outOfTurnToolCalls,
+            merged
+          ),
+          pendingPermission: mergePendingPermissionWithLiveInfo(
+            conn.pendingPermission,
+            merged
+          ),
+        })
+        return next
+      }
       const prev = ensureLiveMessage(conn.liveMessage)
       const existingIndex = prev.content.findIndex(
         (b) =>
@@ -1502,9 +1728,16 @@ function connectionsReducer(
       if (!conn) return state
       let updatedLiveMessage = conn.liveMessage
       const permissionCallId = extractPermissionToolCallId(action.tool_call)
-      const existingInfo = updatedLiveMessage
-        ? findLiveToolCallInfo(updatedLiveMessage.content, permissionCallId)
-        : null
+      // Live tool context first; for an OUT-OF-TURN permission (background
+      // sub-agent work — liveMessage intentionally untouched) fall back to
+      // the out-of-turn registry so the dialog still shows command/diff.
+      const existingInfo =
+        (updatedLiveMessage
+          ? findLiveToolCallInfo(updatedLiveMessage.content, permissionCallId)
+          : null) ??
+        (permissionCallId
+          ? (conn.outOfTurnToolCalls?.get(permissionCallId) ?? null)
+          : null)
       const permissionToolCall = mergePermissionToolCallWithLiveInfo(
         action.tool_call,
         existingInfo
@@ -1811,6 +2044,8 @@ function connectionsReducer(
     case "PLAN_UPDATE": {
       const conn = state.get(action.contextKey)
       if (!conn) return state
+      // Same out-of-turn guard as TOOL_CALL / streaming deltas.
+      if (conn.status !== "prompting") return state
       const prev = ensureLiveMessage(conn.liveMessage)
       const nonPlanContent = prev.content.filter(
         (block) => block.type !== "plan"
@@ -2698,6 +2933,97 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             questionId: e.question_id,
           })
           break
+        case "background_activity": {
+          // Out-of-turn transcript activity from the backend watcher: async
+          // task completions, the agent's continued work after them, cron//
+          // loop turns. Three consumers:
+          // 1. the outstanding mirror (idle-sweep exemption + chip) plus the
+          //    settle-syncing bridge inputs;
+          dispatch({
+            type: "SET_BACKGROUND_OUTSTANDING",
+            contextKey,
+            outstanding: e.outstanding,
+            settledCount: e.settled?.length ?? 0,
+            turnsCount: e.turns?.length ?? 0,
+          })
+          // 2. overlay turns → the conversation runtime store (resolved via
+          //    the external-id index; unresolved = this conversation was never
+          //    opened in this client, and its cold detail fetch covers it);
+          if (e.turns && e.turns.length > 0) {
+            const conversationId = getConversationIdByExternalIdFromStore(
+              e.session_id
+            )
+            if (conversationId != null) {
+              const runtime = useConversationRuntimeStore.getState()
+              runtime.actions.applyBackgroundActivity(
+                conversationId,
+                e.turns,
+                e.watermark
+              )
+              // Self-healing bound: cron//loop turns never settle, so nothing
+              // else would ever refetch — the overlay would grow for as long
+              // as the tab stays open. Past the threshold, fold what's
+              // accumulated into persisted turns (the watermark rule retires
+              // covered entries). Guarded by the in-flight flag and a
+              // per-conversation interval so a failing backend can't turn
+              // this into a 1Hz fetch loop.
+              const session = useConversationRuntimeStore
+                .getState()
+                .byConversationId.get(conversationId)
+              const now = Date.now()
+              const lastAt = overlayFoldRefetchAt.get(conversationId) ?? 0
+              if (
+                session &&
+                session.backgroundTurns.length > OVERLAY_FOLD_THRESHOLD &&
+                !session.detailLoading &&
+                now - lastAt > OVERLAY_FOLD_MIN_INTERVAL_MS
+              ) {
+                overlayFoldRefetchAt.set(conversationId, now)
+                const oc = storeRef.current.connections.get(contextKey)
+                runtime.actions.refetchDetail(conversationId, {
+                  preserveLive: oc?.status === "prompting",
+                })
+              }
+            }
+          }
+          // 3. one OS notification per settled task (matches the permission
+          //    notification's shape; `document.hidden` gating lives inside
+          //    sendSystemNotification).
+          if (e.settled && e.settled.length > 0) {
+            const nc = storeRef.current.connections.get(contextKey)
+            const agentLabel = nc ? AGENT_LABELS[nc.agentType] : "Agent"
+            const fn = folderNameRef.current
+            const title = fn ? `${fn} - Codeg` : "Codeg"
+            for (const settled of e.settled) {
+              const body =
+                settled.summary ??
+                tChat("backgroundTasks.settledFallback", {
+                  status: settled.status,
+                })
+              sendSystemNotification(title, `${agentLabel}: ${body}`).catch(
+                () => {}
+              )
+            }
+            // 4. fold the settlement into persisted turns: a refetch flips
+            //    the launching card from "result pending" to its terminal
+            //    state (the parser joins the ack with the notification) and
+            //    retires covered overlay turns via the watermark rule. Rare
+            //    (once per task settling), so a full detail parse is fine.
+            //    preserveLive while a foreground turn is in flight so the
+            //    refetch can't clobber the streaming buffers it races.
+            const conversationId = getConversationIdByExternalIdFromStore(
+              e.session_id
+            )
+            if (conversationId != null) {
+              useConversationRuntimeStore
+                .getState()
+                .actions.refetchDetail(conversationId, {
+                  preserveLive: nc?.status === "prompting",
+                })
+            }
+          }
+          break
+        }
         case "permission_request":
           flushStreamingQueue()
           flushPendingToolCallUpdates()
@@ -3347,6 +3673,12 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         // would kill another client's agent. The viewer is torn down when its
         // tab unmounts (disconnect's isViewer branch detaches it).
         if (conn.isViewer) continue
+        // Launched-but-unresolved background work (async sub-agent /
+        // background shell): disconnecting would kill the agent CLI and the
+        // background task with it. The backend watcher settles or max-age
+        // expires the accounting and emits `outstanding: 0`, which re-arms
+        // this sweep for the connection.
+        if (conn.backgroundOutstanding > 0) continue
         const lastActive = lastActivityRef.current.get(contextKey) ?? 0
         if (now - lastActive > CONNECTION_IDLE_TIMEOUT_MS) {
           toDisconnect.push({

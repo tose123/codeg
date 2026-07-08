@@ -221,6 +221,7 @@ impl OpenCodeParser {
             summary,
             turns,
             session_stats,
+            transcript_watermark: None,
         })
     }
 

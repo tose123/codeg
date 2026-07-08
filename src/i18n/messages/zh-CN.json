@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value} 小时",
         "elapsedMinutes": "{value} 分钟",
         "elapsedSeconds": "{value} 秒",
-        "toolUseCount": "{count} 个工具 {count, plural, one {use} other {uses}}"
+        "toolUseCount": "{count} 次工具调用"
       },
       "tool": {
         "parameters": "参数",
@@ -2546,6 +2546,16 @@
         "opWait": "获取子智能体结果",
         "opClose": "结束子智能体",
         "opResume": "恢复子智能体"
+      },
+      "backgroundTasks": {
+        "running": "{count} 个后台任务运行中",
+        "settling": "正在同步后台结果…",
+        "settledFallback": "后台任务已结束（{status}）",
+        "cardRunning": "后台运行中",
+        "cardLaunchedPending": "已启动后台任务",
+        "cardCompleted": "后台任务已完成",
+        "cardFinishedWithStatus": "后台任务已结束（{status}）",
+        "cardResultPending": "结果尚未返回"
       }
     },
     "diffPreview": {

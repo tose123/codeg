@@ -299,7 +299,12 @@ impl WatchEventBatch {
         !self.overflowed && self.changed_paths.is_empty()
     }
 
-    fn ingest_event(&mut self, root_canonical: &Path, event: notify::Event) {
+    fn ingest_event(
+        &mut self,
+        root_canonical: &Path,
+        git_watch_dirs: &[GitWatchDir],
+        event: notify::Event,
+    ) {
         if !should_emit_watch_event(&event.kind) {
             return;
         }
@@ -310,19 +315,9 @@ impl WatchEventBatch {
 
         let mut has_relevant_path = false;
         for path in event.paths {
-            if is_ignored_watch_path(&path, root_canonical) {
+            let Some(relative) = classify_watch_path(&path, root_canonical, git_watch_dirs) else {
                 continue;
-            }
-
-            let relative = if let Ok(relative) = path.strip_prefix(root_canonical) {
-                normalize_slash_path(relative)
-            } else {
-                normalize_slash_path(&path)
             };
-
-            if relative.is_empty() {
-                continue;
-            }
 
             self.changed_paths.insert(relative);
             has_relevant_path = true;
@@ -347,10 +342,15 @@ impl WatchEventBatch {
     fn kind(&self, root_canonical: &Path) -> String {
         let has_missing_path = !self.has_remove
             && !self.overflowed
-            && self
-                .changed_paths
-                .iter()
-                .any(|p| !root_canonical.join(p).exists());
+            && self.changed_paths.iter().any(|p| {
+                // Synthetic `.git/*` entries (a linked worktree's external
+                // metadata, mapped in via `classify_watch_path`) resolve to
+                // nothing under the working dir, so probing `root/join` would
+                // always report "missing" and misclassify a metadata modify as
+                // a remove → a spurious tree scan. They never denote a
+                // working-tree structural change, so exclude them.
+                !p.starts_with(".git/") && p.as_str() != ".git" && !root_canonical.join(p).exists()
+            });
 
         if self.has_remove || has_missing_path {
             "remove".to_string()
@@ -613,6 +613,159 @@ fn is_ignored_watch_path(path: &Path, root: &Path) -> bool {
             .iter()
             .any(|ignored| *ignored == component_name.as_ref())
     })
+}
+
+/// A directory outside the working tree that holds git metadata for a linked
+/// worktree, paired with the logical `.git`-relative prefix its contents map
+/// onto. An event under `path` becomes `<logical_base>/<rel>` and then flows
+/// through [`is_allowed_git_watch_path`] exactly like a normal repo's in-tree
+/// `.git`, so the same subset of metadata files drives a git-status refresh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitWatchDir {
+    path: PathBuf,
+    logical_base: &'static str,
+}
+
+/// Resolve a raw watched path to the root-relative form recorded in a batch, or
+/// `None` when the path should be dropped.
+///
+/// - Paths under the working directory map to their real relative path, minus
+///   ignored dirs and disallowed `.git` entries (unchanged behavior).
+/// - Paths under one of a linked worktree's external git-metadata dirs
+///   (`git_watch_dirs`, which live OUTSIDE the working directory — see
+///   [`resolve_worktree_git_watch_dirs`]) map to a synthetic
+///   `<logical_base>/<rel>` and are kept only when [`is_allowed_git_watch_path`]
+///   accepts them. This routes a worktree's external `index`/`HEAD`/`ORIG_HEAD`
+///   (private dir) and branch-ref moves (shared `refs`) through the exact same
+///   metadata filter and git-status refresh path as a normal repo's in-tree
+///   `.git`, so stage/commit/checkout/reset/ref-move all refresh status just
+///   like they do in a plain checkout.
+/// - Anything else (not under any watched root) is dropped.
+fn classify_watch_path(
+    path: &Path,
+    root_canonical: &Path,
+    git_watch_dirs: &[GitWatchDir],
+) -> Option<String> {
+    if let Ok(relative) = path.strip_prefix(root_canonical) {
+        if is_ignored_watch_path(path, root_canonical) {
+            return None;
+        }
+        let normalized = normalize_slash_path(relative);
+        if normalized.is_empty() {
+            return None;
+        }
+        return Some(normalized);
+    }
+
+    // Watched dirs are disjoint, so at most one strips; that match settles the
+    // classification (an allowed metadata file → synthetic path, otherwise drop).
+    for dir in git_watch_dirs {
+        let Ok(relative) = path.strip_prefix(&dir.path) else {
+            continue;
+        };
+        let normalized = normalize_slash_path(relative);
+        if normalized.is_empty() {
+            return None;
+        }
+        let synthetic = format!("{}/{normalized}", dir.logical_base);
+        if !is_allowed_git_watch_path(Path::new(&synthetic)) {
+            return None;
+        }
+        return Some(synthetic);
+    }
+    None
+}
+
+/// External git-metadata dirs to watch for a linked worktree so its git status
+/// refreshes on stage/commit/checkout/reset/ref-move — none of which touch the
+/// working directory the recursive root watch covers.
+///
+/// A linked worktree keeps its mutable per-checkout metadata (`index`, `HEAD`,
+/// `ORIG_HEAD`) in a PRIVATE dir at `<main>/.git/worktrees/<name>`, and its
+/// branch refs in the SHARED `<main>/.git/refs` (a bare `update-ref` /
+/// `reset --soft` moves the current branch there without touching the private
+/// dir). Both are bounded — neither contains `objects/` — so recursively
+/// watching them is cheap and safe across platforms.
+///
+/// Returns empty for a normal repo (`.git` is a directory the root watch
+/// already covers), when `.git` is absent/unreadable, and for submodules /
+/// other gitlinks: their `.git` file points at a FULL repository containing
+/// `objects/`, which is costly to recursively watch and out of scope here. The
+/// linked-worktree signature is the `commondir` file git writes into the
+/// private dir; a submodule's git dir has none. Returned paths are canonicalized
+/// to match the symlink-resolved paths `notify` reports, so `strip_prefix` in
+/// [`classify_watch_path`] lines up.
+fn resolve_worktree_git_watch_dirs(root_canonical: &Path) -> Vec<GitWatchDir> {
+    let dot_git = root_canonical.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+        return Vec::new();
+    };
+    // A normal repo's `.git` is a directory the root watch already covers.
+    if !meta.file_type().is_file() {
+        return Vec::new();
+    }
+
+    // Linked worktrees (and submodules) store `.git` as a text file
+    // `gitdir: <path>` pointing at the real metadata directory.
+    let Ok(contents) = std::fs::read_to_string(&dot_git) else {
+        return Vec::new();
+    };
+    let Some(raw) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Vec::new();
+    };
+    let private = PathBuf::from(raw);
+    let private = if private.is_absolute() {
+        private
+    } else {
+        root_canonical.join(private)
+    };
+    let Ok(private) = std::fs::canonicalize(&private) else {
+        return Vec::new();
+    };
+    // A git dir nested inside the working tree is already watched by the root.
+    if private.starts_with(root_canonical) {
+        return Vec::new();
+    }
+
+    // `commondir` is git's linked-worktree signature; its absence means a
+    // submodule / plain gitlink (a full repo with `objects/`) — out of scope.
+    let Ok(commondir_raw) = std::fs::read_to_string(private.join("commondir")) else {
+        return Vec::new();
+    };
+    let commondir_raw = commondir_raw.trim();
+    if commondir_raw.is_empty() {
+        return Vec::new();
+    }
+
+    let mut dirs = vec![GitWatchDir {
+        path: private.clone(),
+        logical_base: ".git",
+    }];
+
+    // Shared refs move on commit/reset/update-ref without touching the private
+    // dir; watch `<common>/refs` (bounded — no `objects/`) so those refresh too.
+    let common = PathBuf::from(commondir_raw);
+    let common = if common.is_absolute() {
+        common
+    } else {
+        private.join(common)
+    };
+    if let Ok(common_refs) = std::fs::canonicalize(common.join("refs")) {
+        // Skip if it somehow lands inside an already-watched root.
+        if !common_refs.starts_with(root_canonical) && !common_refs.starts_with(&private) {
+            dirs.push(GitWatchDir {
+                path: common_refs,
+                logical_base: ".git/refs",
+            });
+        }
+    }
+
+    dirs
 }
 
 fn should_emit_watch_event(kind: &EventKind) -> bool {
@@ -895,6 +1048,7 @@ async fn flush_watch_batch(
     emit_event(emitter, "folder://workspace-state-event", event);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_workspace_watch_event_loop(
     mut event_rx: mpsc::Receiver<notify::Event>,
     dropped_events: Arc<AtomicBool>,
@@ -902,8 +1056,10 @@ async fn run_workspace_watch_event_loop(
     emitter: EventEmitter,
     root_display: String,
     root_canonical: PathBuf,
+    git_watch_dirs: Vec<GitWatchDir>,
     full_subscribers: Arc<AtomicUsize>,
 ) {
+    let git_watch_dirs = git_watch_dirs.as_slice();
     let debounce = Duration::from_millis(WATCH_DEBOUNCE_MS);
     let max_batch_window = Duration::from_millis(WATCH_MAX_BATCH_WINDOW_MS);
     let mut batch = WatchEventBatch::default();
@@ -920,7 +1076,7 @@ async fn run_workspace_watch_event_loop(
         if batch.is_empty() {
             match event_rx.recv().await {
                 Some(event) => {
-                    batch.ingest_event(&root_canonical, event);
+                    batch.ingest_event(&root_canonical, git_watch_dirs, event);
                     if !batch.is_empty() {
                         batch_started_at = Some(Instant::now());
                     }
@@ -930,7 +1086,7 @@ async fn run_workspace_watch_event_loop(
         } else {
             match tokio::time::timeout(debounce, event_rx.recv()).await {
                 Ok(Some(event)) => {
-                    batch.ingest_event(&root_canonical, event);
+                    batch.ingest_event(&root_canonical, git_watch_dirs, event);
                 }
                 Ok(None) => {
                     flush_watch_batch(
@@ -962,7 +1118,7 @@ async fn run_workspace_watch_event_loop(
         }
 
         while let Ok(next_event) = event_rx.try_recv() {
-            batch.ingest_event(&root_canonical, next_event);
+            batch.ingest_event(&root_canonical, git_watch_dirs, next_event);
         }
 
         if dropped_events.swap(false, Ordering::AcqRel) {
@@ -1123,6 +1279,17 @@ pub async fn start_workspace_state_stream_core(
     // paths-only stream (file-tab watching) skips them entirely and holds
     // empty tree/git snapshots until a full subscriber upgrades it.
     let initial_is_git_repo = is_git_repo(&root_canonical);
+    // A linked worktree's mutable git metadata (index/HEAD in a private dir,
+    // branch refs in the shared refs dir) lives OUTSIDE the working dir, so the
+    // recursive root watch below never sees a commit / stage / checkout /
+    // ref-move there. Resolve those external dirs now so we can add extra
+    // watches and map their events back onto this root (see
+    // `classify_watch_path`). Empty for a normal repo (already covered).
+    let git_watch_dirs = if initial_is_git_repo {
+        resolve_worktree_git_watch_dirs(&root_canonical)
+    } else {
+        Vec::new()
+    };
     let initial_tree = if wants_tree_git {
         folders::get_file_tree(root_path.clone(), Some(WORKSPACE_TREE_MAX_DEPTH))
             .await
@@ -1151,6 +1318,7 @@ pub async fn start_workspace_state_stream_core(
     let emitter_for_task = emitter.clone();
     let root_display_for_task = root_path.clone();
     let root_canonical_for_task = root_canonical.clone();
+    let git_watch_dirs_for_task = git_watch_dirs.clone();
     let dropped_events_for_task = Arc::clone(&dropped_events);
     let full_subscribers_for_task = Arc::clone(&full_subscribers);
     let mut task = Some(tokio::spawn(async move {
@@ -1161,6 +1329,7 @@ pub async fn start_workspace_state_stream_core(
             emitter_for_task,
             root_display_for_task,
             root_canonical_for_task,
+            git_watch_dirs_for_task,
             full_subscribers_for_task,
         )
         .await;
@@ -1210,6 +1379,24 @@ pub async fn start_workspace_state_stream_core(
         }
         if let Ok(mut guard) = state.lock() {
             guard.degraded = true;
+        }
+    } else if let Some(active_watcher) = watcher.as_mut() {
+        // Root watch is live; also watch the linked worktree's external git
+        // metadata dirs (private index/HEAD + shared refs) so commit / stage /
+        // checkout / ref-move refresh git status. Best-effort per dir: a failure
+        // only loses that refresh path (working-tree edits still update), so we
+        // log and keep the stream healthy rather than degrading it. Cleanup
+        // rides on the watcher's Drop, which unwatches every registered path —
+        // no separate bookkeeping needed.
+        for dir in &git_watch_dirs {
+            if let Err(err) = active_watcher.watch(&dir.path, RecursiveMode::Recursive) {
+                tracing::info!(
+                    "[workspace-state-watch] worktree git-dir watch failed for {} ({}): {}",
+                    root_path,
+                    dir.path.display(),
+                    err
+                );
+            }
         }
     }
 
@@ -1841,5 +2028,204 @@ mod tests {
             git_slot.payload.as_slice(),
             [WorkspaceDelta::GitReplace { .. }]
         ));
+    }
+
+    // ── Linked-worktree git-status watch coverage ───────────────────────────
+
+    fn modify_event(path: PathBuf) -> notify::Event {
+        notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(path)
+    }
+
+    fn private_dir(path: &str) -> GitWatchDir {
+        GitWatchDir {
+            path: PathBuf::from(path),
+            logical_base: ".git",
+        }
+    }
+
+    fn common_refs_dir(path: &str) -> GitWatchDir {
+        GitWatchDir {
+            path: PathBuf::from(path),
+            logical_base: ".git/refs",
+        }
+    }
+
+    /// Build a fake linked-worktree layout under `root`, returning
+    /// `(worktree_working_dir, private_git_dir, common_refs_dir)` (all
+    /// canonicalized). Mirrors real git: `<wt>/.git` is a FILE pointing at the
+    /// private dir, which carries a `commondir` file pointing at the shared
+    /// `.git`.
+    fn make_worktree_layout(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let common = root.join("main/.git");
+        std::fs::create_dir_all(common.join("refs/heads")).expect("common refs");
+        let private = common.join("worktrees/wt");
+        std::fs::create_dir_all(&private).expect("private dir");
+        // `../..` from `<common>/worktrees/wt` resolves back to `<common>`.
+        std::fs::write(private.join("commondir"), "../..\n").expect("commondir");
+
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let private_canon = std::fs::canonicalize(&private).expect("canon private");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", private_canon.display()),
+        )
+        .expect("gitdir pointer");
+
+        (
+            std::fs::canonicalize(&worktree).expect("canon worktree"),
+            private_canon,
+            std::fs::canonicalize(common.join("refs")).expect("canon common refs"),
+        )
+    }
+
+    #[test]
+    fn resolve_worktree_git_watch_dirs_returns_private_and_common_refs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        let (worktree, private, common_refs) = make_worktree_layout(&root);
+
+        let dirs = resolve_worktree_git_watch_dirs(&worktree);
+        assert_eq!(
+            dirs,
+            vec![
+                GitWatchDir {
+                    path: private,
+                    logical_base: ".git",
+                },
+                GitWatchDir {
+                    path: common_refs,
+                    logical_base: ".git/refs",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_worktree_git_watch_dirs_is_empty_for_normal_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        // A normal repo: `.git` is a directory, already covered by the root watch.
+        std::fs::create_dir_all(root.join(".git")).expect("create .git dir");
+        assert!(resolve_worktree_git_watch_dirs(&root).is_empty());
+    }
+
+    #[test]
+    fn resolve_worktree_git_watch_dirs_is_empty_without_dot_git() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+        assert!(resolve_worktree_git_watch_dirs(&root).is_empty());
+    }
+
+    #[test]
+    fn resolve_worktree_git_watch_dirs_excludes_submodule() {
+        // A submodule's `.git` file points at a full repo dir with NO
+        // `commondir` marker (and its own `objects/`), so it must be excluded to
+        // avoid recursively watching an object store.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize root");
+
+        let module_git = root.join("super/.git/modules/sub");
+        std::fs::create_dir_all(module_git.join("objects")).expect("module objects");
+        let module_git = std::fs::canonicalize(&module_git).expect("canon module git");
+
+        let submodule = root.join("sub");
+        std::fs::create_dir_all(&submodule).expect("submodule dir");
+        std::fs::write(
+            submodule.join(".git"),
+            format!("gitdir: {}\n", module_git.display()),
+        )
+        .expect("gitdir pointer");
+        let submodule = std::fs::canonicalize(&submodule).expect("canon submodule");
+
+        assert!(resolve_worktree_git_watch_dirs(&submodule).is_empty());
+    }
+
+    #[test]
+    fn classify_watch_path_maps_private_metadata_to_synthetic_dot_git() {
+        let root = Path::new("/ws/wt");
+        let dirs = [private_dir("/ws/main/.git/worktrees/wt")];
+        let git_dir = &dirs[0].path;
+
+        // Metadata that changes on commit/stage/reset → refresh-worthy.
+        for name in ["index", "HEAD", "ORIG_HEAD"] {
+            assert_eq!(
+                classify_watch_path(&git_dir.join(name), root, &dirs),
+                Some(format!(".git/{name}")),
+                "{name} should map to a synthetic .git path"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_watch_path_maps_common_ref_move_to_synthetic_refs() {
+        // A bare `update-ref` / `reset --soft` moves the current branch ref in
+        // the SHARED refs dir without touching the private dir — must refresh.
+        let root = Path::new("/ws/wt");
+        let dirs = [
+            private_dir("/ws/main/.git/worktrees/wt"),
+            common_refs_dir("/ws/main/.git/refs"),
+        ];
+        assert_eq!(
+            classify_watch_path(Path::new("/ws/main/.git/refs/heads/feature"), root, &dirs),
+            Some(".git/refs/heads/feature".to_string())
+        );
+        // Tags don't affect working-tree status → filtered (same as normal repo).
+        assert_eq!(
+            classify_watch_path(Path::new("/ws/main/.git/refs/tags/v1"), root, &dirs),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_watch_path_drops_irrelevant_worktree_git_dir_events() {
+        let root = Path::new("/ws/wt");
+        let dirs = [private_dir("/ws/main/.git/worktrees/wt")];
+        let git_dir = &dirs[0].path;
+
+        // Lock churn and reflog are noise — must not trigger a refresh.
+        for rel in ["index.lock", "logs/HEAD", "COMMIT_EDITMSG"] {
+            assert_eq!(
+                classify_watch_path(&git_dir.join(rel), root, &dirs),
+                None,
+                "{rel} should be filtered out"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_watch_path_working_tree_edit_stays_relative() {
+        let root = Path::new("/ws/wt");
+        let dirs = [private_dir("/ws/main/.git/worktrees/wt")];
+        assert_eq!(
+            classify_watch_path(&root.join("src/app.rs"), root, &dirs),
+            Some("src/app.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_watch_path_ignores_paths_outside_all_roots() {
+        let root = Path::new("/ws/wt");
+        let dirs = [private_dir("/ws/main/.git/worktrees/wt")];
+        let git_dir = &dirs[0].path;
+        assert_eq!(
+            classify_watch_path(Path::new("/somewhere/else/x.rs"), root, &dirs),
+            None
+        );
+        // With no watch dirs, an external `.git` metadata path is not mapped.
+        assert_eq!(classify_watch_path(&git_dir.join("index"), root, &[]), None);
+    }
+
+    #[test]
+    fn ingest_worktree_git_event_records_synthetic_index_path() {
+        let root = Path::new("/ws/wt");
+        let dirs = [private_dir("/ws/main/.git/worktrees/wt")];
+        let git_dir = &dirs[0].path;
+        let mut batch = WatchEventBatch::default();
+        batch.ingest_event(root, &dirs, modify_event(git_dir.join("index")));
+        assert!(batch.changed_paths.contains(".git/index"));
+        // `.git/index` is git-metadata → drives a git-status refresh, exactly
+        // like a normal repo's in-tree `.git/index`.
+        assert!(is_git_metadata_rel_path(".git/index"));
     }
 }

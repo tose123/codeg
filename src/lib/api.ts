@@ -212,9 +212,23 @@ export interface ForkResult {
   siblingConversationId: number
 }
 
-export async function acpFork(connectionId: string): Promise<ForkResult> {
+export async function acpFork(
+  connectionId: string,
+  // Linkage for a conversation opened from history: its connection resumed via
+  // session_id but the row isn't bound to the connection until the first prompt
+  // fires, and a fork-send forks BEFORE that prompt. Passing these lets the
+  // backend adopt the row so the fork doesn't reject as unlinked. Ignored once
+  // the connection is already linked (a new-conversation-then-fork). See
+  // `ConnectionManager::fork_session`.
+  conversationId?: number | null,
+  folderId?: number | null
+): Promise<ForkResult> {
   try {
-    return await getTransport().call("acp_fork", { connectionId })
+    return await getTransport().call("acp_fork", {
+      connectionId,
+      conversationId: conversationId ?? null,
+      folderId: folderId ?? null,
+    })
   } catch (e) {
     // A fork is serialized with prompts on the backend: it returns
     // TurnInProgress while a turn is in flight. Surface it as TurnBusyError so

@@ -2274,7 +2274,7 @@
         "elapsedHours": "{value}時間",
         "elapsedMinutes": "{value}分",
         "elapsedSeconds": "{value}秒",
-        "toolUseCount": "{count} 個のツール {count, plural, one {use} other {uses}}"
+        "toolUseCount": "{count} 回のツール使用"
       },
       "tool": {
         "parameters": "パラメーター",
@@ -2546,6 +2546,16 @@
         "opWait": "サブエージェントの結果を取得中",
         "opClose": "サブエージェントを終了中",
         "opResume": "サブエージェントを再開中"
+      },
+      "backgroundTasks": {
+        "running": "{count} 件のバックグラウンドタスクを実行中",
+        "settling": "バックグラウンド結果を同期中…",
+        "settledFallback": "バックグラウンドタスクが終了しました（{status}）",
+        "cardRunning": "バックグラウンドで実行中",
+        "cardLaunchedPending": "バックグラウンドタスクを開始しました",
+        "cardCompleted": "バックグラウンドタスクが完了しました",
+        "cardFinishedWithStatus": "バックグラウンドタスクが終了しました（{status}）",
+        "cardResultPending": "結果はまだ返っていません"
       }
     },
     "diffPreview": {

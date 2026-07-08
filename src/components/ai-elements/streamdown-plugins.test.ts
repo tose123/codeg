@@ -51,6 +51,7 @@ vi.mock("@streamdown/mermaid", () => ({
 import {
   __resetStreamdownPluginsForTest,
   detectHeavyPlugins,
+  prefetchHeavyPlugins,
   useStreamdownPlugins,
 } from "./streamdown-plugins"
 
@@ -95,6 +96,47 @@ describe("detectHeavyPlugins", () => {
     expect(detectHeavyPlugins("``` mermaid\n```").mermaid).toBe(true)
     expect(detectHeavyPlugins("```js\nconst x=1\n```").mermaid).toBe(false)
     expect(detectHeavyPlugins("the word mermaid in prose").mermaid).toBe(false)
+  })
+})
+
+describe("prefetchHeavyPlugins", () => {
+  it("warms the code engine so a later consumer gets it on first render (no flash)", async () => {
+    prefetchHeavyPlugins(["code"])
+    // Flush the (mocked) dynamic import so the engine is cached before any
+    // consumer renders.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    // A code message mounting AFTER the warm-up gets the engine SYNCHRONOUSLY on
+    // its first render (no waitFor) — only possible if the prefetch loaded it off
+    // the render path.
+    const { result } = renderHook(() => useStreamdownPlugins("```\nx\n```"))
+    expect(result.current.code).toBeDefined()
+  })
+
+  it("warms only the requested engine, not the others", async () => {
+    prefetchHeavyPlugins(["code"])
+    await act(async () => {
+      await Promise.resolve()
+    })
+    // math was never requested ⇒ its engine factory is never invoked.
+    expect(mocks.createMathPlugin).not.toHaveBeenCalled()
+
+    const math = renderHook(() => useStreamdownPlugins("energy $E=mc^2$"))
+    await waitFor(() => expect(math.result.current.math).toBeDefined())
+    const code = renderHook(() => useStreamdownPlugins("```\nx\n```"))
+    // code was prefetched ⇒ available immediately, no waitFor needed.
+    expect(code.result.current.code).toBeDefined()
+  })
+
+  it("is idempotent — repeated calls don't re-load", async () => {
+    prefetchHeavyPlugins(["code"])
+    prefetchHeavyPlugins(["code"])
+    const { result } = renderHook(() => useStreamdownPlugins("```\nx\n```"))
+    await waitFor(() => expect(result.current.code).toBeDefined())
+    // Serving a second consumer stays synchronous (single cached engine).
+    const second = renderHook(() => useStreamdownPlugins("```\ny\n```"))
+    expect(second.result.current.code).toBeDefined()
   })
 })
 

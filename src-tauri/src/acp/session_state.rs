@@ -210,6 +210,13 @@ pub struct SessionState {
     pub connection_id: String,
     pub conversation_id: Option<i32>,
     pub external_id: Option<String>,
+    /// Wall-clock instant `external_id` last CHANGED value (SessionStarted
+    /// for a new/loaded/forked session). The transcript watcher uses this as
+    /// its re-arm epoch: records appended to the (forked) transcript between
+    /// the session change and the watcher's next poll tick must still count
+    /// as this session's — an epoch taken at the tick itself would classify
+    /// them as copied history and drop them.
+    pub external_id_changed_at: Option<std::time::SystemTime>,
     pub agent_type: AgentType,
     pub working_dir: Option<PathBuf>,
     pub owner_window_label: String,
@@ -250,6 +257,21 @@ pub struct SessionState {
     /// pending notes the one-shot `FeedbackSubmitted` event won't replay for it.
     /// Size is human-bounded (one entry per note the user types this turn).
     pub feedback: Vec<FeedbackItem>,
+
+    /// Launched-but-unresolved background tasks (async sub-agents + background
+    /// shell tasks), mirrored from the transcript watcher's authoritative
+    /// accounting via `AcpEvent::BackgroundActivity` (`apply_event` is the only
+    /// writer). Drives `has_active_background_work()` — the idle-sweep
+    /// exemption that keeps the agent CLI alive through a silent background
+    /// build (killing the connection kills the CLI, and the background work
+    /// dies with it). Carried on `to_snapshot()` so a client attaching
+    /// mid-episode recovers the pending count without replaying events.
+    pub background_outstanding: u32,
+    /// Instant of the most recent `BackgroundActivity` event. Bounds the sweep
+    /// exemption: if the watcher stops reporting (task died, bug) the
+    /// exemption lapses after `background_keepalive_max_age()` instead of
+    /// pinning the connection alive forever. Backend-internal; not serialized.
+    pub background_activity_at: Option<DateTime<Utc>>,
 
     // ACP 协商出的能力
     pub modes: Option<SessionModeStateInfo>,
@@ -382,6 +404,7 @@ impl SessionState {
             connection_id,
             conversation_id: None,
             external_id: None,
+            external_id_changed_at: None,
             agent_type,
             working_dir,
             owner_window_label,
@@ -393,6 +416,8 @@ impl SessionState {
             pending_question: None,
             active_delegations: BTreeMap::new(),
             feedback: Vec::new(),
+            background_outstanding: 0,
+            background_activity_at: None,
             modes: None,
             current_mode: None,
             config_options: None,
@@ -461,6 +486,9 @@ impl SessionState {
     pub fn apply_event(&mut self, payload: &AcpEvent) {
         match payload {
             AcpEvent::SessionStarted { session_id } => {
+                if self.external_id.as_deref() != Some(session_id.as_str()) {
+                    self.external_id_changed_at = Some(std::time::SystemTime::now());
+                }
                 self.external_id = Some(session_id.clone());
                 self.status = ConnectionStatus::Connected;
                 // Fire the dedup waiter (if any). Take()-and-send is
@@ -816,6 +844,15 @@ impl SessionState {
                     }
                 }
             }
+            AcpEvent::BackgroundActivity { outstanding, .. } => {
+                // Mirror the watcher's authoritative accounting so the idle
+                // sweeps can exempt this connection while background work is
+                // pending. The turns/settled payloads are frontend-only; the
+                // trailing `last_activity_at = now` below additionally resets
+                // the backend idle timer on every batch of transcript activity.
+                self.background_outstanding = *outstanding;
+                self.background_activity_at = Some(Utc::now());
+            }
             AcpEvent::ClaudeSdkMessage { .. }
             | AcpEvent::SessionLoadFailed { .. }
             | AcpEvent::UserPromptSent { .. } => {
@@ -824,6 +861,27 @@ impl SessionState {
             }
         }
         self.last_activity_at = Utc::now();
+    }
+
+    /// Whether this connection has launched background work (async sub-agent /
+    /// background shell task) that hasn't settled yet — the idle sweeps must
+    /// not reap it (disconnecting drops the `sacp` connection, which
+    /// terminates the agent CLI process, which kills the background work).
+    ///
+    /// Bounded by `background_keepalive_max_age()`: the exemption requires a
+    /// `BackgroundActivity` event within the window, so a wedged/dead watcher
+    /// can't pin a connection alive forever. (The watcher itself also expires
+    /// tasks past the same age and emits `outstanding: 0`, which resets
+    /// `background_outstanding` here — this check is the belt to that
+    /// suspenders.)
+    pub fn has_active_background_work(&self, now: DateTime<Utc>) -> bool {
+        if self.background_outstanding == 0 {
+            return false;
+        }
+        match self.background_activity_at {
+            Some(at) => now.signed_duration_since(at) < background_keepalive_max_age(),
+            None => false,
+        }
     }
 
     /// A single-line "what the sub-agent is doing right now" hint, used by the
@@ -1075,6 +1133,7 @@ impl SessionState {
             pending_user_message: self.pending_user_message.clone(),
             active_delegations: self.active_delegations.values().cloned().collect(),
             feedback: self.feedback.clone(),
+            background_outstanding: self.background_outstanding,
             feedback_tool_available: self.feedback_tool_available,
             modes: self.modes.clone(),
             current_mode: self.current_mode.clone(),
@@ -1089,6 +1148,23 @@ impl SessionState {
             event_seq: self.event_seq,
         }
     }
+}
+
+/// Max age of the background keep-alive: how long a connection with
+/// launched-but-unresolved background work stays exempt from the idle sweeps
+/// after the LAST `BackgroundActivity` event. Configurable via
+/// `CODEG_ACP_BACKGROUND_KEEPALIVE_MAX_SECS` (seconds; invalid → default 3600;
+/// `0` disables the exemption entirely). Read once per process.
+pub(crate) fn background_keepalive_max_age() -> chrono::Duration {
+    static SECS: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    let secs = *SECS.get_or_init(|| {
+        std::env::var("CODEG_ACP_BACKGROUND_KEEPALIVE_MAX_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(3600)
+    });
+    chrono::Duration::seconds(secs)
 }
 
 /// `to_snapshot()` 的输出——前端可消费的 wire shape。
@@ -1127,6 +1203,14 @@ pub struct LiveSessionSnapshot {
     /// wire so every snapshot stays byte-identical with the pre-feature shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback: Vec<FeedbackItem>,
+    /// Launched-but-unresolved background tasks (see
+    /// `SessionState.background_outstanding`) — lets a client attaching
+    /// mid-episode (web reconnect, new window) recover the pending count the
+    /// one-shot `BackgroundActivity` events won't replay for it. `#[serde(
+    /// default)]` so older payloads deserialize to `0`; skipped when `0` so the
+    /// common no-background case keeps the wire shape byte-identical.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub background_outstanding: u32,
     /// Whether this agent has the `check_user_feedback` tool (see
     /// `SessionState.feedback_tool_available`). `#[serde(default)]` so older
     /// payloads deserialize to `false`; the frontend gates the feedback bar on
@@ -1153,6 +1237,11 @@ pub struct LiveSessionSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_stale_kind: Option<ConfigStaleKind>,
     pub event_seq: u64,
+}
+
+/// `skip_serializing_if` helper for `LiveSessionSnapshot.background_outstanding`.
+fn u32_is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// Last non-empty line of `s`, trimmed. `None` if every line is blank.
@@ -1253,6 +1342,62 @@ mod tests {
             "win-test".to_string(),
             None,
         )
+    }
+
+    #[test]
+    fn background_activity_mirrors_outstanding_and_gates_keepalive() {
+        let mut s = fresh_state();
+        assert!(!s.has_active_background_work(Utc::now()));
+
+        s.apply_event(&AcpEvent::BackgroundActivity {
+            session_id: "sid".into(),
+            turns: vec![],
+            outstanding: 2,
+            settled: vec![],
+            watermark: 42,
+        });
+        assert_eq!(s.background_outstanding, 2);
+        let now = Utc::now();
+        assert!(s.has_active_background_work(now));
+
+        // The exemption lapses once the last watcher heartbeat is older than
+        // the max age — a dead/wedged watcher can't pin a connection forever.
+        let long_after = now + background_keepalive_max_age() + chrono::Duration::seconds(1);
+        assert!(!s.has_active_background_work(long_after));
+
+        // Settled back to zero: no exemption regardless of recency.
+        s.apply_event(&AcpEvent::BackgroundActivity {
+            session_id: "sid".into(),
+            turns: vec![],
+            outstanding: 0,
+            settled: vec![],
+            watermark: 43,
+        });
+        assert!(!s.has_active_background_work(Utc::now()));
+    }
+
+    #[test]
+    fn snapshot_carries_background_outstanding_and_skips_zero_on_wire() {
+        let mut s = fresh_state();
+        s.apply_event(&AcpEvent::BackgroundActivity {
+            session_id: "sid".into(),
+            turns: vec![],
+            outstanding: 3,
+            settled: vec![],
+            watermark: 0,
+        });
+        assert_eq!(s.to_snapshot().background_outstanding, 3);
+        let json = serde_json::to_value(s.to_snapshot()).unwrap();
+        assert_eq!(
+            json.get("background_outstanding").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+
+        // Zero is skipped so the common no-background snapshot stays
+        // byte-identical with the pre-feature wire shape.
+        let zero = fresh_state();
+        let json = serde_json::to_value(zero.to_snapshot()).unwrap();
+        assert!(json.get("background_outstanding").is_none());
     }
 
     #[test]
