@@ -41,6 +41,8 @@ ENV CODEG_STATIC_DIR=/app/web
 ENV CODEG_DATA_DIR=/root/.local/share/codeg
 ENV CODEG_PORT=3080
 ENV CODEG_HOST=0.0.0.0
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 ENV SHELL=/bin/bash
 # In-place self-update markers: tells the running server it is a container
 # (for the post-upgrade "also pull the image" hint) and how long the
