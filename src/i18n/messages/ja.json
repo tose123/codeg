@@ -2883,7 +2883,7 @@
     "agentTypeRequired": "エージェントタイプを選択してください。",
     "agentTypeImmutableHint": "エージェントタイプは作成後に変更できません。",
     "model": "モデル",
-    "modelPlaceholderCodex": "gpt-5 / gpt-5-mini",
+    "modelPlaceholderCodex": "gpt-5.6-sol / gpt-5.5",
     "modelPlaceholderGemini": "gemini-3-pro-preview",
     "claudeMainModel": "メインモデル",
     "claudeReasoningModel": "推論モデル（思考）",

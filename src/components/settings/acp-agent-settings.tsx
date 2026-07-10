@@ -7370,7 +7370,7 @@ export function AcpAgentSettings() {
                               event.target.value
                             )
                           }}
-                          placeholder="gpt-5 / gpt-5-mini"
+                          placeholder="gpt-5.6-sol / gpt-5.5"
                         />
                       </div>
                     )}

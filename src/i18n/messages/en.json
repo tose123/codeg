@@ -2895,7 +2895,7 @@
     "agentTypeRequired": "Agent type is required.",
     "agentTypeImmutableHint": "Agent type cannot be changed after creation.",
     "model": "Model",
-    "modelPlaceholderCodex": "gpt-5 / gpt-5-mini",
+    "modelPlaceholderCodex": "gpt-5.6-sol / gpt-5.5",
     "modelPlaceholderGemini": "gemini-3-pro-preview",
     "claudeMainModel": "Main Model",
     "claudeReasoningModel": "Reasoning Model (thinking)",

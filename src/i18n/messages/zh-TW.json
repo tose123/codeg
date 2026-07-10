@@ -2883,7 +2883,7 @@
     "agentTypeRequired": "請選擇智能體類型。",
     "agentTypeImmutableHint": "智能體類型建立後不可修改。",
     "model": "模型",
-    "modelPlaceholderCodex": "gpt-5 / gpt-5-mini",
+    "modelPlaceholderCodex": "gpt-5.6-sol / gpt-5.5",
     "modelPlaceholderGemini": "gemini-3-pro-preview",
     "claudeMainModel": "主要模型",
     "claudeReasoningModel": "推理模型（思考）",

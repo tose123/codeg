@@ -338,8 +338,28 @@ pub async fn mcp_install_from_marketplace(
         }
     };
 
-    for app in &normalized_apps {
-        upsert_server_for_app(*app, &server_id, &canonical_spec)?;
+    let (hostable, excluded): (Vec<McpAppType>, Vec<McpAppType>) = normalized_apps
+        .iter()
+        .copied()
+        .partition(|app| app_can_host_spec(*app, &canonical_spec));
+    if hostable.is_empty() {
+        // Every selected agent was excluded (e.g. only Codex for an SSE server);
+        // fail instead of reporting success while writing nothing (and possibly
+        // returning a pre-existing server with the same id). See issue #325.
+        return Err(mcp_invalid_input(
+            "none of the selected agents can host this MCP server's transport (e.g. Codex does not support SSE)",
+        ));
+    }
+    // A selected-but-excluded app can't host this transport; remove any stale entry
+    // for this id there so it can't win scan precedence and reclassify the spec.
+    for app in excluded {
+        tracing::warn!(
+            "[MCP] {app:?} cannot host server '{server_id}' (transport unsupported); removing any stale entry"
+        );
+        let _ = remove_server_for_app(app, &server_id)?;
+    }
+    for app in hostable {
+        upsert_server_for_app(app, &server_id, &canonical_spec)?;
     }
 
     find_local_server(&server_id)?.ok_or_else(|| {
@@ -362,7 +382,22 @@ pub async fn mcp_upsert_local_server(
             .with_i18n("errors.appsRequired", BTreeMap::new()));
     }
 
-    let target_set = target_apps.iter().copied().collect::<BTreeSet<_>>();
+    // Preflight-exclude apps whose config can't host this transport (e.g. Codex +
+    // SSE) so a multi-agent save neither writes a misrepresented entry nor aborts
+    // the whole operation on the fail-fast `?` below. See issue #325.
+    let target_set = target_apps
+        .iter()
+        .copied()
+        .filter(|app| app_can_host_spec(*app, &canonical_spec))
+        .collect::<BTreeSet<_>>();
+    if target_set.is_empty() {
+        // Every selected agent was excluded (e.g. only Codex chosen for an SSE
+        // server). Surface a clear error rather than silently write nothing and then
+        // fail the reload below.
+        return Err(mcp_invalid_input(
+            "none of the selected agents can host this MCP server's transport (e.g. Codex does not support SSE)",
+        ));
+    }
     let all_apps = [
         McpAppType::ClaudeCode,
         McpAppType::Codex,
@@ -399,7 +434,23 @@ pub async fn mcp_set_server_apps(
     let current = find_local_server(&server_id)?
         .ok_or_else(|| mcp_not_found(format!("local MCP server not found: {server_id}")))?;
 
-    let target_set = target_apps.iter().copied().collect::<BTreeSet<_>>();
+    // Preflight-exclude apps whose config can't host this transport (e.g. Codex +
+    // SSE); such an app is treated as "not targeted" so any stale entry is removed
+    // rather than rewritten as a misrepresented one. See issue #325.
+    let target_set = target_apps
+        .iter()
+        .copied()
+        .filter(|app| app_can_host_spec(*app, &current.spec))
+        .collect::<BTreeSet<_>>();
+    if !target_apps.is_empty() && target_set.is_empty() {
+        // Every explicitly selected agent was excluded (e.g. only Codex chosen for
+        // an SSE server). Fail before mutating rather than silently delete the
+        // server; an explicit empty `apps` still means "remove from all" and is
+        // allowed to fall through.
+        return Err(mcp_invalid_input(
+            "none of the selected agents can host this MCP server's transport (e.g. Codex does not support SSE)",
+        ));
+    }
     let current_set = current.apps.iter().copied().collect::<BTreeSet<_>>();
 
     for app in current_set.difference(&target_set) {
@@ -450,6 +501,17 @@ fn normalize_apps(apps: Vec<McpAppType>) -> Vec<McpAppType> {
         seen.insert(app);
     }
     seen.into_iter().collect()
+}
+
+/// Whether `app`'s on-disk config can faithfully host `canonical_spec`. Codex's
+/// config.toml has only stdio and streamable-HTTP transports, so it cannot host an
+/// SSE server — writing one would persist a url-only entry that Codex loads as HTTP
+/// and codeg then reads back as `http`, silently reclassifying the shared canonical
+/// spec. Write paths preflight-exclude such (app, spec) pairs instead of writing a
+/// misrepresented entry or aborting the whole multi-agent operation. See issue #325.
+fn app_can_host_spec(app: McpAppType, canonical_spec: &Value) -> bool {
+    let is_sse = canonical_spec.get("type").and_then(Value::as_str) == Some("sse");
+    !(app == McpAppType::Codex && is_sse)
 }
 
 #[derive(Debug, Clone)]
@@ -1170,22 +1232,50 @@ fn codex_entry_to_canonical(id: &str, value: &toml::Value) -> Result<Value, AppC
         .as_table()
         .ok_or_else(|| mcp_invalid_input(format!("Codex MCP entry '{id}' must be a table")))?;
 
+    // Codex's native `[mcp_servers.*]` tables carry no `type` key — the transport
+    // is implied by the keys present (`command` = stdio, `url` = streamable HTTP).
+    // Honor an explicit `type` when present (older codeg output or hand-written
+    // configs), but when it is absent infer the transport from the keys rather
+    // than blindly assuming stdio, which would drop every url-only HTTP server
+    // (including the ones codeg now writes). See issue #325.
     let raw_type = table
         .get("type")
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("stdio")
-        .to_string();
-    let canonical_type = normalize_mcp_type(&raw_type).ok_or_else(|| {
-        mcp_invalid_input(format!(
-            "Codex MCP entry '{id}' has unsupported type '{raw_type}'"
-        ))
-        .with_i18n(
-            "errors.codexEntryUnsupportedType",
-            mcp_i18n_params([("id", id), ("type", raw_type.as_str())]),
-        )
-    })?;
+        .map(str::to_string);
+    let has_key = |key: &str| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    };
+    // Codex hard-errors on an entry that carries BOTH `command` and `url` (mixed
+    // transports). Reject it here rather than silently classifying it as stdio and
+    // dropping `url` — which would both misrepresent the entry and let a later save
+    // erase the conflicting field. Presence (not just non-empty) mirrors Codex's
+    // own `throw_if_set` check. See issue #325.
+    if table.contains_key("command") && table.contains_key("url") {
+        return Err(mcp_invalid_input(format!(
+            "Codex MCP entry '{id}' sets both 'command' and 'url'; Codex accepts exactly one transport"
+        )));
+    }
+    let canonical_type = match raw_type.as_deref() {
+        Some(raw) => normalize_mcp_type(raw).ok_or_else(|| {
+            mcp_invalid_input(format!(
+                "Codex MCP entry '{id}' has unsupported type '{raw}'"
+            ))
+            .with_i18n(
+                "errors.codexEntryUnsupportedType",
+                mcp_i18n_params([("id", id), ("type", raw)]),
+            )
+        })?,
+        // No `command` and no `url` falls back to stdio so the downstream
+        // canonicalize surfaces a clear "missing command" error.
+        None if has_key("url") && !has_key("command") => "http",
+        None => "stdio",
+    };
 
     let mut spec = Map::new();
     spec.insert(
@@ -1276,12 +1366,15 @@ fn codex_entry_to_canonical(id: &str, value: &toml::Value) -> Result<Value, AppC
             }
         }
         _ => {
+            // Reachable only when an explicit `type` normalized to an OpenCode-only
+            // alias (`local`/`remote`), which Codex TOML does not accept.
+            let raw = raw_type.as_deref().unwrap_or(canonical_type);
             return Err(mcp_invalid_input(format!(
-                "Codex MCP entry '{id}' has unsupported type '{raw_type}'"
+                "Codex MCP entry '{id}' has unsupported type '{raw}'"
             ))
             .with_i18n(
                 "errors.codexEntryUnsupportedType",
-                mcp_i18n_params([("id", id), ("type", raw_type.as_str())]),
+                mcp_i18n_params([("id", id), ("type", raw)]),
             ));
         }
     }
@@ -1312,8 +1405,14 @@ fn canonical_to_codex_entry(spec: &Value) -> Result<toml::Value, AppCommandError
 
     let typ = obj.get("type").and_then(Value::as_str).unwrap_or("stdio");
 
+    // Codex's config.toml has NO `type` field under `[mcp_servers.*]`: it infers
+    // the transport from the keys present — `command` = stdio, `url` = streamable
+    // HTTP. An emitted `type` is silently ignored on Codex's default read path but
+    // is schema-invalid (Codex's generated JSON-Schema rejects it) and FATAL under
+    // `codex --strict-config`, so the `type` discriminator is used only to branch
+    // here and is never written out. Same hazard for any other foreign key (see the
+    // allowlist below). See issue #325.
     let mut table = toml::map::Map::new();
-    table.insert("type".to_string(), toml::Value::String(typ.to_string()));
 
     match typ {
         "stdio" => {
@@ -1364,8 +1463,8 @@ fn canonical_to_codex_entry(spec: &Value) -> Result<toml::Value, AppCommandError
                 }
             }
         }
-        "http" | "sse" => {
-            // env intentionally not written for http/sse: per ACP/MCP spec, env is
+        "http" => {
+            // env intentionally not written for http: per ACP/MCP spec, env is
             // stdio-only; remote transports use headers. canonicalize_spec strips
             // env upstream too.
             let url = obj.get("url").and_then(Value::as_str).ok_or_else(|| {
@@ -1393,6 +1492,18 @@ fn canonical_to_codex_entry(spec: &Value) -> Result<toml::Value, AppCommandError
                 }
             }
         }
+        "sse" => {
+            // Codex's config.toml has only stdio and streamable-HTTP transports — it
+            // cannot represent SSE. Reject rather than degrade to a bare `url`, which
+            // Codex would load as HTTP and codeg would then read back as `http`,
+            // silently reclassifying the shared canonical spec (and defeating the ACP
+            // wire-path SSE capability gate). Batch callers preflight-exclude Codex
+            // from an SSE server's targets (see `app_can_host_spec`); this is the
+            // backstop for any direct caller. See issue #325.
+            return Err(mcp_invalid_input(
+                "Codex conversion: SSE MCP servers are not supported by Codex; use streamable HTTP",
+            ));
+        }
         _ => {
             return Err(mcp_invalid_input(format!(
                 "Codex conversion: unsupported MCP type '{typ}'"
@@ -1400,15 +1511,22 @@ fn canonical_to_codex_entry(spec: &Value) -> Result<toml::Value, AppCommandError
         }
     }
 
+    // Pass through only Codex `RawMcpServerConfig` fields that are transport-agnostic
+    // AND validated to have Codex's exact value type here. A field-name allowlist
+    // alone is not enough: canonicalization preserves arbitrary values, so a
+    // same-named foreign field of the wrong shape (e.g. `"enabled": "false"`, or a
+    // number where Codex wants a bool) would be written to Codex TOML and fail strict
+    // deserialization — the same class of bug as the `type` field. Transport-specific
+    // or complex/uncertain fields (env_vars, auth, oauth, tools, bearer_token_env_var,
+    // startup_timeout_*, name, …) are emitted by the transport arms where they belong
+    // or intentionally NOT round-tripped — a rare, non-fatal loss versus a
+    // `--strict-config` failure. See issue #325.
     for (key, value) in obj {
-        if key == "type"
-            || key == "command"
-            || key == "args"
-            || key == "env"
-            || key == "cwd"
-            || key == "url"
-            || key == "headers"
-        {
+        let allowed = match key.as_str() {
+            "enabled" | "required" => value.is_boolean(),
+            _ => false,
+        };
+        if !allowed {
             continue;
         }
         if let Some(converted) = json_to_toml_value(value) {
@@ -2135,6 +2253,28 @@ fn read_cline_servers() -> Result<BTreeMap<String, Value>, AppCommandError> {
     Ok(out)
 }
 
+/// Convert codeg's canonical spec into a Cline `mcpServers` entry.
+///
+/// Cline validates each entry with a zod union whose `type` is a literal enum of
+/// exactly `stdio | sse | streamableHttp` — it does NOT accept the canonical
+/// `http`. Worse, `mcpServers` is validated as one `z.record`, so a single
+/// rejected entry makes Cline load *zero* servers. Remap `http` → `streamableHttp`
+/// (which codeg's reader collapses straight back to canonical `http` via
+/// `normalize_mcp_type`); stdio/sse already match Cline's literals and pass
+/// through untouched. See issue #325.
+fn canonical_to_cline_entry(spec: &Value) -> Result<Value, AppCommandError> {
+    let mut canonical = canonicalize_spec(spec, "Cline write")?;
+    if let Some(obj) = canonical.as_object_mut() {
+        if obj.get("type").and_then(Value::as_str) == Some("http") {
+            obj.insert(
+                "type".to_string(),
+                Value::String("streamableHttp".to_string()),
+            );
+        }
+    }
+    Ok(canonical)
+}
+
 fn upsert_cline_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
     let path = cline_config_path();
     let mut root = read_json_file(&path)?;
@@ -2142,7 +2282,7 @@ fn upsert_cline_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
         root = json!({});
     }
 
-    let canonical = canonicalize_spec(spec, "Cline write")?;
+    let canonical = canonical_to_cline_entry(spec)?;
 
     let obj = root.as_object_mut().ok_or_else(|| {
         mcp_configuration_invalid(format!("invalid JSON root in {}", path.display()))
@@ -2321,6 +2461,54 @@ fn read_kimi_code_servers() -> Result<BTreeMap<String, Value>, AppCommandError> 
     read_kimi_code_servers_at(&kimi_code_mcp_json_path())
 }
 
+/// Convert one Kimi `mcpServers` entry into codeg's canonical spec.
+///
+/// Kimi Code 0.23.3 validates `mcp.json` with a Zod discriminated union keyed on
+/// `transport` (`stdio`/`http`/`sse`): `command` ⇒ stdio, and a url-only remote
+/// entry DEFAULTS to streamable HTTP — it never infers SSE from the URL path, and
+/// `type` is not a recognized field (silently stripped). Mirror that so codeg
+/// classifies an entry the way Kimi actually will: stdio from `command`; otherwise
+/// a `url` is remote with transport taken from an explicit `transport` key (only
+/// `sse` yields SSE), else HTTP. `type` is intentionally NOT consulted for remote
+/// (Kimi ignores it). `transport` is then dropped from the canonical spec so it
+/// can't leak into another agent's config on a cross-agent sync. See issue #325.
+fn kimi_code_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, AppCommandError> {
+    let Some(obj) = spec.as_object() else {
+        return canonicalize_spec(spec, "Kimi Code config");
+    };
+    let mut obj = obj.clone();
+    // Kimi 0.23.3 keys the transport off the `transport` DISCRIMINANT whenever it is
+    // present (exact literals `stdio`/`http`/`sse`, and it overrides `command`/`url`
+    // shape); only when `transport` is ABSENT does it infer (`command` ⇒ stdio,
+    // `url` ⇒ http). Crucially, Kimi never consults `type` — it strips it — so drop
+    // any on-disk `type` up front: an explicit `transport` sets the canonical type
+    // below, and an absent one leaves classification to canonicalize's own
+    // command⇒stdio / url⇒http inference (matching Kimi) rather than a stale `type`.
+    // `transport` is likewise dropped after mapping so it can't leak into another
+    // agent's config on a cross-agent sync. See issue #325.
+    obj.remove("type");
+    // Read the discriminant into an owned value first so the map isn't borrowed when
+    // we mutate it below. `transport` absent ⇒ infer; present-but-non-string or an
+    // unknown literal ⇒ reject (as Kimi would).
+    let explicit_transport = obj.get("transport").and_then(Value::as_str).map(str::to_string);
+    if obj.contains_key("transport") {
+        let canonical_type = match explicit_transport.as_deref() {
+            Some("stdio") => "stdio",
+            Some("http") => "http",
+            Some("sse") => "sse",
+            other => {
+                let shown = other.unwrap_or("<non-string>");
+                return Err(mcp_invalid_input(format!(
+                    "Kimi Code config '{id}': unsupported transport '{shown}' (Kimi accepts only \"stdio\", \"http\", or \"sse\")"
+                )));
+            }
+        };
+        obj.insert("type".to_string(), Value::String(canonical_type.to_string()));
+    }
+    obj.remove("transport");
+    canonicalize_spec(&Value::Object(obj), &format!("Kimi Code config '{id}'"))
+}
+
 fn read_kimi_code_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, AppCommandError> {
     let root = read_json_file(path)?;
     let mut out = BTreeMap::new();
@@ -2330,7 +2518,7 @@ fn read_kimi_code_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, App
     };
 
     for (id, spec) in servers {
-        match canonicalize_spec(spec, "Kimi Code config") {
+        match kimi_code_entry_to_canonical(spec, id) {
             Ok(normalized) => {
                 out.insert(id.to_string(), normalized);
             }
@@ -2341,6 +2529,50 @@ fn read_kimi_code_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, App
     }
 
     Ok(out)
+}
+
+/// Convert codeg's canonical spec into a Kimi `mcpServers` entry.
+///
+/// Kimi Code 0.23.3 keys the transport off a `transport` field (Zod
+/// discriminated union), defaulting a url-only remote entry to streamable HTTP — an
+/// SSE server MUST carry an explicit `transport: "sse"` or it silently downgrades to
+/// HTTP. So emit `transport` for remote entries. The streamable-HTTP literal is
+/// `"http"` (NOT `"streamable-http"`, which Kimi rejects — and one bad entry fails
+/// the whole `mcpServers` record). stdio needs no `transport` (Kimi injects it from
+/// `command`). The canonical `type` is left in place but Kimi ignores/strips it.
+/// See issue #325.
+fn canonical_to_kimi_code_entry(spec: &Value) -> Result<Value, AppCommandError> {
+    let canonical = canonicalize_spec(spec, "Kimi Code write")?;
+    let Some(obj) = canonical.as_object() else {
+        return Ok(canonical);
+    };
+    let transport = match obj.get("type").and_then(Value::as_str) {
+        Some("http") => Some("http"),
+        Some("sse") => Some("sse"),
+        _ => None, // stdio: Kimi infers the transport from `command`
+    };
+    // Emit only the fields Kimi models, each validated to its expected type — the
+    // same guard the Codex writer uses. Kimi validates its known fields and rejects
+    // the ENTIRE `mcpServers` record on a wrong-typed one (e.g. `"enabled": "false"`),
+    // so a stray same-named foreign value must not ride canonicalize's passthrough
+    // onto disk. The canonical `command`/`args`/`env`/`cwd`/`url`/`headers` already
+    // carry Kimi-compatible types; `type` is kept but Kimi ignores/strips it.
+    // See issue #325.
+    let mut out = Map::new();
+    for (key, value) in obj {
+        let keep = match key.as_str() {
+            "type" | "command" | "args" | "env" | "cwd" | "url" | "headers" => true,
+            "enabled" => value.is_boolean(),
+            _ => false,
+        };
+        if keep {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(transport) = transport {
+        out.insert("transport".to_string(), Value::String(transport.to_string()));
+    }
+    Ok(Value::Object(out))
 }
 
 fn upsert_kimi_code_server(id: &str, spec: &Value) -> Result<(), AppCommandError> {
@@ -2357,7 +2589,7 @@ fn upsert_kimi_code_server_at(
         root = json!({});
     }
 
-    let canonical = canonicalize_spec(spec, "Kimi Code write")?;
+    let canonical = canonical_to_kimi_code_entry(spec)?;
 
     let obj = root.as_object_mut().ok_or_else(|| {
         mcp_configuration_invalid(format!("invalid JSON root in {}", path.display()))
@@ -4558,6 +4790,338 @@ mod tests {
             assert!(
                 codex_entry_to_canonical("ex", &value).is_err(),
                 "raw {raw:?} should not be accepted by Codex pipeline",
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_to_codex_entry_never_emits_type_field() {
+        // Codex infers the transport from the keys present; an emitted `type` is
+        // schema-invalid and fatal under `codex --strict-config` (#325). No
+        // transport may emit it.
+        let stdio = canonical_to_codex_entry(&json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "tavily-mcp@0.2.15"],
+        }))
+        .expect("stdio entry")
+        .as_table()
+        .cloned()
+        .expect("stdio table");
+        assert!(!stdio.contains_key("type"), "stdio must not carry type");
+        assert_eq!(
+            stdio.get("command").and_then(toml::Value::as_str),
+            Some("npx")
+        );
+
+        let http = canonical_to_codex_entry(&json!({
+            "type": "http",
+            "url": "https://mcp.exa.ai/mcp",
+        }))
+        .expect("http entry")
+        .as_table()
+        .cloned()
+        .expect("http table");
+        assert!(!http.contains_key("type"), "http must not carry type");
+        assert_eq!(
+            http.get("url").and_then(toml::Value::as_str),
+            Some("https://mcp.exa.ai/mcp")
+        );
+
+        // Codex can't represent SSE (its config.toml has only stdio + streamable
+        // HTTP); the writer rejects it rather than degrade to a bare `url` that
+        // would read back as `http` and reclassify the shared spec.
+        assert!(
+            canonical_to_codex_entry(&json!({
+                "type": "sse",
+                "url": "https://mcp.example.com/sse",
+            }))
+            .is_err(),
+            "sse must be rejected for Codex"
+        );
+    }
+
+    #[test]
+    fn app_can_host_spec_excludes_codex_from_sse_only() {
+        let sse = json!({"type": "sse", "url": "https://x/sse"});
+        let http = json!({"type": "http", "url": "https://x/mcp"});
+        let stdio = json!({"type": "stdio", "command": "npx"});
+        // Codex can host stdio/http but not sse.
+        assert!(!app_can_host_spec(McpAppType::Codex, &sse));
+        assert!(app_can_host_spec(McpAppType::Codex, &http));
+        assert!(app_can_host_spec(McpAppType::Codex, &stdio));
+        // Every other agent can host sse.
+        assert!(app_can_host_spec(McpAppType::Gemini, &sse));
+        assert!(app_can_host_spec(McpAppType::Cline, &sse));
+        assert!(app_can_host_spec(McpAppType::KimiCode, &sse));
+    }
+
+    #[test]
+    fn codex_entry_infers_transport_when_type_absent() {
+        // Native Codex tables (and codeg's own post-#325 output) carry no `type`;
+        // the reader must infer it from the transport keys, not assume stdio (which
+        // silently dropped every url-only server). Mirrors the issue's config.
+        let http = codex_entry("url = \"https://mcp.exa.ai/mcp\"\n");
+        let canonical = codex_entry_to_canonical("exa", &http).expect("url-only entry");
+        assert_eq!(canonical.get("type").and_then(Value::as_str), Some("http"));
+        assert_eq!(
+            canonical.get("url").and_then(Value::as_str),
+            Some("https://mcp.exa.ai/mcp")
+        );
+
+        let stdio = codex_entry("command = \"npx\"\nargs = [\"-y\", \"tavily-mcp@0.2.15\"]\n");
+        let canonical = codex_entry_to_canonical("tavily", &stdio).expect("command-only entry");
+        assert_eq!(canonical.get("type").and_then(Value::as_str), Some("stdio"));
+        assert_eq!(
+            canonical.get("command").and_then(Value::as_str),
+            Some("npx")
+        );
+    }
+
+    #[test]
+    fn codex_write_read_round_trips_without_type_key() {
+        // The writer's output must read back to the same canonical spec with no
+        // `type` ever hitting disk. (sse is excluded: Codex rejects it — covered by
+        // `canonical_to_codex_entry_never_emits_type_field`.)
+        for spec in [
+            json!({"type": "stdio", "command": "npx", "args": ["-y", "srv"], "env": {"A": "b"}}),
+            json!({"type": "http", "url": "https://mcp.exa.ai/mcp"}),
+        ] {
+            let entry = canonical_to_codex_entry(&spec).expect("to codex entry");
+            assert!(
+                !entry.as_table().expect("table").contains_key("type"),
+                "no type on disk for {spec}"
+            );
+            let back = codex_entry_to_canonical("id", &entry).expect("read back");
+            assert_eq!(
+                back.get("type").and_then(Value::as_str),
+                spec.get("type").and_then(Value::as_str),
+                "round-trip type for {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_to_cline_entry_remaps_http_to_streamable_http() {
+        // Cline's zod `type` literal accepts only stdio|sse|streamableHttp; the
+        // canonical `http` must become `streamableHttp` or Cline drops every
+        // server (#325). stdio/sse pass through unchanged.
+        let http = canonical_to_cline_entry(&json!({
+            "type": "http",
+            "url": "https://mcp.exa.ai/mcp",
+        }))
+        .expect("http entry");
+        assert_eq!(
+            http.get("type").and_then(Value::as_str),
+            Some("streamableHttp"),
+            "http must be remapped for Cline"
+        );
+        assert_eq!(
+            http.get("url").and_then(Value::as_str),
+            Some("https://mcp.exa.ai/mcp")
+        );
+
+        let stdio = canonical_to_cline_entry(&json!({"type": "stdio", "command": "npx"}))
+            .expect("stdio entry");
+        assert_eq!(stdio.get("type").and_then(Value::as_str), Some("stdio"));
+
+        let sse = canonical_to_cline_entry(&json!({"type": "sse", "url": "https://x/sse"}))
+            .expect("sse entry");
+        assert_eq!(sse.get("type").and_then(Value::as_str), Some("sse"));
+
+        // And codeg reads `streamableHttp` straight back to canonical `http`.
+        let round_trip = canonicalize_spec(
+            &json!({"type": "streamableHttp", "url": "https://mcp.exa.ai/mcp"}),
+            "test",
+        )
+        .expect("canonicalize streamableHttp");
+        assert_eq!(round_trip.get("type").and_then(Value::as_str), Some("http"));
+    }
+
+    #[test]
+    fn canonical_to_kimi_code_entry_pins_remote_transport() {
+        // Kimi 0.23.3 keys the transport off `transport` (defaulting url-only to
+        // HTTP), so codeg must emit an explicit `transport` or an SSE server silently
+        // downgrades to HTTP (#325). stdio is left as-is (Kimi infers it from
+        // `command`).
+        let sse = canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
+            .expect("sse entry");
+        assert_eq!(sse.get("transport").and_then(Value::as_str), Some("sse"));
+        assert_eq!(sse.get("type").and_then(Value::as_str), Some("sse"));
+
+        let http = canonical_to_kimi_code_entry(&json!({"type": "http", "url": "https://x/mcp"}))
+            .expect("http entry");
+        assert_eq!(http.get("transport").and_then(Value::as_str), Some("http"));
+
+        let stdio = canonical_to_kimi_code_entry(&json!({"type": "stdio", "command": "npx"}))
+            .expect("stdio entry");
+        assert!(
+            stdio.get("transport").is_none(),
+            "stdio must not carry a transport key"
+        );
+    }
+
+    #[test]
+    fn kimi_code_entry_reads_native_transport_and_never_leaks_it() {
+        // A native Kimi SSE entry uses `transport: "sse"`, not `type`; the reader
+        // must classify it as sse from that explicit `transport` and must NOT surface
+        // `transport` in the canonical spec — otherwise it would leak into e.g. Codex
+        // TOML when the same server is later synced to another agent (#325).
+        let native_sse = json!({"url": "https://x/stream", "transport": "sse"});
+        let canonical = kimi_code_entry_to_canonical(&native_sse, "srv").expect("native sse");
+        assert_eq!(canonical.get("type").and_then(Value::as_str), Some("sse"));
+        assert!(
+            canonical.get("transport").is_none(),
+            "transport must be consumed, never leaked into the canonical spec"
+        );
+
+        // Full writer→reader round-trip stays canonical and transport-free.
+        let written = canonical_to_kimi_code_entry(&json!({"type": "sse", "url": "https://x/stream"}))
+            .expect("write sse");
+        let back = kimi_code_entry_to_canonical(&written, "srv").expect("read back");
+        assert_eq!(back.get("type").and_then(Value::as_str), Some("sse"));
+        assert!(back.get("transport").is_none());
+    }
+
+    #[test]
+    fn kimi_code_entry_mirrors_kimi_0_23_transport_selection() {
+        // Kimi Code 0.23.3 defaults a url-only remote entry to HTTP and does NOT
+        // infer SSE from a `/sse` URL path — only an explicit `transport: "sse"`
+        // yields SSE. (Corrects the earlier FastMCP-based reader; verified against
+        // the published 0.23.3 Zod schema.)
+        let sse_url = kimi_code_entry_to_canonical(&json!({"url": "https://host/sse"}), "s")
+            .expect("url-only /sse");
+        assert_eq!(
+            sse_url.get("type").and_then(Value::as_str),
+            Some("http"),
+            "url-only must be http, not sse-from-url"
+        );
+
+        let http_url = kimi_code_entry_to_canonical(&json!({"url": "https://host/mcp"}), "s")
+            .expect("url-only");
+        assert_eq!(http_url.get("type").and_then(Value::as_str), Some("http"));
+
+        // An on-disk `type` with NO `transport` does not classify: Kimi strips `type`
+        // and infers HTTP from the url, so codeg must too (not report it as SSE).
+        let stale_type = kimi_code_entry_to_canonical(
+            &json!({"type": "sse", "url": "https://host/mcp"}),
+            "s",
+        )
+        .expect("type-without-transport");
+        assert_eq!(stale_type.get("type").and_then(Value::as_str), Some("http"));
+
+        // Explicit `transport: "sse"` yields SSE (and `type` is ignored, matching
+        // Kimi); `transport` is stripped from the canonical spec.
+        let sse = kimi_code_entry_to_canonical(
+            &json!({"type": "http", "url": "https://host/mcp", "transport": "sse"}),
+            "s",
+        )
+        .expect("explicit sse");
+        assert_eq!(sse.get("type").and_then(Value::as_str), Some("sse"));
+        assert!(sse.get("transport").is_none());
+
+        // An explicit unknown transport Kimi would hard-reject is surfaced as an
+        // invalid entry, not reported as an active server. (`stdio` on a url-only
+        // entry is likewise invalid — Kimi's stdio variant requires `command`.)
+        for bad in ["streamable-http", "ws", "stdio"] {
+            assert!(
+                kimi_code_entry_to_canonical(
+                    &json!({"url": "https://host/mcp", "transport": bad}),
+                    "s"
+                )
+                .is_err(),
+                "transport {bad:?} must be rejected"
+            );
+        }
+        // A non-string transport is rejected too (Kimi's literals are exact).
+        assert!(
+            kimi_code_entry_to_canonical(&json!({"url": "https://host/mcp", "transport": 3}), "s")
+                .is_err()
+        );
+
+        // The `transport` discriminant wins over the entry's key shape: an explicit
+        // `sse` on an entry that ALSO carries `command` is SSE (Kimi ignores the
+        // extra `command`), not stdio.
+        let sse_over_cmd = kimi_code_entry_to_canonical(
+            &json!({"transport": "sse", "command": "npx", "url": "https://host/mcp"}),
+            "s",
+        )
+        .expect("transport wins over command");
+        assert_eq!(sse_over_cmd.get("type").and_then(Value::as_str), Some("sse"));
+    }
+
+    #[test]
+    fn canonical_to_kimi_code_entry_drops_wrong_typed_and_foreign_fields() {
+        // Kimi validates its known fields and rejects the whole `mcpServers` record on
+        // a wrong-typed one, so the writer must not let a stray same-named foreign
+        // value ride canonicalize's passthrough onto disk. See #325.
+        let entry = canonical_to_kimi_code_entry(&json!({
+            "type": "http",
+            "url": "https://host/mcp",
+            "enabled": "false",   // wrong shape (string, not bool) → dropped
+            "autoApprove": ["a"], // foreign key → dropped
+        }))
+        .expect("http entry");
+        let obj = entry.as_object().expect("object");
+        assert_eq!(obj.get("transport").and_then(Value::as_str), Some("http"));
+        assert!(!obj.contains_key("enabled"), "wrong-typed enabled must be dropped");
+        assert!(!obj.contains_key("autoApprove"), "foreign key must be dropped");
+
+        // A correctly-typed `enabled` bool is preserved.
+        let ok = canonical_to_kimi_code_entry(&json!({
+            "type": "http", "url": "https://host/mcp", "enabled": true,
+        }))
+        .expect("http entry");
+        assert_eq!(
+            ok.as_object().and_then(|o| o.get("enabled")).and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn codex_entry_rejects_both_command_and_url() {
+        // Codex hard-errors on a mixed-transport entry; codeg must reject it rather
+        // than silently classify as stdio and drop the `url` (#325).
+        let both = codex_entry("command = \"npx\"\nurl = \"https://x/mcp\"\n");
+        assert!(codex_entry_to_canonical("mixed", &both).is_err());
+        // Rejected even when an explicit (legacy) type is present.
+        let both_typed =
+            codex_entry("type = \"stdio\"\ncommand = \"npx\"\nurl = \"https://x/mcp\"\n");
+        assert!(codex_entry_to_canonical("mixed", &both_typed).is_err());
+    }
+
+    #[test]
+    fn canonical_to_codex_entry_passthrough_is_type_validated() {
+        // Foreign keys, transport-specific fields, and — crucially — same-named
+        // fields of the WRONG shape must NOT reach Codex TOML; each is fatal under
+        // --strict-config. Only transport-agnostic fields validated to Codex's exact
+        // type pass through. See #325.
+        let entry = canonical_to_codex_entry(&json!({
+            "type": "http",
+            "url": "https://mcp.exa.ai/mcp",
+            "enabled": true,             // valid Codex bool → kept
+            "required": "yes",           // wrong shape (string, not bool) → dropped
+            "autoApprove": ["a"],        // foreign key → dropped
+            "transport": "sse",          // canonical-only discriminator → dropped
+            "env_vars": [{"name": "X"}], // stdio-only, wrong arm here → dropped
+            "startup_timeout_sec": 10.0, // not in the minimal allowlist → dropped
+        }))
+        .expect("http entry")
+        .as_table()
+        .cloned()
+        .expect("table");
+        assert_eq!(entry.get("enabled").and_then(toml::Value::as_bool), Some(true));
+        for dropped in [
+            "type",
+            "required",
+            "autoApprove",
+            "transport",
+            "env_vars",
+            "startup_timeout_sec",
+        ] {
+            assert!(
+                !entry.contains_key(dropped),
+                "'{dropped}' must be dropped from Codex TOML"
             );
         }
     }
